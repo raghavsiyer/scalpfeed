@@ -26,16 +26,16 @@ internal static class PrintFilter
         && conditions[3] == 'o';
 
     /// <summary>
-    /// IBKR venues whose prints already come from tastytrade, and sooner. Merging only the other
-    /// venues means the two feeds never overlap, so nothing has to be matched print by print.
-    /// Overnight is here until a session shows tastytrade's overnight prints are a different set.
+    /// IBKR venues whose prints are all on tastytrade's tape, and reach it sooner: Nasdaq's own
+    /// markets, which Nasdaq Last Sale always includes. FINRA isn't here because only part of it is
+    /// on that tape, which TapeMerge sorts out print by print.
     /// </summary>
     public static bool IsCarriedByTastytrade(ReadOnlySpan<byte> venue) =>
         venue.SequenceEqual("NASDAQ"u8)
         || venue.SequenceEqual("BEX"u8)
-        || venue.SequenceEqual("PSX"u8)
-        || venue.SequenceEqual("FINRA"u8)
-        || venue.SequenceEqual("OVERNIGHT"u8);
+        || venue.SequenceEqual("PSX"u8);
+
+    public const string ReportedVenue = "FINRA";
 
     /// <summary>
     /// IBKR's condition codes for what tastytrade marks invalid and PrintFilter hides, plus special

@@ -79,6 +79,18 @@ switch (args[0])
     case "stayawake":
         Check(StayAwake.Renew(), "Windows accepts the stay-awake request");
         break;
+    case "tapemerge":
+        RunTapeMerge();
+        break;
+    case "mergereplay":
+        RunMergeReplay(args[1], args[2]);
+        break;
+    case "ibkrbars":
+        await RunIbkrBars();
+        break;
+    case "ibkrbarslive":
+        await RunIbkrBarsLive(int.Parse(args[1]), args[2]);
+        break;
     case "tnsmatrix":
         await RunTnsMatrix(args[1], int.Parse(args[2]), args.Length > 3 && args[3] == "delayed");
         break;
@@ -187,6 +199,312 @@ async Task RunDepthPacing()
     Check(again.Select(r => r.Symbol).Distinct().Count() == again.Count && again.Count == 3, $"each wanted symbol is requested once after a reconnect ({again.Count})");
     Check(gateway.MostUnanswered <= 1, "still one at a time after a reconnect");
 
+    await client.StopAsync();
+}
+
+// The rules of the merged tape, with no feed involved.
+void RunTapeMerge()
+{
+    long second = TimeSpan.TicksPerSecond;
+    long t = 1000 * second;
+
+    var m = new TapeMerge();
+    Check(m.OnTastytradePrint(2.38, 100, 500, t) && !m.OnIbkrReportedPrint(2.38, 100, 500, t + second), "a FINRA print tastytrade already showed doesn't show again");
+    Check(m.OnIbkrReportedPrint(2.40, 100, 501, t) && !m.OnTastytradePrint(2.40, 100, 501, t + second), "whichever feed brings it first shows it");
+    Check(m.OnIbkrReportedPrint(2.41, 300, 501, t) && m.OnIbkrReportedPrint(2.41, 300, 501, t), "a FINRA print tastytrade doesn't have shows, twice if it traded twice");
+
+    m = new TapeMerge();
+    m.OnTastytradePrint(2.38, 100, 500, t);
+    m.OnTastytradePrint(2.38, 100, 500, t);
+    Check(!m.OnIbkrReportedPrint(2.38, 100, 500, t) && !m.OnIbkrReportedPrint(2.38, 100, 500, t), "two identical prints match two");
+    Check(m.OnIbkrReportedPrint(2.38, 100, 500, t), "a third identical print is a different trade");
+
+    m = new TapeMerge();
+    m.OnTastytradePrint(2.38, 100, 500, t);
+    m.OnIbkrCarriedPrint(2.38, 100, 500, t);
+    Check(m.OnIbkrReportedPrint(2.38, 100, 500, t), "a Nasdaq print uses up its partner, so a FINRA print can't match it");
+
+    m = new TapeMerge();
+    m.OnTastytradePrint(0.0591, 10731, 500, t);
+    Check(!m.OnIbkrReportedPrint(0.059, 10731, 500, t), "a sub-penny price rounded differently still matches (0.0591 and 0.059)");
+    m.OnTastytradePrint(0.0595, 100, 500, t);
+    Check(m.OnIbkrReportedPrint(0.0592, 100, 500, t), "a different price doesn't match");
+    m.OnTastytradePrint(5.25, 100, 500, t);
+    Check(m.OnIbkrReportedPrint(5.25, 101, 500, t), "a different size doesn't match");
+    m.OnTastytradePrint(7.25, 735.378, 500, t);
+    Check(!m.OnIbkrReportedPrint(7.25, 735, 500, t), "a fractional size matches its whole shares");
+    m.OnTastytradePrint(735.4799, 200, 500, t);
+    Check(!m.OnIbkrReportedPrint(735.48, 200, 500, t), "a price IBKR rounded to the cent still matches");
+    m.OnTastytradePrint(735.465, 89, 500, t);
+    Check(!m.OnIbkrReportedPrint(735.47, 89, 500, t), "so does one rounded from exactly half a cent");
+    m.OnTastytradePrint(0.0519, 500, 500, t);
+    Check(m.OnIbkrReportedPrint(0.05, 500, 500, t), "under a dollar, being within a cent isn't a match");
+    m.OnIbkrCarriedPrint(3.25, 150, 500, t);
+    Check(m.OnTastytradePrint(3.25, 150, 500, t) && m.OnIbkrReportedPrint(3.25, 150, 500, t), "a Nasdaq print IBKR brought first can't be taken for a FINRA one when tastytrade's copy comes");
+    Check(m.OnIbkrReportedPrint(4.25, 100, 500, t) && m.OnTastytradePrint(4.25, 100, 502, t + (2 * second)), "a later trade at the same price and size on tastytrade isn't taken for an earlier FINRA print");
+    m.OnTastytradePrint(735.46, 300, 500, t);
+    Check(m.OnIbkrReportedPrint(735.47, 300, 500, t), "a different cent doesn't match");
+    Check(m.OnTastytradePrint(190.3988, 0.0677, 500, t), "a print under one share has no partner, and shows");
+
+    m = new TapeMerge();
+    m.OnTastytradePrint(2.38, 100, 500, t);
+    Check(m.OnIbkrReportedPrint(2.38, 100, 504, t), "4 seconds apart is a different trade");
+    Check(!m.OnIbkrReportedPrint(2.38, 100, 503, t), "3 seconds apart is the same trade");
+    m.OnTastytradePrint(2.38, 100, 500, t);
+    Check(m.OnIbkrReportedPrint(2.38, 100, 500, t + (7 * second)), "nothing is held on to past its time");
+}
+
+// The real merge class over two recordings, in the order they arrived on this PC.
+void RunMergeReplay(string tapePath, string capturePath)
+{
+    var ibkr = File.ReadLines(tapePath).Select(l => l.Split('\t')).Where(p => p.Length == 8 && p[2] == "SMART")
+        .Select(p => (Arrival: double.Parse(p[0], CultureInfo.InvariantCulture), Symbol: p[1], Seconds: (long)double.Parse(p[3], CultureInfo.InvariantCulture), Price: double.Parse(p[4], CultureInfo.InvariantCulture), Size: double.Parse(p[5], CultureInfo.InvariantCulture), Venue: p[6]))
+        .ToList();
+
+    var layouts = new Dictionary<(int, string), string[]>();
+    var tasty = new List<(double Arrival, string Symbol, long Seconds, double Price, double Size)>();
+    foreach (var line in File.ReadLines(capturePath))
+    {
+        var parts = line.Split('\t', 2);
+        if (parts.Length != 2 || !parts[1].Contains("\"type\":\"FEED_", StringComparison.Ordinal))
+            continue;
+
+        JsonNode message;
+        try { message = JsonNode.Parse(parts[1]); } catch (JsonException) { continue; }
+        if ((string)message["type"] == "FEED_CONFIG" && message["eventFields"] is JsonObject fields)
+        {
+            foreach (var (name, list) in fields)
+                layouts[((int)message["channel"], name)] = list.AsArray().Select(x => (string)x).ToArray();
+        }
+        else if ((string)message["type"] == "FEED_DATA" && (int)message["channel"] == 1)
+        {
+            var data = message["data"].AsArray();
+            for (int i = 0; i + 1 < data.Count; i += 2)
+            {
+                string name = (string)data[i];
+                if (name != "TimeAndSale" || !layouts.TryGetValue((1, name), out var row))
+                    continue;
+
+                var values = data[i + 1].AsArray();
+                for (int j = 0; j + row.Length <= values.Count; j += row.Length)
+                {
+                    int Field(string f) => j + Array.IndexOf(row, f);
+                    if (((int?)values[Field("eventFlags")] ?? 0) % 4 >= 2)
+                        continue;
+                    tasty.Add((double.Parse(parts[0], CultureInfo.InvariantCulture), (string)values[Field("eventSymbol")], (long)values[Field("time")] / 1000, (double)values[Field("price")], (double)values[Field("size")]));
+                }
+            }
+        }
+    }
+
+    foreach (var symbol in ibkr.Select(r => r.Symbol).Distinct().OrderBy(s => s, StringComparer.Ordinal))
+    {
+        var i = ibkr.Where(r => r.Symbol == symbol).ToList();
+        var a = tasty.Where(r => r.Symbol == symbol).ToList();
+        if (a.Count == 0)
+            continue;
+
+        // Well inside both recordings, so no print loses its partner to the edge.
+        long begin = Math.Max(i.Min(r => r.Seconds), a.Min(r => r.Seconds)) + 10;
+        long end = Math.Min(i.Max(r => r.Seconds), a.Max(r => r.Seconds)) - 10;
+        var events = new List<(double Arrival, bool FromIbkr, long Seconds, double Price, double Size, string Venue)>();
+        events.AddRange(i.Where(r => r.Seconds >= begin && r.Seconds <= end).Select(r => (r.Arrival, true, r.Seconds, r.Price, r.Size, r.Venue)));
+        events.AddRange(a.Where(r => r.Seconds >= begin && r.Seconds <= end).Select(r => (r.Arrival, false, r.Seconds, r.Price, r.Size, "")));
+        events.Sort((x, y) => x.Arrival.CompareTo(y.Arrival));
+
+        var merge = new TapeMerge();
+        double shownTasty = 0, shownOther = 0, shownFinra = 0, tape = 0, droppedTasty = 0;
+        int finraMatched = 0, finraShown = 0;
+
+        // The running difference by print second. A real loss stays in it; one print's two copies
+        // landing either side of the window's edge shows only in the last few seconds.
+        var gapBySecond = new SortedDictionary<long, double>();
+        void Gap(long seconds, double shares) => gapBySecond[seconds] = gapBySecond.GetValueOrDefault(seconds) + shares;
+        foreach (var e in events)
+        {
+            long ticks = (long)(e.Arrival * TimeSpan.TicksPerMillisecond);
+            if (!e.FromIbkr)
+            {
+                if (merge.OnTastytradePrint(e.Price, e.Size, e.Seconds, ticks))
+                {
+                    shownTasty += e.Size;
+                    Gap(e.Seconds, e.Size);
+                }
+                else
+                {
+                    droppedTasty += e.Size;
+                }
+
+                continue;
+            }
+
+            tape += e.Size;
+            Gap(e.Seconds, -e.Size);
+            if (PrintFilter.IsCarriedByTastytrade(Encoding.ASCII.GetBytes(e.Venue)))
+            {
+                merge.OnIbkrCarriedPrint(e.Price, e.Size, e.Seconds, ticks);
+            }
+            else if (e.Venue == PrintFilter.ReportedVenue)
+            {
+                if (merge.OnIbkrReportedPrint(e.Price, e.Size, e.Seconds, ticks))
+                {
+                    shownFinra += e.Size;
+                    finraShown++;
+                    Gap(e.Seconds, e.Size);
+                }
+                else
+                {
+                    finraMatched++;
+                }
+            }
+            else
+            {
+                shownOther += e.Size;
+                Gap(e.Seconds, e.Size);
+            }
+        }
+
+        double running = 0, biggest = 0, atFiveBefore = 0, atFirstTen = 0;
+        foreach (var (second, gap) in gapBySecond)
+        {
+            running += gap;
+            if (Math.Abs(running) > Math.Abs(biggest))
+                biggest = running;
+            if (second <= begin + 10)
+                atFirstTen = running;
+            if (second <= end - 5)
+                atFiveBefore = running;
+        }
+
+        Console.WriteLine($"  running merged-tape: after the first 10 s {atFirstTen:F0}, 5 s before the end {atFiveBefore:F0}, at the end {running:F0}, furthest it got {biggest:F0}");
+
+        double total = shownTasty + shownOther + shownFinra;
+        Console.WriteLine($"{symbol}: {end - begin} s; merged {total:F0} shares, IBKR's tape {tape:F0}, merged/tape {total / tape:P3}");
+        Console.WriteLine($"  from tastytrade {shownTasty:F0}, other exchanges {shownOther:F0}, FINRA added {shownFinra:F0} ({finraShown} prints), FINRA already shown {finraMatched} prints, tastytrade prints IBKR had shown first {droppedTasty:F0} shares");
+    }
+}
+
+// Bars against a stand-in for Gateway, so they take no real requests.
+async Task RunIbkrBars()
+{
+    Check(IbkrClient.AllowedRequests.SetEquals(new[] { 71, 59, 1, 2, 10, 11, 97, 98, 20, 25 }), "the whitelist is exactly the market-data list plus history");
+    Check(!IbkrClient.AllowedRequests.Contains(3) && !IbkrClient.AllowedRequests.Contains(4), "order messages (place 3, cancel 4) aren't sendable");
+
+    Check(IbkrBars.BarSize(60) == "1 min" && IbkrBars.BarSize(10) == "10 secs" && IbkrBars.BarSize(14400) == null, "bar lengths map to IBKR's names, and unsupported ones to none");
+    Check(IbkrBars.Duration(3599) == "3600 S" && IbkrBars.Duration(86400) == "86400 S" && IbkrBars.Duration(86401) == "2 D", $"durations are whole minutes, then whole days ({IbkrBars.Duration(3599)}, {IbkrBars.Duration(86401)})");
+    var noon = new DateTime(2026, 11, 6, 12, 0, 0, DateTimeKind.Utc);
+    Check(IbkrBars.EndTime(noon, noon.AddSeconds(5)) == "" && IbkrBars.EndTime(noon, noon.AddHours(1)) == "20261106-12:00:00", "a span ending now has a blank end, an older one a UTC time");
+
+    BarRow Bar(long seconds, double volume) => new(seconds * 1000, 1, 2, 0.5, 1.5, volume, 3);
+    var merged = IbkrBars.Overlay([Bar(0, 10), Bar(60, 20), Bar(240, 7)], [Bar(60, 90), Bar(120, 50), Bar(180, 0), Bar(240, 0)]);
+    Check(merged.Select(b => b.TimeMs / 1000).SequenceEqual(new long[] { 0, 60, 120 }), "IBKR's bars join tastytrade's in time order; its empty ones don't, and clear tastytrade's");
+    Check(merged[0].Volume == 10 && merged[1].Volume == 90, "IBKR's bar replaces tastytrade's, and tastytrade's stays where IBKR has none");
+
+    using var gateway = new FakeGateway();
+    var client = new IbkrClient(new IbkrConfig(true, "127.0.0.1", gateway.Port, 1, false));
+    Check((await client.LoadBarsAsync("EARLY", "1 min", "60 S", "", CancellationToken.None)).Count == 0 && gateway.HistoryRequests.Count == 0, "before it's live, nothing is asked");
+
+    client.SetSink(new IbkrTestSink());
+    client.Start();
+    var timer = Stopwatch.StartNew();
+    while (client.State != IbkrState.Live && timer.Elapsed < TimeSpan.FromSeconds(10))
+        await Task.Delay(20);
+
+    gateway.HistoryPolicy["GOOD"] = (FakeGateway.Answer.Row, "1793960400\01.5\01.75\01.25\01.625\012300\01.6\041\01793960460\01.625\01.8\01.6\01.7\00\01.7\00\0", 2);
+    var bars = await client.LoadBarsAsync("GOOD", "1 min", "3600 S", "", CancellationToken.None);
+    Check(bars.Count == 2 && bars[0].TimeMs == 1793960400000 && bars[0].High == 1.75 && bars[0].Close == 1.625 && bars[0].Volume == 12300 && bars[0].Count == 41 && bars[1].Volume == 0, "bars are read field by field");
+    var sent = gateway.HistoryRequests[0];
+    Check(sent[16] == "1 min" && sent[17] == "3600 S" && sent[15] == "" && sent[18] == "0" && sent[19] == "TRADES" && sent[20] == "2" && sent[21] == "0", "asks for all hours, TRADES, epoch times, not kept up to date");
+
+    int before = gateway.HistoryRequests.Count;
+    var again = await client.LoadBarsAsync("GOOD", "1 min", "3600 S", "", CancellationToken.None);
+    Check(again.Count == 2 && gateway.HistoryRequests.Count == before, "an identical request within the window isn't sent again");
+
+    timer.Restart();
+    gateway.HistoryPolicy["NEXT"] = (FakeGateway.Answer.Row, "1793960400\01.5\01.75\01.25\01.625\0100\01.6\01\0", 1);
+    await client.LoadBarsAsync("GOOD", "5 mins", "3600 S", "", CancellationToken.None);
+    await client.LoadBarsAsync("NEXT", "1 min", "3600 S", "", CancellationToken.None);
+    Check(timer.ElapsedMilliseconds >= 350, $"different requests are spaced ({timer.ElapsedMilliseconds} ms for the second to go)");
+
+    gateway.HistoryPolicy["BAD"] = (FakeGateway.Answer.Refused, "", 0);
+    timer.Restart();
+    before = gateway.HistoryRequests.Count;
+    var refused = await client.LoadBarsAsync("BAD", "1 min", "3600 S", "", CancellationToken.None);
+    Check(refused.Count == 0 && timer.Elapsed < TimeSpan.FromSeconds(2), $"a refusal comes back empty, straight away ({timer.ElapsedMilliseconds} ms)");
+    await client.LoadBarsAsync("BAD", "1 min", "3600 S", "", CancellationToken.None);
+    Check(gateway.HistoryRequests.Count == before + 2, "a refusal isn't remembered as an answer");
+
+    gateway.HistoryPolicy["SILENT"] = (FakeGateway.Answer.Silent, "", 0);
+    using (var closing = new CancellationTokenSource(600))
+    {
+        var closed = await client.LoadBarsAsync("SILENT", "1 min", "3600 S", "", closing.Token);
+        await Task.Delay(100);
+        Check(closed.Count == 0 && gateway.HistoryCancels.Count == 1, "a chart closing cancels its request, with no error");
+    }
+
+    timer.Restart();
+    var waited = await client.LoadBarsAsync("SILENT", "1 min", "7200 S", "", CancellationToken.None);
+    await Task.Delay(100);
+    Check(waited.Count == 0 && timer.Elapsed < TimeSpan.FromSeconds(12) && gateway.HistoryCancels.Count == 2, $"no answer gives up, cancels, and comes back empty ({timer.Elapsed.TotalSeconds:F1} s)");
+
+    var pending = client.LoadBarsAsync("SILENT", "1 min", "1800 S", "", CancellationToken.None);
+    await Task.Delay(600);
+    timer.Restart();
+    client.ForceReconnect("harness");
+    var dropped = await pending;
+    Check(dropped.Count == 0 && timer.Elapsed < TimeSpan.FromSeconds(3), $"losing the connection comes back empty ({timer.ElapsedMilliseconds} ms)");
+
+    await client.StopAsync();
+}
+
+// Real bars next to tastytrade's candles for every chart period: do their times line up, how fast, how much.
+async Task RunIbkrBarsLive(int port, string symbol)
+{
+    var client = new IbkrClient(new IbkrConfig(true, "127.0.0.1", port, 88, IbkrConfig.Load().AllowLiveAccount));
+    client.SetSink(new IbkrTestSink());
+    client.Start();
+    var timer = Stopwatch.StartNew();
+    while (client.State != IbkrState.Live && timer.Elapsed < TimeSpan.FromSeconds(15))
+        await Task.Delay(50);
+    Check(client.State == IbkrState.Live, "live on the real Gateway");
+
+    using var rest = api();
+    var history = new HistoryClient(async (force, ct) => await rest.GetQuoteTokenAsync(ct));
+    var cases = new[] { (1, "=1s"), (5, "=5s"), (10, "=10s"), (15, "=15s"), (30, "=30s"), (60, "=1m"), (300, "=5m"), (900, "=15m"), (1800, "=30m"), (3600, "=1h") };
+    foreach (var (seconds, code) in cases)
+    {
+        long span = Math.Min(IbkrBars.MaxSeconds(seconds), 3 * 86400);
+        var now = DateTime.UtcNow;
+        var clock = Stopwatch.StartNew();
+        var bars = await client.LoadBarsAsync(symbol, IbkrBars.BarSize(seconds), IbkrBars.Duration(span), "", CancellationToken.None);
+        long ibkrMs = clock.ElapsedMilliseconds;
+        var candles = await history.LoadAsync(symbol + "{" + code + "}", now.AddSeconds(-span), now, CancellationToken.None);
+        var traded = bars.Where(b => b.Volume > 0).ToList();
+        var times = candles.ToDictionary(c => c.TimeMs);
+        var both = traded.Where(b => times.ContainsKey(b.TimeMs)).ToList();
+        long firstCommon = both.Count > 0 ? both.Min(b => b.TimeMs) : 0;
+        var ibkrTimes = traded.Select(b => b.TimeMs).ToHashSet();
+
+        // IBKR has nothing from 20:00 to 04:00 ET, so only hours it covers can show bars out of line.
+        bool Covered(long ms)
+        {
+            int hour = DateTimeOffset.FromUnixTimeMilliseconds(ms).ToOffset(TimeSpan.FromHours(-5)).Hour;
+            return hour >= 4 && hour < 20;
+        }
+
+        int candlesInRange = candles.Count(c => c.TimeMs >= firstCommon && Covered(c.TimeMs));
+        int candlesAligned = candles.Count(c => c.TimeMs >= firstCommon && Covered(c.TimeMs) && ibkrTimes.Contains(c.TimeMs));
+        bool onTheClock = traded.All(b => b.TimeMs % (seconds * 1000L) == 0);
+        double ibkrVolume = both.Sum(b => b.Volume);
+        double candleVolume = both.Sum(b => times[b.TimeMs].Volume);
+        Console.WriteLine($"{IbkrBars.BarSize(seconds),8} {IbkrBars.Duration(span),9}: IBKR {bars.Count} bars ({traded.Count} traded) in {ibkrMs} ms; candles {candles.Count}; candles in IBKR's hours on an IBKR bar's time {candlesAligned} of {candlesInRange}; same bars' volume IBKR {ibkrVolume:F0}, tastytrade {candleVolume:F0} ({(ibkrVolume > 0 ? candleVolume / ibkrVolume : double.NaN):P1})");
+
+        // On 1-second bars the feeds can put a print in neighbouring seconds, which isn't bars out of line.
+        Check(traded.Count > 0 && onTheClock && candlesAligned >= candlesInRange * (seconds == 1 ? 0.95 : 0.99), $"{IbkrBars.BarSize(seconds)} bars line up with tastytrade's");
+        await Task.Delay(800);
+    }
+
+    await history.StopAsync();
     await client.StopAsync();
 }
 
@@ -1572,7 +1890,14 @@ internal sealed class IbkrTestSink : IIbkrSink
 
     public readonly System.Collections.Concurrent.ConcurrentDictionary<string, int> TapeActive = new();
 
-    public void OnIbkrTapeActive(string symbol) => this.TapeActive.AddOrUpdate(symbol, 1, (_, n) => n + 1);
+    public void OnIbkrTapeActive(string symbol, double price, double size, long unixSeconds, bool carried)
+    {
+        this.TapeActive.AddOrUpdate(symbol, 1, (_, n) => n + 1);
+        if (carried)
+            this.TapeCarried.AddOrUpdate(symbol, 1, (_, n) => n + 1);
+    }
+
+    public readonly System.Collections.Concurrent.ConcurrentDictionary<string, int> TapeCarried = new();
 
     public void OnIbkrState(IbkrState state, string detail) => this.States.Add(state);
 
@@ -1611,6 +1936,13 @@ internal sealed class FakeGateway : IDisposable
     public int MostUnanswered { get; private set; }
 
     public int TapeRequestId { get; private set; }
+
+    /// <summary>By symbol: how to answer a history request, the bars' fields, and how many bars that is.</summary>
+    public ConcurrentDictionary<string, (Answer Answer, string Rows, int Count)> HistoryPolicy { get; } = new();
+
+    public List<string[]> HistoryRequests { get; } = new();
+
+    public List<int> HistoryCancels { get; } = new();
 
     public void ClearLog()
     {
@@ -1702,6 +2034,13 @@ internal sealed class FakeGateway : IDisposable
                         case "97":
                             this.TapeRequestId = int.Parse(f[1], CultureInfo.InvariantCulture);
                             break;
+                        case "20":
+                            this.OnHistoryRequest(f);
+                            break;
+                        case "25":
+                            lock (this.gate)
+                                this.HistoryCancels.Add(int.Parse(f[2], CultureInfo.InvariantCulture));
+                            break;
                     }
                 }
             }
@@ -1709,6 +2048,18 @@ internal sealed class FakeGateway : IDisposable
             {
             }
         }
+    }
+
+    private void OnHistoryRequest(string[] f)
+    {
+        lock (this.gate)
+            this.HistoryRequests.Add(f);
+
+        var (answer, rows, count) = this.HistoryPolicy.GetValueOrDefault(f[3], (Answer.Row, "", 0));
+        if (answer == Answer.Row)
+            this.Send($"17\0{f[1]}\020261106 00:00:00\020261106 01:00:00\0{count}\0{rows}");
+        else if (answer == Answer.Refused)
+            this.Send($"4\02\0{f[1]}\0162\0Historical Market Data Service error message:no data\0");
     }
 
     private void OnDepthRequest(int id, string symbol)

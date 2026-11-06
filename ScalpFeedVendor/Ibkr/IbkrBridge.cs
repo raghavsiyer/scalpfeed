@@ -11,9 +11,9 @@ namespace ScalpFeedVendor.Ibkr;
 /// A symbol shows IBKR's bid and ask once IBKR has quoted it, and goes back to tastytrade's if
 /// IBKR goes down or can't serve it, so the quote never just freezes. The depth panel empties
 /// instead, because tastytrade has no depth and a frozen book looks real. The tape follows the
-/// tape mode: IBKR's whole tape once its first print arrives, or tastytrade's plus IBKR's other
-/// venues. If IBKR goes down, has no slot for a symbol, or its tape goes quiet while tastytrade's
-/// carries on, that tape is simply tastytrade's alone until IBKR prints again.
+/// tape mode: IBKR's whole tape once its first print arrives, or both feeds put together by TapeMerge
+/// so each trade shows once. If IBKR goes down, has no slot for a symbol, or its tape goes quiet
+/// while tastytrade's carries on, that tape is simply tastytrade's alone until IBKR prints again.
 /// </summary>
 internal sealed class IbkrBridge : IIbkrSink
 {
@@ -37,6 +37,9 @@ internal sealed class IbkrBridge : IIbkrSink
     // Quantower builds a new vendor for every reconnect, so these outlive any one instance.
     private static volatile bool lossAnnounced;
     private static long tooFar;
+    private static long reportedAlreadyShown;
+    private static long reportedAdded;
+    private static DateTime nextMergeStatsUtc;
 
     private readonly Action<Message> push;
     private readonly PrintHandler emitPrint;
@@ -55,7 +58,36 @@ internal sealed class IbkrBridge : IIbkrSink
         this.askIds = Enumerable.Range(0, 200).Select(i => "a" + i).ToArray();
     }
 
+    public bool IsMerged => this.client?.TapeMode == TapeMode.Merged;
+
     public void Start() => this.client = IbkrSession.Attach(this);
+
+    /// <summary>IBKR's bars for this span of a chart, within what one request can cover. Empty if there are none to use.</summary>
+    public async Task<IReadOnlyList<BarRow>> LoadBarsAsync(string symbol, Period period, DateTime fromUtc, DateTime toUtc, CancellationToken ct)
+    {
+        var current = this.client;
+        int seconds = period.BasePeriod switch
+        {
+            BasePeriod.Second => period.PeriodMultiplier,
+            BasePeriod.Minute => period.PeriodMultiplier * 60,
+            BasePeriod.Hour => period.PeriodMultiplier * 3600,
+            _ => 0
+        };
+        string barSize = IbkrBars.BarSize(seconds);
+        if (current == null || barSize == null)
+            return [];
+
+        var now = DateTime.UtcNow;
+        var end = toUtc > now ? now : toUtc;
+        long span = Math.Min((long)(end - fromUtc).TotalSeconds, IbkrBars.MaxSeconds(seconds));
+        if (span <= 0)
+            return [];
+
+        var bars = await current.LoadBarsAsync(symbol, barSize, IbkrBars.Duration(span), IbkrBars.EndTime(end, now), ct).ConfigureAwait(false);
+        long fromMs = new DateTimeOffset(DateTime.SpecifyKind(fromUtc, DateTimeKind.Utc)).ToUnixTimeMilliseconds();
+        long toMs = new DateTimeOffset(DateTime.SpecifyKind(toUtc, DateTimeKind.Utc)).ToUnixTimeMilliseconds();
+        return bars.Where(b => b.TimeMs >= fromMs && b.TimeMs <= toMs).ToList();
+    }
 
     public void Stop()
     {
@@ -100,6 +132,15 @@ internal sealed class IbkrBridge : IIbkrSink
 
         var utcNow = DateTime.UtcNow;
         this.CheckTapes(utcNow);
+        if (utcNow >= nextMergeStatsUtc)
+        {
+            nextMergeStatsUtc = utcNow.AddMinutes(1);
+            long alreadyShown = Interlocked.Exchange(ref reportedAlreadyShown, 0);
+            long added = Interlocked.Exchange(ref reportedAdded, 0);
+            if (alreadyShown + added > 0)
+                Log.Info($"[ibkr] merge 60s: FINRA prints also on tastytrade's tape={alreadyShown}, added from IBKR={added}");
+        }
+
         if (current.State == IbkrState.Live)
         {
             this.notLiveSinceUtc = default;
@@ -186,15 +227,30 @@ internal sealed class IbkrBridge : IIbkrSink
             return;
         }
 
+        if (this.IsMerged && venue == PrintFilter.ReportedVenue)
+        {
+            if (!state.Merge.OnIbkrReportedPrint(price, size, unixSeconds, arrivalUtcTicks))
+            {
+                Interlocked.Increment(ref reportedAlreadyShown);
+                return;
+            }
+
+            Interlocked.Increment(ref reportedAdded);
+        }
+
         // Stays inside the second IBKR says it happened in, so it lands in the right bar.
         long lastTickOfSecond = DateTime.UnixEpoch.Ticks + ((unixSeconds + 1) * TimeSpan.TicksPerSecond) - 1;
         this.emitPrint(state, price, size, Math.Min(arrivalUtcTicks - TypicalLagTicks, lastTickOfSecond), bid, ask);
     }
 
-    public void OnIbkrTapeActive(string symbol)
+    public void OnIbkrTapeActive(string symbol, double price, double size, long unixSeconds, bool carried)
     {
-        if (this.statesByIbkr.TryGetValue(symbol, out var state))
-            state.IbkrTapeWatch.OnIbkrPrint();
+        if (!this.statesByIbkr.TryGetValue(symbol, out var state))
+            return;
+
+        state.IbkrTapeWatch.OnIbkrPrint();
+        if (carried)
+            state.Merge.OnIbkrCarriedPrint(price, size, unixSeconds, DateTime.UtcNow.Ticks);
     }
 
     public void OnIbkrState(IbkrState newState, string detail)

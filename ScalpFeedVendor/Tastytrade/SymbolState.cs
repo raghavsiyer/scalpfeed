@@ -27,6 +27,9 @@ internal sealed class SymbolState
     /// <summary>The tape went quiet and tastytrade's took over, so its return is worth a log line.</summary>
     public volatile bool IbkrTapeLost;
     public readonly TapeWatch IbkrTapeWatch = new();
+
+    /// <summary>Used in merged mode, from both feeds' receive threads.</summary>
+    public readonly TapeMerge Merge = new();
     public bool IsCanary;
 
     // Belong to IBKR's receive thread: the quote its prints are judged against.

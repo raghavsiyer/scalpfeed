@@ -60,8 +60,11 @@ internal interface IIbkrSink
     /// <summary>A print for the tape, already filtered for the tape mode. Its time is whole seconds only.</summary>
     void OnIbkrPrint(string symbol, double price, double size, long unixSeconds, string venue, long arrivalUtcTicks);
 
-    /// <summary>Any print at all on this symbol's tape, including ones that stay off the screen.</summary>
-    void OnIbkrTapeActive(string symbol);
+    /// <summary>
+    /// Any print at all on this symbol's tape, including ones that stay off the screen. Carried means
+    /// it's on tastytrade's tape as well, so in merged mode it won't come to OnIbkrPrint.
+    /// </summary>
+    void OnIbkrTapeActive(string symbol, double price, double size, long unixSeconds, bool carried);
 
     void OnIbkrState(IbkrState state, string detail);
 
@@ -83,9 +86,9 @@ internal sealed class IbkrClient
 
     /// <summary>
     /// startApi, reqMarketDataType, reqMktData, cancelMktData, reqMktDepth, cancelMktDepth,
-    /// reqTickByTickData, cancelTickByTickData.
+    /// reqTickByTickData, cancelTickByTickData, reqHistoricalData, cancelHistoricalData.
     /// </summary>
-    public static readonly IReadOnlySet<int> AllowedRequests = new HashSet<int> { 71, 59, 1, 2, 10, 11, 97, 98 };
+    public static readonly IReadOnlySet<int> AllowedRequests = new HashSet<int> { 71, 59, 1, 2, 10, 11, 97, 98, 20, 25 };
 
     private const string ClientVersions = "v100..176";
     private const int FlushDelayMs = 20;
@@ -113,6 +116,15 @@ internal sealed class IbkrClient
     // 2026-11-05: spaced past Gateway's answer they get exactly 3 slots, but a burst got 5, and then
     // a cancel left a waiting symbol still refused. Empty books never send a row, hence the limit.
     private static readonly TimeSpan DepthAnswerLimit = TimeSpan.FromSeconds(1);
+
+    // A chart that gets no answer falls back to tastytrade's bars, so it shouldn't wait long.
+    private static readonly TimeSpan HistoryTimeout = TimeSpan.FromSeconds(10);
+
+    // IBKR's limits, from its documentation as remembered and not tested: 6 requests per contract
+    // in 2 seconds, and no identical request within 15 seconds. A chart open asks for several periods
+    // within a second, and sometimes the same one twice.
+    private static readonly TimeSpan HistorySpacing = TimeSpan.FromMilliseconds(400);
+    private static readonly TimeSpan IdenticalRequestWindow = TimeSpan.FromSeconds(15);
     private static readonly double[] BackoffSeconds = [0.5, 1, 2, 4, 8, 15, 30];
 
     private readonly IbkrConfig config;
@@ -130,7 +142,11 @@ internal sealed class IbkrClient
     private readonly HashSet<int> codesLogged = new();
     private readonly object depthGate = new();
     private readonly Queue<Stream> depthQueue = new();
+    private readonly SemaphoreSlim historyGate = new(1, 1);
+    private readonly ConcurrentDictionary<int, TaskCompletionSource<List<BarRow>>> historyWaits = new();
+    private readonly Dictionary<string, (DateTime AtUtc, List<BarRow> Bars)> recentBars = new();
 
+    private DateTime nextHistoryRequestUtc;
     private volatile Stream depthAwaited;
     private IIbkrSink sink;
     private CancellationTokenSource stopCts;
@@ -203,7 +219,71 @@ internal sealed class IbkrClient
         {
         }
 
+        this.AbandonHistoryWaits();
         this.SetState(IbkrState.Stopped, "stopped");
+    }
+
+    /// <summary>
+    /// Chart bars for one span, oldest first. Empty if IBKR can't supply them right now for any
+    /// reason, because the chart then shows tastytrade's. Requests run one at a time.
+    /// </summary>
+    public async Task<IReadOnlyList<BarRow>> LoadBarsAsync(string symbol, string barSize, string duration, string endUtc, CancellationToken ct)
+    {
+        if (this.state != IbkrState.Live)
+            return [];
+
+        string ibkrSymbol = ToIbkrSymbol(symbol);
+        string key = $"{ibkrSymbol}|{barSize}|{duration}|{endUtc}";
+        await this.historyGate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            var now = DateTime.UtcNow;
+            foreach (var old in this.recentBars.Where(r => now - r.Value.AtUtc >= IdenticalRequestWindow).Select(r => r.Key).ToList())
+                this.recentBars.Remove(old);
+
+            if (this.recentBars.TryGetValue(key, out var recent))
+                return recent.Bars;
+
+            var wait = this.nextHistoryRequestUtc - now;
+            if (wait > TimeSpan.Zero)
+                await Task.Delay(wait, ct).ConfigureAwait(false);
+            this.nextHistoryRequestUtc = DateTime.UtcNow + HistorySpacing;
+
+            int id = Interlocked.Increment(ref this.nextId);
+            var answer = new TaskCompletionSource<List<BarRow>>(TaskCreationOptions.RunContinuationsAsynchronously);
+            this.historyWaits[id] = answer;
+            var clock = Stopwatch.StartNew();
+            try
+            {
+                await this.SendAsync(CancellationToken.None, [20, id, .. Contract(ibkrSymbol), 0, endUtc, barSize, duration, 0, "TRADES", 2, 0, ""]).ConfigureAwait(false);
+                var bars = await answer.Task.WaitAsync(HistoryTimeout, ct).ConfigureAwait(false);
+                if (bars == null)
+                    return [];
+
+                Log.Info($"[ibkr] bars {ibkrSymbol} {barSize} {duration}: {bars.Count} in {clock.ElapsedMilliseconds} ms");
+                this.recentBars[key] = (DateTime.UtcNow, bars);
+                return bars;
+            }
+            catch (Exception ex) when (ex is TimeoutException or OperationCanceledException)
+            {
+                if (ex is TimeoutException)
+                    Log.Info($"[ibkr] bars {ibkrSymbol} {barSize} {duration}: no answer in {HistoryTimeout.TotalSeconds:F0} s");
+                await this.SendAsync(CancellationToken.None, 25, 1, id).ConfigureAwait(false);
+                return [];
+            }
+            finally
+            {
+                this.historyWaits.TryRemove(id, out _);
+            }
+        }
+        catch (Exception ex) when (ex is IOException or ObjectDisposedException or InvalidOperationException or OperationCanceledException)
+        {
+            return [];
+        }
+        finally
+        {
+            this.historyGate.Release();
+        }
     }
 
     public void SetQuote(string symbol, bool on) => this.SetInterest(new FeedKey(QuoteFeed, ToIbkrSymbol(symbol)), on);
@@ -335,6 +415,7 @@ internal sealed class IbkrClient
             this.depthAwaited = null;
         }
 
+        this.AbandonHistoryWaits();
         this.refused = false;
         this.subscribed = false;
 
@@ -367,6 +448,13 @@ internal sealed class IbkrClient
             this.net = null;
             this.connectionCts = null;
         }
+    }
+
+    /// <summary>The connection these were asked on has gone, so no answer is coming.</summary>
+    private void AbandonHistoryWaits()
+    {
+        foreach (var wait in this.historyWaits.Values)
+            wait.TrySetResult(null);
     }
 
     private void OnAccount(string accounts)
@@ -762,7 +850,35 @@ internal sealed class IbkrClient
                 f.Skip();
                 this.OnAccount(f.Text());
                 break;
+            case 17:
+                this.OnHistoricalData(ref f);
+                break;
         }
+    }
+
+    private void OnHistoricalData(ref FieldReader f)
+    {
+        if (!this.historyWaits.TryGetValue(f.Int(), out var wait))
+            return;
+
+        // The start and end dates, which come before server version 196. ClientVersions stops at 176.
+        f.Skip();
+        f.Skip();
+        int count = f.Int();
+        var bars = new List<BarRow>(Math.Max(count, 0));
+        for (int i = 0; i < count; i++)
+        {
+            long seconds = f.Long();
+            double open = f.Double();
+            double high = f.Double();
+            double low = f.Double();
+            double close = f.Double();
+            double volume = f.Double();
+            f.Skip(); // Average price.
+            bars.Add(new BarRow(seconds * 1000, open, high, low, close, volume, f.Int()));
+        }
+
+        wait.TrySetResult(bars);
     }
 
     private void OnTickByTick(ref FieldReader f)
@@ -785,9 +901,10 @@ internal sealed class IbkrClient
             return;
 #endif
 
-        Volatile.Read(ref this.sink)?.OnIbkrTapeActive(stream.Key.Symbol);
+        bool carried = this.config.Tape == TapeMode.Merged && PrintFilter.IsCarriedByTastytrade(venue);
+        Volatile.Read(ref this.sink)?.OnIbkrTapeActive(stream.Key.Symbol, price, size, unixSeconds, carried);
 
-        if (this.config.Tape == TapeMode.Merged && PrintFilter.IsCarriedByTastytrade(venue))
+        if (carried)
         {
             this.printsCarried++;
             stream.SharesCarried += size;
@@ -936,6 +1053,13 @@ internal sealed class IbkrClient
             // Informational: farm status and depth entitlements. Worth keeping once per code.
             if (this.codesLogged.Add(code))
                 Log.Info($"[ibkr] {code}: {Clip(message)}");
+            return;
+        }
+
+        if (this.historyWaits.TryGetValue(id, out var historyWait))
+        {
+            Log.Info($"[ibkr] bars request {id} problem {code}: {Clip(message)}");
+            historyWait.TrySetResult(null);
             return;
         }
 

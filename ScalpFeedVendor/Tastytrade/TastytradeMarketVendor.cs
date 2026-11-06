@@ -509,7 +509,12 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
 
         // Overnight prints (code O) aren't on IBKR's SMART tape, so they show whichever tape is on.
         // Late reports can't show IBKR's tape has stopped, so only a fresh print starts its clock.
-        if (!state.IbkrTape || row.Exchange == 'O')
+        if (this.ibkr is { IsMerged: true })
+        {
+            if (state.Merge.OnTastytradePrint(row.Price, row.Size, row.Time / 1000, row.ArrivalUtcTicks))
+                this.EmitPrint(state, row.Price, row.Size, exchangeTicks, row.Aggressor, row.Bid, row.Ask);
+        }
+        else if (!state.IbkrTape || row.Exchange == 'O')
             this.EmitPrint(state, row.Price, row.Size, exchangeTicks, row.Aggressor, row.Bid, row.Ask);
         else if (delay < FreshPrintTicks)
             state.IbkrTapeWatch.OnExpectedPrint(row.ArrivalUtcTicks);
@@ -684,7 +689,17 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
 
         try
         {
-            var bars = client.LoadAsync(streamer + "{" + CandleCode(time.Period, regularHoursBars) + "}", from, to, ct).GetAwaiter().GetResult();
+            // Started first and waited for last, so a slow answer from one doesn't hold up the other.
+            var bridge = this.ibkr;
+            var fromIbkr = bridge == null || regularHoursBars ? null : bridge.LoadBarsAsync(streamer, time.Period, from, to, ct);
+            IReadOnlyList<BarRow> bars = client.LoadAsync(streamer + "{" + CandleCode(time.Period, regularHoursBars) + "}", from, to, ct).GetAwaiter().GetResult();
+
+            if (fromIbkr != null)
+            {
+                var better = fromIbkr.GetAwaiter().GetResult();
+                if (better.Count > 0)
+                    bars = IbkrBars.Overlay(bars, better);
+            }
 
             // Regular-hours candles count only part of the market's volume (SPY showed 20M of
             // 62M one day), while all-hours candles carry the whole-market figure. So daily and
