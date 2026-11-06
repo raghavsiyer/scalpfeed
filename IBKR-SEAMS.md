@@ -181,6 +181,41 @@ Still open: `IbkrBridge.Start` runs only after tastytrade is ready, so a tastytr
 - **Switching a DOM** (`ibkrswitch 4001 1 ...`) through the paced client: same tick, as Quantower sends it, first book in 638-720 ms with no refusals. New symbol 300 ms ahead of the cancel: 1.1-1.7 s with 1-2 refusals.
 - **`ibkr 4001` passed** with 3 skipped checks, which can't be judged while another client's slots leave a symbol waiting. No problems in the plugin's log throughout, so Quantower's DOMs weren't disturbed.
 
+### Tape speed by source
+
+03:35-03:40 local (06:35-06:40 ET), recorded together with Quantower open (`analysis\tape_speed.py`). RCT traded 8.7M shares in those 5 minutes, VSA 105,251, so VSA's numbers are thinner.
+
+| | Share of the `dayVolume` rise | Median gap between deliveries | Rows per delivery | Behind tastytrade on shared prints: median / p90 / p99 |
+|---|---|---|---|---|
+| tastytrade TimeAndSale, RCT | 56.0% | 111 ms | 1.1 | - |
+| tastytrade TimeAndSale, VSA | 55.7% | 548 ms | 1.0 | - |
+| IBKR `AllLast`, RCT | 100.1% | 569 ms | 6.8 | 377 / 665 / 736 ms |
+| IBKR `AllLast`, VSA | 101.4% | 711 ms | 3.0 | 485 / 730 / 738 ms |
+| IBKR `Last`, RCT | 99.9% | 569 ms | 6.0 | 377 / 659 / 736 ms |
+| IBKR RT Volume (generic tick 233), RCT | 100.9% | 251 ms | 1.0, but combined | 185 / 328 / 3,077 ms |
+| IBKR RT Volume (generic tick 233), VSA | 101.7% | 502 ms | 1.0, but combined | 212 / 1,783 / 3,570 ms |
+
+- **The slower tape is the feed.** Print time to tastytrade's arrival was a median of 23-27 ms, with this PC's clock about 30 ms off by `w32tm`. IBKR's tick-by-tick tape comes in batches and is 0.38-0.49 s behind. The mode changed at 02:08, when Gateway came back: from 00:57 to 02:08 the tape was tastytrade's, and after that IBKR's.
+- **Not Quantower's load, as far as can be seen from outside.** It used 22% of one core at 03:35, with 107 threads, and was responding. The plugin passes prints straight through. Quantower's own painting isn't measurable from here.
+- **No other IBKR tick-by-tick type helps.** `Last` has `AllLast`'s timing. RT Volume is about 190 ms sooner, but it combines prints (731 rows against 3,129 on RCT), and only 184 of 1,385 prints matched singly, so that number is a biased sample. Generic tick 375 (RT trade volume) was 88.9% on VSA.
+- **Merged mode is the one that changes it:** tastytrade's roughly 56% at its own speed, and the rest about 0.4 s later, for about 98% of the volume. Not yet run in Quantower with these symbols.
+
+### Candle volume
+
+tastytrade's 1-minute candle volume is exactly its own valid prints, in all 42 minutes tested on CIIT, RCT and VSA (05:22-05:35 ET, `analysis\candle_volume.py`), so the candles leave out what its tape leaves out, and odd lots too.
+
+| 05:22-05:35 ET | CIIT | RCT | VSA |
+|---|---|---|---|
+| Candle volume against IBKR's tape, total | 53.1% | 55.4% | 50.3% |
+| Candle against tastytrade's valid prints | 100.0% | 100.0% | 100.0% |
+| Minutes where IBKR's high or low went past the candle's, of 14 | 7 | 3 | 9 |
+
+- **Scaling can't fix it.** The ratio moves from minute to minute: CIIT's ranged from 37.4% to 76.3%.
+- **No other candle gets more** (`analysis\candle_periods.py`): `=5m`, `=15m`, `=1h` and `price=last` add up to the same total as `=1m`. `tho=true` and `a=s` showed nothing from today's premarket. `price=mark` and `price=bid` gave no rows.
+- **Daily candles are right.** `{=d}` equals `prevDayVolume` exactly (RCT 108,628,849, CIIT 6,817,988). That day's 1-minute bars summed to only 32-41% of it. Today so far they're 46-67% of `dayVolume`.
+- **Live bars and reloaded bars disagree.** A forming bar is built from the tape, so with IBKR's tape it should be complete, but a reload swaps it for the partial candle. That's from reading the code, not checked on a chart.
+- **Routes to complete bars.** IBKR's `reqHistoricalData` (messages 20 and 25, not on the whitelist, not tested). From memory, IBKR filters some trade types out of its TRADES bars and limits small-bar requests, so it needs testing against the tape first. Or bars saved from IBKR's tape, which need no new message but only exist from when a symbol first had a tape slot, so not for a runner just opened.
+
 ### IBKR against tastytrade, head to head
 
 CIIT, RCT, VSA, 02:21:43-02:36:43 local (05:21-05:36 ET), recorded together with Quantower open (`analysis\premarket_compare.py`, `probe\ibkr-premarket-20261106.tsv`). Volume was real on RCT, moderate on VSA and CIIT, and the open is still to come.
