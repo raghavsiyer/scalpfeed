@@ -69,10 +69,12 @@ request_id = args.client * 1000
 for raw in args.requests.split(";"):
     if not raw.strip():
         continue
-    symbol, duration, bar_size = (p.strip() for p in raw.split("|"))
+    fields = [p.strip() for p in raw.split("|")]
+    symbol, duration, bar_size = fields[:3]
+    end = fields[3] if len(fields) > 3 else ""  # Blank means now; otherwise yyyyMMdd-HH:mm:ss in UTC.
     request_id += 1
     begun = time.perf_counter()
-    send(20, request_id, 0, symbol, "STK", "", "0.0", "", "", "SMART", "", "USD", "", "", 0, "", bar_size, duration, 0, "TRADES", 2, 0, "")
+    send(20, request_id, 0, symbol, "STK", "", "0.0", "", "", "SMART", "", "USD", "", "", 0, end, bar_size, duration, 0, "TRADES", 2, 0, "")
     sock.settimeout(1)
     answer = None
     while time.perf_counter() - begun < args.timeout:
@@ -102,7 +104,7 @@ for raw in args.requests.split(";"):
     if answer is None:
         send(25, 1, request_id)
         answer = "no answer, cancelled"
-    print(f"{symbol} {duration} {bar_size}: {answer} in {(time.perf_counter() - begun) * 1000:.0f} ms", flush=True)
+    print(f"{symbol} {duration} {bar_size} end='{end}': {answer} in {(time.perf_counter() - begun) * 1000:.0f} ms", flush=True)
     out.flush()
     time.sleep(args.gap)
 out.close()
