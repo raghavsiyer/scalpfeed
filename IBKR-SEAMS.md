@@ -111,7 +111,7 @@ You wanted a proper tape: gray between the bid and ask, green or red text at the
 
 **The highlights took a second try.** The first build put above-ask and below-bid in Tick direction, but Quantower shows Up or Down on every print there, gray ones included, so it works that field out itself. The flag now goes in Buyer and Seller, as `ABOVE` or `BELOW`, and is otherwise left empty. A table rule on Buyer works, confirmed on your screen.
 
-**Decimals:** 3 under a dollar and 2 from a dollar up, by your choice (`PriceBands`), instead of 4 everywhere. It's the precision on each price band, which Quantower's docs describe only as formatting. Tick sizes are untouched, so price steps and chart bucketing shouldn't change, and the plugin sends the same full prices, so its merge, sides and flags still use them. What changes is how prices read: 2.7188 reads 2.72, so a gray row can look equal to the ask. On a $0.05 stock each displayed step is about 2%, and in a table a 0.4759 and a 0.4761 both read 0.476.
+**Decimals:** 3 under a dollar and 2 from a dollar up, by your choice (`PriceBands`), instead of 4 everywhere. It's the precision on each price band, which Quantower's docs describe only as formatting. You confirmed it in the table: a rule of Last = a displayed price colored only some of the rows showing that price, so Quantower keeps full prices there. The chart gets the same prices but has no equally direct check. Tick sizes are untouched, so price steps and chart bucketing shouldn't change, and the plugin sends the same full prices, so its merge, sides and flags still use them. What changes is how prices read: 2.7188 reads 2.72, so a gray row can look equal to the ask. On a $0.05 stock each displayed step is about 2%, and in a table a 0.4759 and a 0.4761 both read 0.476.
 
 **A bare comparison with IBKR's quote gives false highlights**, because the quote reaches us late. Share of prints counted as outside the market (`analysis\quote_rules.py`):
 
@@ -129,6 +129,8 @@ You wanted a proper tape: gray between the bid and ask, green or red text at the
 - **Judging IBKR's late rows by an earlier quote made them worse,** so they use the quote on arrival.
 - **Tick-by-tick BidAsk isn't worth its slots.** Against `reqMktData` it was -18 to +81 ms at the median and gave nearly the same shares outside (CIIT 7.0% against 7.0%, VSA 38.5% against 40.7%), on 2 of the 5 tape slots. This settles that item on the recheck list for premarket.
 - **Between-the-market share differs by feed for a real reason:** tastytrade's rows include dark midpoint prints (33-51% between), while IBKR-only rows are exchange prints, mostly at the quote (9-26% between).
+
+**Depth sizes:** the market depth panel shows whole hundreds by your choice (`DepthSizes`): 2870 shares reads 28, and 100 reads 1. The plugin divides the rows it sends for depth, so anything in Quantower that reads depth sizes gets hundreds as well, including the panel's totals. The tape, volume and bars keep shares. How Quantower treats a row of under 100 shares, sent as 0, hasn't been seen: it may show 0 or drop the row. Those rows have been seen on high-priced stocks (AAPL 85 shares).
 
 ### The blinking latency and the tape's micro-pauses
 

@@ -90,6 +90,9 @@ switch (args[0])
         Check(across.Count == 2 && across[0] == (0.0, 1.0, 0.01, 3) && across[1] == (1.0, double.PositiveInfinity, 0.01, 2), "one band across the dollar line splits, keeping its tick size");
         var three = PriceBands.ForDisplay([new TickBand(0.5, 0.0001), new TickBand(1.0, 0.001), new TickBand(10.0, 0.01), new TickBand(double.PositiveInfinity, 0.05)]);
         Check(three.Select(b => b.Decimals).SequenceEqual(new[] { 3, 3, 2, 2 }) && three.Select(b => b.TickSize).SequenceEqual(new[] { 0.0001, 0.001, 0.01, 0.05 }), "several bands each keep their tick size");
+        Check(DepthSizes.ToHundreds(2870) == 28 && DepthSizes.ToHundreds(100) == 1 && DepthSizes.ToHundreds(199) == 1, "depth sizes truncate to hundreds");
+        Check(Enumerable.Range(1, 100000).All(n => DepthSizes.ToHundreds(n * 100) == n), "every whole hundred comes out exact");
+        Check(DepthSizes.ToHundreds(99) == 0 && DepthSizes.ToHundreds(0.198) == 0, "under 100 shares is 0");
         break;
     case "printplace":
         Check(PrintPlaces.Of(2.74, 2.70, 2.73) == PrintPlace.AboveAsk, "above the ask");

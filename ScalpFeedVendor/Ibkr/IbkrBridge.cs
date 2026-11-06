@@ -308,7 +308,7 @@ internal sealed class IbkrBridge : IIbkrSink
         for (int i = 0; i < count; i++)
         {
             var row = rows[i];
-            target.Add(new Level2Quote(side, symbolId, ids[i], row.Price, row.Size, now) { Broker = row.Venue });
+            target.Add(new Level2Quote(side, symbolId, ids[i], row.Price, DepthSizes.ToHundreds(row.Size), now) { Broker = row.Venue });
         }
     }
 }

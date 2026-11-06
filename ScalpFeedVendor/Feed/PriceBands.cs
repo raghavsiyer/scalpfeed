@@ -1,6 +1,15 @@
 namespace ScalpFeedVendor.Feed;
 
 /// <summary>
+/// Sizes in the market depth panel, in whole hundreds by your choice of 2026-11-06: 2870 shares shows
+/// as 28, and 100 as 1. Under 100 shares is 0. Only depth rows use this. The tape and bars keep shares.
+/// </summary>
+internal static class DepthSizes
+{
+    public static double ToHundreds(double shares) => Math.Floor(shares / 100);
+}
+
+/// <summary>
 /// The price bands Quantower gets for a symbol: 3 decimals under a dollar and 2 from a dollar up, by
 /// your choice of 2026-11-06. That's only how prices are written. Tick sizes stay as tastytrade gives
 /// them, because they're what price steps and chart bucketing go by, and prints and bars still carry
