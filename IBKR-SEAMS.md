@@ -2,7 +2,7 @@
 
 Status: bid, ask, depth, the tape, the merged tape and intraday chart bars are built (`Feed/IbkrClient.cs`, `Feed/IbkrSession.cs`, `Feed/PrintFilter.cs`, `Feed/TapeMerge.cs`, `Feed/IbkrBars.cs`, `Ibkr/IbkrBridge.cs`). Quotes and depth were tested on paper and live Gateway, the tape and bars on live. Execution isn't started, and the client can't send order messages: `AllowedRequests` is a whitelist without them (71, 59, 1, 2, 10, 11, 97, 98, and by your decision of 2026-11-06, 20 and 25 for history).
 
-Installed 2026-11-06 04:17 local: release build of commit `a39e25b`, no test triggers (`analysis\dll_strings.py`). It loads at Quantower's next restart, and hasn't run inside Quantower yet. The build it replaced is parked beside it as `ScalpFeedVendor.20261106041707.old`.
+Installed and running since 2026-11-06 about 05:10 local: release build of commit `3a95473`, merged tape, no test triggers (`analysis\dll_strings.py`). You report the tape looks good on it. The build it replaced is parked beside it as `ScalpFeedVendor.20261106050506.old`.
 
 The plugin connects to a live Gateway on port 4001 by your decision of 2026-11-05, for data only. `allowLiveAccount` in `ibkr.json` is what permits that.
 
@@ -104,12 +104,16 @@ You saw Quantower's latency measure blink 100-200 ms with the tape seeming to pa
 
 **The number was the plugin's own doing.** It stamped IBKR's rows 175 ms in the past, and Quantower's measure evidently reads the stamp's age. Merged, the rows alternate between those and tastytrade's (23-27 ms old), so it blinked. That 175 ms was a guess, and IBKR's real lag is about 0.4 s. Rows are now stamped on arrival, so the measure no longer reflects IBKR's lag at all. `analysis\print_age.py` shows the difference.
 
-**Nothing is freezing, on anything measured** (07:30-08:01 ET, merged, DBGI and LABT open):
+**What fixed the pauses, by your eye** (about 08:05-08:15 ET, one session): they were there on merged with the old stamps, stopped on tastytrade alone, and were gone on merged with the new stamps. The feeds and rows were the same, so the backdated stamps look like the cause of the pauses as well as the number. How the stamps made Quantower pause is unknown: its display thread never stalled, and its internals aren't something to look into. Recheck at the open, when both feeds run much faster.
+
+**Corrected:** I first concluded below that the pauses were just moments when no row had arrived. Your test contradicts that, at least for what you were seeing. The measurements below still stand as measurements, and the gaps are real, but they aren't what you were describing. Spreading IBKR's batches isn't needed.
+
+**Nothing froze, on anything measured** (07:30-08:01 ET, merged with the old stamps, DBGI and LABT open):
 
 - **Plugin:** tastytrade's frames, including handing prints to Quantower and any wait on IBKR, took at most 0.06-1.3 ms per minute. IBKR's quote and depth flush peaked at 16.8 ms, once.
 - **Quantower's main display thread** (`analysis\ui_stall.py`, a do-nothing window message every 10 ms): 8,632 answers in 90 s, median 0.06 ms, p99 0.71 ms, slowest 11.8 ms, none near 100 ms. Quantower used 33% of one core. That also rules out the network ping blocking the screen. Panels drawn on another thread wouldn't show here, though only one display thread has visible top-level windows.
 
-**So the pauses are moments when no row has reached us yet** (`analysis\tape_rhythm.py`, premarket):
+**The gaps between rows** (`analysis\tape_rhythm.py`, premarket):
 
 | | DBGI | LABT | RCT | VSA |
 |---|---|---|---|---|
@@ -131,7 +135,7 @@ Merging mostly removes long gaps, though on thin names one long gap can split in
 | 300 ms | 42.0, 58.6, 40.8, 50.7 | 100-150 / 250-470 ms |
 | 600 ms | 32.4, 57.6, 30.8, 49.2 | 205-4,453 / 520-11,775 ms, because the queue backs up on busy names |
 
-Not built: it helps busy names modestly, barely changes thin ones, and makes rows later on a tape used for speed. IBKR's delivery was also much quicker at midday (a gap of 179-274 ms and about 115 ms behind on 2026-11-05 against 570-710 ms and about 440 ms in premarket), so recheck this at the open before deciding anything.
+Not built, and not needed now: it helps busy names modestly, barely changes thin ones, and makes rows later on a tape used for speed. IBKR's delivery was also much quicker at midday (a gap of 179-274 ms and about 115 ms behind on 2026-11-05 against 570-710 ms and about 440 ms in premarket).
 
 ## Why tastytrade's tape can't be made complete by settings
 
