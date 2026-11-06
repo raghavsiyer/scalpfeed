@@ -1,0 +1,190 @@
+# IBKR in ScalpFeed
+
+Status: bid, ask, depth and the tape are built (`Feed/IbkrClient.cs`, `Feed/IbkrSession.cs`, `Feed/PrintFilter.cs`, `Ibkr/IbkrBridge.cs`). Quotes and depth were tested on paper and live Gateway, the tape on live. Execution isn't started, and the client can't send order messages: `AllowedRequests` is a whitelist without them.
+
+The plugin connects to a live Gateway on port 4001 by your decision of 2026-11-05, for data only. `allowLiveAccount` in `ibkr.json` is what permits that.
+
+**Decisions (2026-11-05, yours):** IBKR goes inside this connection, and it supplies the bid and ask as well as depth and execution. The license question and a separate-connection alternative were raised and set aside.
+
+| Data | Source | Why |
+|---|---|---|
+| Tape and live chart bars | IBKR `AllLast` by default, set by `tape` in `ibkr.json`: `ibkr`, `merged` or `tastytrade` | You chose to watch IBKR's full tape first. It adds up to 100-101% of `dayVolume`, but arrives batched. tastytrade's arrives in about 59 ms with no batching, but carries 49-73% |
+| Chart history | tastytrade | Candles include premarket and after-hours |
+| Bid and ask | IBKR | tastytrade's are on a 500 ms timer and very likely not NBBO |
+| Depth | IBKR | tastytrade has no Level 2 |
+| Execution | IBKR | |
+
+## What IBKR brings
+
+- **Execution.**
+- **Level 1 quotes.** Measured 2026-11-05: on a 250 ms grid against tastytrade's 500 ms, with bids and asks from many venues. Against that quote, tastytrade's LABT spread was about 10x wider (median $0.0226 vs $0.0021) and matched it only 4% of the time.
+- **Depth.** IBKR consolidates it: `reqMktDepth` with smart depth on returns rows that each name their venue, delivered about every 140 ms. Gateway reports your entitlements as full depth on BATS (Cboe), NASDAQ and IEX; top of book on BYX, PEARL, AMEX, T24X, MEMX, EDGEA, OVERNIGHT, TXSE, CHX, NYSENAT, IBEOS, PSX, LTSE, ISE and DRCTEDGE; and no depth on ARCA, BEX or NYSE. So the DOM's top can differ from the true NBBO when ARCA or NYSE is at the inside. **Limit: 3 depth requests at once** (error 309 on the 4th), but only when requests are spaced: see "Depth slots" below.
+- **Possible tape failover:** tick-by-tick, about 520 ms batches and 5 slots by your measurement.
+
+## How the pieces fit
+
+| Piece | Where | Behaviour |
+|---|---|---|
+| Bid, ask and depth | `TastytradeMarketVendor.SetInterest` forwards `Quote` and `Level2` to `IbkrBridge`, which pushes through the vendor, so MultiVendor translates IDs as it does for tastytrade's messages | A symbol shows IBKR's quote once IBKR has quoted it |
+| IBKR's canary | `IbkrClient` pins SPY's quote, using `FeedHealth`'s limits | No SPY quote within the limit counts as down |
+| IBKR down or a symbol refused | `IbkrBridge` | Quote goes back to tastytrade's. The depth panel empties, because a frozen book looks real. One warning sound after 2 s, one all-clear on return, none overnight or when markets are shut |
+| Halts and one-sided books | `IbkrBridge.OnIbkrQuote` | IBKR's -1 becomes an empty side rather than leaving the old price up |
+| Quantower's reconnects | `IbkrSession`, static, because Quantower builds a new vendor each time | Gateway connection stays up. Only a difference in subscriptions reaches Gateway, 3 s after the takeover. Closes 10 s after the last vendor leaves |
+| Slot limits | `IbkrClient` | 3 depth symbols (309) and 5 tick-by-tick symbols (10190), shared by every client on the Gateway. Refused requests wait: retried each second for 10 s after a release, and every 15 s otherwise. A symbol with no tape slot stays on tastytrade's tape |
+| Settings | `.scalpfeed\ibkr.json`, optional: `enabled`, `host`, `port`, `clientId`, `allowLiveAccount`, `depthRows`, `tape` | Code defaults: on, port 4002, client 78, paper only, 50 rows, `ibkr` tape. Your file sets port 4001 and allows the live account |
+| Symbols | `IbkrClient.ToIbkrSymbol` | `BRK/B` becomes `BRK B`; tested on `BRK/B` and `BF/B` |
+
+Still to add:
+
+| Piece | Seam |
+|---|---|
+| Execution | `RegisterTradingVendor` in `ScalpFeedVendor.Connect`, with its own message whitelist |
+
+## Must be true before real orders go through it
+
+1. **A tastytrade failure can't touch execution.** Today a tastytrade link that's down makes `Ping` report failure, and Quantower answers with a full disconnect and reconnect.
+2. **The chart reload can't touch execution.** It works by reporting one failed ping, after any gap over 2 seconds, and costs about 1.7 seconds. With IBKR inside, it must be turned off or limited to when you're flat. Charts would then keep small holes after a gap until reloaded by hand.
+3. **An IBKR failure can't take down charts and tape,** and either source failing can't stop the other from connecting.
+4. **The IBKR connection survives a reconnect.** Quantower builds a new vendor on every reconnect (seen in the plugin log), so anything that must survive one has to live outside the instance.
+5. **Tested against an IBKR paper account first:** kill each source while holding a paper position, and confirm orders and positions stay correct.
+
+Items 1-3 come partly from the DLL inspection I shouldn't have done, so treat them as likely. Confirm them with a stub second source and the plugin log. Quantower's terms prohibit looking inside its DLLs, so don't settle this by disassembly.
+
+## Choosing the IBKR client (settle with a paper-account test)
+
+- **Quantower's `InteractiveBrokersVendor`:** already written, and it's a public class, but it isn't documented for this use and may not run nested. Its own license check would still run.
+- **Our own client on IBKR's TWS API:** more work, but full control over reconnects and over smart depth, which is IBKR's name for consolidated depth. `ScalpFeedIbkrProbe` already speaks this protocol for read-only market data, against Gateway on port 4002 (paper) with no IBKR library.
+
+## Why tastytrade's tape can't be made complete by settings
+
+Tested 2026-11-05, after claims that `AUTO` drops prints and `STREAM` or `fromTime` delivers all of them:
+
+- **`AUTO` and `STREAM`, side by side, after hours, 74 s, 7 symbols:** the same 965 prints, none missing from either.
+- **`STREAM` with `fromTime`:** no prints at all. dxFeed's spec allows `fromTime` only on `HISTORY` or `AUTO` channels, but those deliver nothing for TimeAndSale either: see "TimeAndSale backfill" below.
+- **Every print, valid or not, against the `dayVolume` rise:** 49-69% under `STREAM` and 54-98% under `AUTO` in regular hours, 43-73% after hours. All exchange codes are `Q`. IBKR's tape over the same span was 100-101%.
+- **How one recording splits (AEHL and SPY, 84 s):** tastytrade's valid prints 43% and 58% of the `dayVolume` rise, its odd lots 19% and 5%, and venues it doesn't carry 37% and 36%.
+
+Regular-hours `AUTO` and `STREAM` weren't run side by side. A burst heavy enough to overflow a buffer wasn't tested either, though valid prints matched candle volume exactly in earlier regular-hours runs.
+
+## Still open: the tape is partial
+
+Measured against IBKR's tick-by-tick tape, recorded together on 2026-11-05 (SPY and AEHL, 76 s, midday):
+
+| | tastytrade | IBKR tick-by-tick |
+|---|---|---|
+| Share of IBKR's shares | 61-63% | 100% |
+| Venues | Nasdaq, BX, PSX and nearly all of FINRA (96.9-98.6% of IBKR's shares on those four) | All 18 |
+| Median gap between deliveries | 35 ms (SPY), 98 ms (AEHL) | 179 ms (SPY), 274 ms (AEHL) |
+| Shared prints | First 90-95% of the time | Later by a median of about 115 ms, p99 about 400 ms |
+
+tastytrade's tape misses ARCA (15-23% of these shares), Cboe, NYSE, IEX, MEMX and more, so charts built from it can miss highs, lows and volume. tastytrade stays the tape for now because of its speed.
+
+Options if the gap matters while trading:
+
+- **IBKR's tape instead:** complete, but later and batched, with a limit of 5 tick-by-tick slots.
+- **Merge the two, by venue, with no print matching:** everything from tastytrade, plus IBKR's prints from venues other than NASDAQ, BEX, PSX and FINRA. The two sets don't overlap, so there's nothing to match and no state to keep.
+
+An earlier "about half of FINRA" was wrong. It came from matching FINRA prints one by one, which fails because IBKR rounds or combines them (tastytrade has 735.378 and 19.55 shares where IBKR doesn't), and that matching overcounted by 12-18%.
+
+Replay of the same recording through the venue rule (`simulate_merge.py`, 84 s):
+
+| | AEHL | SPY |
+|---|---|---|
+| Merged shares vs IBKR's tape | 98.0% | 99.1% |
+| Valid prints only | 98.3% | 99.1% |
+| 10-second buckets, min / median / max | 88% / 99% / 102% | 96% / 99% / 174% |
+
+The 174% is one bucket. A large print landing in different buckets on the two feeds would explain it, but that isn't confirmed.
+
+Before building it:
+
+- **Premarket is untested.** Overnight, SMART `AllLast` has no prints at all, and tastytrade's `O` prints aren't IBKR's BLUEOCEAN prints: see "Overnight tape" below.
+- **IBKR's rows arrive late and batched,** so rows can be out of exchange order by a few hundred ms. They need arrival-time stamps, or Quantower's strictly rising per-symbol times will push them forward anyway.
+- **Each merged symbol uses a tick-by-tick slot,** 5 by your measurement.
+- **IBKR's prints have no side,** so aggressor has to come from IBKR's own quote.
+- **Off-market prints have to be filtered from IBKR by condition** (4, 7, W, V, B) to match `PrintFilter`, which keeps normal odd lots (I on IBKR) and hides the rest, with the same 3% guard against the quote.
+- **History stays tastytrade-only,** so a chart reload loses the added venues' volume and highs and lows on bars already built.
+
+## Measured 2026-11-05 evening
+
+Overnight session (21:45-22:15 ET), Quantower closed, live Gateway on 4001. Books had 1-2 venues and volume was thin, so recheck all of this in premarket and at the open. Scripts: `analysis\ibkr_raw.py`, `depth_slot_trials.ps1`, `depth_burst_repeat.ps1`, `overnight_tape.py`, `overnight_compare.py`, `history_channel_scan.py`; harness `ibkrswitch`, `connectretry`, `tnsmatrix`.
+
+### The PC sleeps
+
+Every drop in the evening's log matches Windows Modern Standby (Kernel-Power 506/507, reason "Idle Timeout"): 16:34, 16:38, 17:00-17:04, 17:10-17:32, 18:03-18:20, 18:20-18:29. The Balanced plan sleeps after 5 minutes idle on AC and 3 on battery, and an open Quantower doesn't prevent it, so watching charts without touching anything for 5 minutes takes the feed down. Gateway's 1100/1102 messages also follow wakes.
+
+The 18:20 sequence: wake at 18:20:10; the DXLink socket had already timed out; `Ping` reported Disconnected, so Quantower disconnected at 18:20:12. Its Connect at 18:20:13 hit a DNS failure on the first attempt (network not back). The retry was ready at 18:20:21, but a bug left Connect waiting until its 20 s timeout, so it failed at 18:20:33 and Quantower reconnected at 18:20:39.
+
+The bug: `DxLinkLink.RunAsync` replaced `readyTcs` after a failed attempt while `WaitReadyAsync` was awaiting the old one. Fixed in the working copy; `connectretry` failed before and passes after. Not installed yet.
+
+Still open: `IbkrBridge.Start` runs only after tastytrade is ready, so a tastytrade Connect that takes over 10 s closes the IBKR link ("nobody came back", 18:20:22). That's harmless for data but breaks condition 1 above before execution.
+
+### Depth slots
+
+- **Spaced requests get exactly 3**, then 309, repeatably. A refusal returns in about 60 ms; a granted request's first row takes 460-660 ms.
+- **A burst gets past the limit.** 5 requests in the same millisecond were all granted, with rows arriving (seen repeatedly, also after 40 s idle). Don't treat this as extra depth: it looks like a race in the limit, and IBKR may not tolerate it.
+- **The count is simple and cancels are immediate.** A request sent in the same millisecond as a cancel is granted. But a waiter gets in only when the count is under 3, so after a burst to 5, two cancels still left requests refused and the third let one in.
+- **The cancel flag matters.** `11,1,id,0` on a smart request doesn't free the slot and rows keep coming. The plugin's `11,1,id,1` is right.
+- **Several ids for one symbol share one slot.**
+- **After a client exits with no cancels,** the next client got its 3 slots 0.6 s later, so nothing stuck.
+- **Why the tests disagreed:** `ibkr` sends 3 in one burst, `ibkrslots` 400 ms apart. With another client holding a slot, a raw burst of 3 made 4 in use (8 of 8 runs), so one cancel left the count at 3 and the waiter refused: the failure seen at 16:23 and 16:26. Those runs logged a 309 for AEHL in the burst, so the hidden fourth there is inferred. The plugin's `ibkr` run with a holder passed overnight (1.0 s). To settle it, repeat `depth_burst_repeat.ps1` and `ibkr` with a holder on multi-venue books in premarket.
+- **Switching a DOM (`ibkrswitch`):** in the same tick, as Quantower sends it: first book in 754-959 ms, no refusal. New symbol 300 ms ahead of the cancel: 1.07-1.59 s, because the waiter sits until the 1-second retry.
+- **Risk:** the plugin sends depth requests in a burst on connect and reconnect. With 4 panels open, all 4 can be granted, and then switching one symbol is refused until another panel closes. The comment in `IbkrClient` saying Gateway takes up to a second to free a slot isn't supported by these runs.
+
+### Overnight tape
+
+- **SMART `AllLast` has no overnight prints:** 0 on NVDA and TSLA in 90 s, against 249 and 62 with exchange=OVERNIGHT (venues BLUEOCEAN and IBEOS, empty conditions, batches on what looks like a 1.5 s timer). SMART quotes and depth do follow the overnight book.
+- **That muted the tape in `ibkr` mode.** `IbkrTape` stays set after the last IBKR print, so tastytrade's prints were dropped: 17:05-17:10 shows `prints=0` with frames arriving and `lastPrintDelayMs` still changing. Tastytrade's prints returned at 17:32 only because the wake's `Down` cleared the flag. Without that accident the tape would be blank from 20:00 to 04:00 ET.
+- **tastytrade overnight:** every print has code `O`, `validTick=true`, empty conditions, side UNDEFINED. That's why `oddLots=0` all evening. Prints equal the `dayVolume` rise (AAPL, AMD, TSLA to the share, NVDA 99.6%), but `dayVolume` looks like it counts only this set, so that doesn't show completeness.
+- **`O` isn't IBKR's BLUEOCEAN.** Over about 3 minutes tastytrade's shares were 0.49x (NVDA) to 3.3x (AAPL) of BLUEOCEAN's, at different prices in the same seconds. Which venue is behind `O` is unknown. `OVERNIGHT` in `PrintFilter.IsCarriedByTastytrade` matches no venue name seen.
+
+### TimeAndSale backfill
+
+- **Any `fromTime` on TimeAndSale gives 0 rows and no live prints,** with no error, on AUTO, STREAM and HISTORY, in seconds or milliseconds, for 30 s to 6 h (NVDA, 6 s per case). Without `fromTime`, all three contracts deliver live prints.
+- **`fromTime` is milliseconds.** The Candle control returned exactly the requested hour in ms. A seconds value is read as 1970: 8,000 rows back to 09-23 with the snip flag. dxFeed's spec shows milliseconds; tastytrade's says seconds.
+- **The delayed feed's "dozen prints" weren't history.** In the old recordings they're about 10 of the latest prints arriving together in the first second, then ordinary live prints at 900 s delay, with no snapshot flags, whatever lookback was asked. The delayed endpoint now returns 404 for this token, so it can't be rerun.
+- **So there's no tick backfill from tastytrade on this token.** Bars come back from Candle. Only tastytrade or dxFeed can say why, so it belongs in the support email.
+
+## Fixes from those measurements (2026-11-06, working copy, not installed)
+
+- **Depth pacing.** `IbkrClient` sends one depth request at a time, the next after a first row, a refusal, or 1 s, so a burst can't go past the limit. A same-tick switch isn't delayed (1 ms in `depthpacing`). Tested against a stand-in Gateway (`depthpacing`); not yet against the real one, and not yet on multi-venue books.
+- **Overnight prints.** tastytrade's code `O` prints show whichever tape is on, so the tape can't go blank overnight. It stays partial.
+- **Tape watchdog (`TapeWatch`).** A fresh tastytrade print not followed by any IBKR print on that symbol within 3 s hands the tape to tastytrade until IBKR prints again. A premarket dry run on real volume gave no false trips ("IBKR against tastytrade" below); the open is still to check. Not yet run inside Quantower. Test build trigger: `test-ibkr-tape-mute`.
+- **Stay-awake (`StayAwake`).** Restarts Windows' idle-sleep timer once a second while connected and markets are open. Windows accepts the call; whether it really stops Modern Standby hasn't been tested. To test: Quantower connected on the new build, no input for 10 minutes, then look for Kernel-Power 506.
+- **Connect wait.** The `readyTcs` fix above.
+
+## Measured 2026-11-06 premarket
+
+- **Two Gateways, 00:57 onward.** The one started 2026-11-05 16:44 was stuck on "Attempt N: Authenticating..." but still held 127.0.0.1:4001. The one logged in at 00:56:49 had no API port at all, because 4001 was taken. Quantower connected to the old one: 2110, 2103, 2105 and 2157 on connect, no quotes, state `Connecting`, and the warning fired at 01:00:00, the first moment the session's silence limit allowed it. A raw request on 4001 got 0 quotes. Closing both and logging in once is the fix.
+- **Late prints at 04:00 ET.** At 01:00-01:01 local the plugin logged prints up to 13,592 s old and 1,337 odd lots refused as too far from the quote (LABT 0.5142 against 0.4568/0.47). They look like overnight trades reported in a batch when the day's reporting opens, but that's a guess: no recording covers that minute. To settle it, record from 00:58 local. The valid ones among them reach the tape stamped "now" at their old price, because times are forced to increase.
+- **tastytrade's set in premarket.** CIIT, RCT, VSA, 25 minutes from 01:11 local (`analysis\tasty_session.py`): every print code `Q`, no `O`, median 90-93 ms from print time to arrival, including the PC's clock error. All shares against the `dayVolume` rise: CIIT 52.6% of 708,534; RCT 62.9% of 99.6M, about 4M shares a minute; VSA 49.9% of 2.39M. No print over 5 s late in that window.
+- **Nothing on this token widens the tape** (RCT, some runs with CIIT and VSA, 01:38-01:43 local, real volume; `analysis\symbol_event_scan.py`, `aggregation_compare.py`):
+  - **Regional symbols:** `RCT&Q`, `&P`, `&Z`, `&K`, `&V`, `&D`, `&H`, `&Y`, `&J`, `&A`, `&N`, `&X`, `&B`, `&U`, `&L`, `&M` gave 0 rows on every event type and no error. `&Q` being silent too, on the venue tastytrade does carry, means the notation isn't served here, or isn't written this way. It doesn't show which venues exist.
+  - **Order sources:** of 41 names tried (from memory and dxFeed's docs), only `COMPOSITE`, `COMPOSITE_BID` and `COMPOSITE_ASK` answered, all code `Q`. `NTV` and `ntv` were silent. dxFeed's separate `DOM` service wasn't tried.
+  - **`TradeETH`:** no data and no `FEED_CONFIG`, at aggregation 0 and 0.1, though real premarket volume was trading. The spec's field list for it wasn't sent exactly, but `Trade` accepted the same fields, so the list is an unlikely cause.
+  - **`ethVolume` and `ethTurnover`:** the server drops them from `Trade`'s accepted fields.
+  - **Aggregation 0.1 changes timing, not the tape.** Side by side for about 70 s, the two periods delivered identical prints: CIIT 121, RCT 739, VSA 373, with none in only one. 0.1 is about 45-50 ms later and batches at about 100 ms (RCT's median gap between deliveries 100 ms against 56). The plugin's 0 is right.
+  - **Still open:** whether tastytrade's own platform shows other venues. That needs your login, or the support email.
+- **Depth permissions.** Gateway's 2152 at 02:08:36 lists depth from NASDAQ, BATS and IEX; top of book only from MEMX, PEARL, EDGEA and others; and "Need additional market data permissions" for ARCA, BEX and NYSE. So the DOM leaves out ARCA, which printed 16-22% of the shares below.
+
+### IBKR against tastytrade, head to head
+
+CIIT, RCT, VSA, 02:21:43-02:36:43 local (05:21-05:36 ET), recorded together with Quantower open (`analysis\premarket_compare.py`, `probe\ibkr-premarket-20261106.tsv`). Volume was real on RCT, moderate on VSA and CIIT, and the open is still to come.
+
+| | CIIT | RCT | VSA |
+|---|---|---|---|
+| `dayVolume` rise | 256,711 | 23,883,873 | 541,476 |
+| IBKR's tape, share of the rise | 100.1% | 100.0% | 100.0% |
+| tastytrade's tape, share of the rise | 59.8% | 55.1% | 54.9% |
+| tastytrade prints also on IBKR's tape (same price and size within 3 s) | 1,024 of 1,024 | 2,987 of 3,029 | 1,749 of 1,749 |
+| IBKR later than tastytrade on those: median / p90 / p99 / max | 441 / 696 / 735 / 816 ms | 430 / 697 / 736 / 3,540 ms | 449 / 720 / 733 / 813 ms |
+| Tape after a venue merge, share of IBKR's shares (worked out from venue totals) | 97.8% | 98.0% | 97.8% |
+
+- **IBKR's tape is complete here.** That's the first premarket measure, and it matches the midday result.
+- **tastytrade carries roughly FINRA plus Nasdaq.** Its shares are 96% of IBKR's FINRA and NASDAQ prints on all three. Exchange code `Q` covers both. The matching ignores venue, so the few "matches" to ARCA and others are probably coincidences of price and size.
+- **What tastytrade misses:** ARCA 16-22% of shares, DRCTEDGE 9-15%, MEMX, PEARL, BATS.
+- **IBKR is slower than at midday.** It was about 115 ms behind on SPY and AEHL at midday, and about 440 ms here. p90 and p99 sit close together near 700-735 ms, which looks like a timer of about 700 ms, though that isn't proven. The overnight tape looked like 1.5 s.
+- **Rounding (item 6):** on these whole-share small caps, 5,760 of 5,802 tastytrade prints have an IBKR print of the same price and size, so IBKR isn't rounding or combining them here. The earlier evidence for rounding came from fractional FINRA sizes on SPY, and that's still unexplained. RCT's 42 unmatched prints (287,818 shares) weren't examined.
+- **Bad prints:** none past the 3% guard on tastytrade's own quote, and no IBKR print with an off-market condition. Conditions were only `T`, `TI`, `FT` and `FTI`, written with no spaces.
+- **Watchdog dry run:** no trips at 2, 3 or 5 s on any symbol. The longest wait from a tastytrade print to IBKR's next print was 781-1,566 ms, so 3 s has about twice the margin needed in this session. Recheck at the open.
+- **The plugin's 175 ms lag allowance is too small for premarket.** It's harmless for bars, because prints stay clamped inside the second IBKR gives them. It does mean a print's displayed time can sit up to about a second late within the tape.
