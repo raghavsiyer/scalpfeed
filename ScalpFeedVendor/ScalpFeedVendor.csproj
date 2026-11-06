@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- Quantower v1.147.9 and its bundled vendors are built for .NET 10. -->
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <GenerateDependencyFile>false</GenerateDependencyFile>
+    <QuantowerBin Condition="'$(QuantowerBin)' == ''">C:\Quantower\TradingPlatform\v1.147.9\bin</QuantowerBin>
+    <!-- dotnet build -p:TestHooks=true adds a file trigger that drops the socket on demand. -->
+    <DefineConstants Condition="'$(TestHooks)' == 'true'">$(DefineConstants);TESTHOOKS</DefineConstants>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Compile against the installed DLL; Quantower supplies it at runtime, so never copy it. -->
+    <Reference Include="TradingPlatform.BusinessLayer">
+      <HintPath>$(QuantowerBin)\TradingPlatform.BusinessLayer.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <EmbeddedResource Include="scalpfeed.svg" />
+  </ItemGroup>
+
+</Project>

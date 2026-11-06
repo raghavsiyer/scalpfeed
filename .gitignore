@@ -1,0 +1,20 @@
+# Build output
+bin/
+obj/
+.vs/
+*.user
+__pycache__/
+
+# Binaries: Quantower's assemblies are never redistributed, and ours are built from source
+*.dll
+*.exe
+*.pdb
+
+# Recordings and logs live outside the project, and stay out if one is ever copied in
+*.jsonl
+*.tsv
+*.log
+
+# Credentials and settings live one level up in .scalpfeed, and must never be committed
+tastytrade.json
+ibkr.json
