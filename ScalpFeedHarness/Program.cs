@@ -82,6 +82,15 @@ switch (args[0])
     case "tapemerge":
         RunTapeMerge();
         break;
+    case "pricebands":
+        var usual = PriceBands.ForDisplay([new TickBand(1.0, 0.0001), new TickBand(double.PositiveInfinity, 0.01)]);
+        Check(usual.Count == 2 && usual[0] == (0.0, 1.0, 0.0001, 3) && usual[1] == (1.0, double.PositiveInfinity, 0.01, 2), "3 decimals under a dollar, 2 from a dollar up, tick sizes untouched");
+        Check(PriceBands.ForDisplay([]).SequenceEqual(usual), "a lookup with no tick sizes gets the same bands");
+        var across = PriceBands.ForDisplay([new TickBand(double.PositiveInfinity, 0.01)]);
+        Check(across.Count == 2 && across[0] == (0.0, 1.0, 0.01, 3) && across[1] == (1.0, double.PositiveInfinity, 0.01, 2), "one band across the dollar line splits, keeping its tick size");
+        var three = PriceBands.ForDisplay([new TickBand(0.5, 0.0001), new TickBand(1.0, 0.001), new TickBand(10.0, 0.01), new TickBand(double.PositiveInfinity, 0.05)]);
+        Check(three.Select(b => b.Decimals).SequenceEqual(new[] { 3, 3, 2, 2 }) && three.Select(b => b.TickSize).SequenceEqual(new[] { 0.0001, 0.001, 0.01, 0.05 }), "several bands each keep their tick size");
+        break;
     case "printplace":
         Check(PrintPlaces.Of(2.74, 2.70, 2.73) == PrintPlace.AboveAsk, "above the ask");
         Check(PrintPlaces.Of(2.73, 2.70, 2.73) == PrintPlace.AtAsk, "at the ask");

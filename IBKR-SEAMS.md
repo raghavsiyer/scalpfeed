@@ -50,6 +50,7 @@ Still to add:
 3. **An IBKR failure can't take down charts and tape,** and either source failing can't stop the other from connecting.
 4. **The IBKR connection survives a reconnect.** Quantower builds a new vendor on every reconnect (seen in the plugin log), so anything that must survive one has to live outside the instance.
 5. **Tested against an IBKR paper account first:** kill each source while holding a paper position, and confirm orders and positions stay correct.
+6. **Order prices aren't cut to the displayed decimals.** The display is now 2 or 3 decimals while stocks trade finer, for example $0.0001 steps under a dollar. Check that a limit price entered in Quantower reaches the order at the price meant.
 
 Items 1-3 come partly from the DLL inspection I shouldn't have done, so treat them as likely. Confirm them with a stub second source and the plugin log. Quantower's terms prohibit looking inside its DLLs, so don't settle this by disassembly.
 
@@ -108,7 +109,9 @@ You wanted a proper tape: gray between the bid and ask, green or red text at the
 
 **Now:** the side comes from where the print hit the NBBO (`PrintPlace`, `QuoteWindow`). Quantower's coloring by aggressor gives gray, green and red with no rules, confirmed on your screen. Delta tools that use the side now count between-the-market prints as neither.
 
-**The highlights took a second try.** The first build put above-ask and below-bid in Tick direction, but Quantower shows Up or Down on every print there, gray ones included, so it works that field out itself. The flag now goes in Buyer and Seller, as `ABOVE` or `BELOW`, and is otherwise left empty. Not yet confirmed that a table rule can test those fields.
+**The highlights took a second try.** The first build put above-ask and below-bid in Tick direction, but Quantower shows Up or Down on every print there, gray ones included, so it works that field out itself. The flag now goes in Buyer and Seller, as `ABOVE` or `BELOW`, and is otherwise left empty. A table rule on Buyer works, confirmed on your screen.
+
+**Decimals:** 3 under a dollar and 2 from a dollar up, by your choice (`PriceBands`), instead of 4 everywhere. It's the precision on each price band, which Quantower's docs describe only as formatting. Tick sizes are untouched, so price steps and chart bucketing shouldn't change, and the plugin sends the same full prices, so its merge, sides and flags still use them. What changes is how prices read: 2.7188 reads 2.72, so a gray row can look equal to the ask. On a $0.05 stock each displayed step is about 2%, and in a table a 0.4759 and a 0.4761 both read 0.476.
 
 **A bare comparison with IBKR's quote gives false highlights**, because the quote reaches us late. Share of prints counted as outside the market (`analysis\quote_rules.py`):
 

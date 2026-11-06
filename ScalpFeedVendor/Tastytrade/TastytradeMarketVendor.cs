@@ -20,10 +20,6 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
     private const string Header = "ScalpFeed";
     private const int FlushDelayMs = 20;
 
-    // Stocks trade between ticks: most of PLUG's valid prints are sub-penny, in $0.0001 steps.
-    // Quantower formats every price with the band's precision, so fewer decimals than this
-    // would show those prints at the wrong price.
-    private const int DisplayDecimals = 4;
     private const int LagPrintsToWarn = 5;
     private const int UnprintedTradesForFallback = 3;
 
@@ -329,22 +325,8 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
         };
     }
 
-    private static List<VariableTick> ToVariableTicks(IReadOnlyList<TickBand> bands)
-    {
-        // Stocks under $1 can trade in $0.0001 steps. Fall back to that shape if a lookup omits them.
-        if (bands.Count == 0)
-            bands = [new TickBand(1.0, 0.0001), new TickBand(double.PositiveInfinity, 0.01)];
-
-        var ticks = new List<VariableTick>(bands.Count);
-        double low = 0;
-        foreach (var band in bands)
-        {
-            ticks.Add(new VariableTick(low, band.Below, true, band.Size, 1, DisplayDecimals));
-            low = band.Below;
-        }
-
-        return ticks;
-    }
+    private static List<VariableTick> ToVariableTicks(IReadOnlyList<TickBand> bands) =>
+        PriceBands.ForDisplay(bands).Select(b => new VariableTick(b.Low, b.High, true, b.TickSize, 1, b.Decimals)).ToList();
 
     #endregion Symbols
 
