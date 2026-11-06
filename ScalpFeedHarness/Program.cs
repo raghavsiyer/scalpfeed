@@ -616,6 +616,11 @@ async Task RunIbkrTape(int port, int seconds, string[] symbols)
 // How many depth slots are really free, and how long a freed one takes to come back.
 async Task RunIbkrSlots(int port, string[] symbols)
 {
+    // "burst" as the first symbol asks for them all at once, as a connect or a reconnect does.
+    bool burst = symbols[0] == "burst";
+    if (burst)
+        symbols = symbols[1..];
+
     var sink = new IbkrTestSink();
     var client = new IbkrClient(new IbkrConfig(true, "127.0.0.1", port, 85, IbkrConfig.Load().AllowLiveAccount));
     client.SetSink(sink);
@@ -624,7 +629,8 @@ async Task RunIbkrSlots(int port, string[] symbols)
     foreach (var symbol in symbols)
     {
         client.SetDepth(symbol, true);
-        await Task.Delay(400);
+        if (!burst)
+            await Task.Delay(400);
     }
 
     await Task.Delay(2500);
@@ -652,22 +658,29 @@ async Task RunIbkrSlots(int port, string[] symbols)
 // symbols: the first 3 are held, and each round swaps one for the next spare.
 async Task RunIbkrSwitch(int port, string[] symbols)
 {
+    // A number as the first symbol says how many to hold, for when another client has the other slots.
+    int holdCount = 3;
+    if (int.TryParse(symbols[0], out int asked))
+    {
+        holdCount = asked;
+        symbols = symbols[1..];
+    }
+
     var sink = new IbkrTestSink();
     var client = new IbkrClient(new IbkrConfig(true, "127.0.0.1", port, 86, IbkrConfig.Load().AllowLiveAccount));
     client.SetSink(sink);
     client.Start();
     await Task.Delay(1500);
 
-    // Spaced, because a burst can be granted past the limit, and then one cancel doesn't free a slot.
-    var held = symbols.Take(3).ToList();
+    var held = symbols.Take(holdCount).ToList();
     foreach (var symbol in held)
     {
         client.SetDepth(symbol, true);
         await Task.Delay(1000);
     }
 
-    Check(held.All(s => sink.DepthCount.GetValueOrDefault(s) > 0), $"3 slots held: {string.Join(",", held)}");
-    var spare = new Queue<string>(symbols.Skip(3));
+    Check(held.All(s => sink.DepthCount.GetValueOrDefault(s) > 0), $"{holdCount} slots held: {string.Join(",", held)}");
+    var spare = new Queue<string>(symbols.Skip(holdCount));
 
     async Task<double> Swap(string from, string to, TimeSpan offAfterOn)
     {

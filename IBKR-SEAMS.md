@@ -147,7 +147,7 @@ Still open: `IbkrBridge.Start` runs only after tastytrade is ready, so a tastytr
 
 ## Fixes from those measurements (2026-11-06, working copy, not installed)
 
-- **Depth pacing.** `IbkrClient` sends one depth request at a time, the next after a first row, a refusal, or 1 s, so a burst can't go past the limit. A same-tick switch isn't delayed (1 ms in `depthpacing`). Tested against a stand-in Gateway (`depthpacing`); not yet against the real one, and not yet on multi-venue books.
+- **Depth pacing.** `IbkrClient` sends one depth request at a time, the next after a first row, a refusal, or 1 s, so a burst can't go past the limit. A same-tick switch isn't delayed (1 ms in `depthpacing`). Tested against a stand-in Gateway (`depthpacing`) and the real one on multi-venue books ("Depth slots on the real Gateway" below). Not yet run inside Quantower.
 - **Overnight prints.** tastytrade's code `O` prints show whichever tape is on, so the tape can't go blank overnight. It stays partial.
 - **Tape watchdog (`TapeWatch`).** A fresh tastytrade print not followed by any IBKR print on that symbol within 3 s hands the tape to tastytrade until IBKR prints again. A premarket dry run on real volume gave no false trips ("IBKR against tastytrade" below); the open is still to check. Not yet run inside Quantower. Test build trigger: `test-ibkr-tape-mute`.
 - **Stay-awake (`StayAwake`).** Restarts Windows' idle-sleep timer once a second while connected and markets are open. Windows accepts the call; whether it really stops Modern Standby hasn't been tested. To test: Quantower connected on the new build, no input for 10 minutes, then look for Kernel-Power 506.
@@ -166,6 +166,20 @@ Still open: `IbkrBridge.Start` runs only after tastytrade is ready, so a tastytr
   - **Aggregation 0.1 changes timing, not the tape.** Side by side for about 70 s, the two periods delivered identical prints: CIIT 121, RCT 739, VSA 373, with none in only one. 0.1 is about 45-50 ms later and batches at about 100 ms (RCT's median gap between deliveries 100 ms against 56). The plugin's 0 is right.
   - **Still open:** whether tastytrade's own platform shows other venues. That needs your login, or the support email.
 - **Depth permissions.** Gateway's 2152 at 02:08:36 lists depth from NASDAQ, BATS and IEX; top of book only from MEMX, PEARL, EDGEA and others; and "Need additional market data permissions" for ARCA, BEX and NYSE. So the DOM leaves out ARCA, which printed 16-22% of the shares below.
+
+### Depth slots on the real Gateway
+
+03:31-03:36 local (06:31-06:36 ET), with Quantower open and holding 2 of the 3 slots, on AAPL, TSLA, AMD, MSFT, SPY and others, with books from several venues. A spaced raw probe first found 1 slot free.
+
+| 4 depth requests at once | Run 1 | Run 2 | Run 3 | Run 4 | Run 5 |
+|---|---|---|---|---|---|
+| Raw client, no pacing: granted | 1 | 4 | 4 | 4 | 4 |
+| Plugin's client, paced (`ibkrslots 4001 burst ...`): granted | 1 | 1 | 1 | 1 | 1 |
+
+- **A burst does go past the limit on multi-venue books.** 4 of 5 raw runs got all 4 requests, so 6 slots were in use against a limit of 3. Pacing held the count at exactly 3 every time. That settles the risk. The 16:26 failure itself still can't be replayed, but a count above 3 is the mechanism that produces its symptom.
+- **After a cancel,** a waiting symbol's first book took 1.6-1.8 s through `ibkrslots`, and 0.8 s in `ibkr`. The range comes from waiting for the 1-second retry tick plus about 0.6 s for the first row.
+- **Switching a DOM** (`ibkrswitch 4001 1 ...`) through the paced client: same tick, as Quantower sends it, first book in 638-720 ms with no refusals. New symbol 300 ms ahead of the cancel: 1.1-1.7 s with 1-2 refusals.
+- **`ibkr 4001` passed** with 3 skipped checks, which can't be judged while another client's slots leave a symbol waiting. No problems in the plugin's log throughout, so Quantower's DOMs weren't disturbed.
 
 ### IBKR against tastytrade, head to head
 
