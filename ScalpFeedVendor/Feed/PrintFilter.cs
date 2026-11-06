@@ -39,8 +39,9 @@ internal static class PrintFilter
 
     /// <summary>
     /// IBKR's condition codes for what tastytrade marks invalid and PrintFilter hides, plus special
-    /// settlement and out-of-sequence prints. Codes are one character each, space-separated. Odd
-    /// lots (I), sweeps (F) and extended hours (T) are ordinary trades and stay.
+    /// settlement and out-of-sequence prints. Codes are one character each, with or without spaces
+    /// between them (premarket shows TI and FTI). Odd lots (I), sweeps (F) and extended hours (T)
+    /// are ordinary trades and stay.
     /// </summary>
     public static bool IsOffMarket(ReadOnlySpan<byte> conditions)
     {
