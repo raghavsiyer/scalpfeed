@@ -106,7 +106,9 @@ You wanted a proper tape: gray between the bid and ask, green or red text at the
 
 **Why rows were green or red with some white:** tastytrade labels every print BUY or SELL (`aggressorSide`), yet 66-97% of labelled prints hit between its own bid and ask, and the plugin trusted the label. IBKR's rows have no label, so theirs came from the quote, and mid prints were white.
 
-**Now:** the side comes from where the print hit the NBBO (`PrintPlace`, `QuoteWindow`). Quantower's coloring by aggressor gives gray, green and red with no rules. The plugin puts above-ask and below-bid in Tick direction (Up, Down), so that field no longer means price direction, and two rules give the highlights. Delta tools that use the side now count between-the-market prints as neither.
+**Now:** the side comes from where the print hit the NBBO (`PrintPlace`, `QuoteWindow`). Quantower's coloring by aggressor gives gray, green and red with no rules, confirmed on your screen. Delta tools that use the side now count between-the-market prints as neither.
+
+**The highlights took a second try.** The first build put above-ask and below-bid in Tick direction, but Quantower shows Up or Down on every print there, gray ones included, so it works that field out itself. The flag now goes in Buyer and Seller, as `ABOVE` or `BELOW`, and is otherwise left empty. Not yet confirmed that a table rule can test those fields.
 
 **A bare comparison with IBKR's quote gives false highlights**, because the quote reaches us late. Share of prints counted as outside the market (`analysis\quote_rules.py`):
 

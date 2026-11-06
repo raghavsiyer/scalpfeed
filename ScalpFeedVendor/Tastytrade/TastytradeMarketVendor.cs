@@ -578,6 +578,7 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
         // and its place in line can't disagree. It's almost always uncontended.
         lock (state)
         {
+            var direction = price > state.LastPrice ? TickDirection.Up : price < state.LastPrice ? TickDirection.Down : TickDirection.None;
             state.LastPrice = price;
             state.LastSize = size;
 
@@ -592,11 +593,22 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
             bool hasNbbo = state.IbkrBid > 0 && state.IbkrAsk > 0;
             var place = state.RecentQuotes.Judge(price, hasNbbo ? state.IbkrBid : bid, hasNbbo ? state.IbkrAsk : ask, bid, ask, DateTime.UtcNow.Ticks);
 
-            this.PushMessage(new Last(state.Id, price, size, new DateTime(ticks, DateTimeKind.Utc))
+            var last = new Last(state.Id, price, size, new DateTime(ticks, DateTimeKind.Utc))
             {
                 AggressorFlag = ToAggressor(place, side),
-                TickDirection = ToOutsideFlag(place)
-            });
+                TickDirection = direction
+            };
+
+            // A print has no bid or ask field for a table rule to compare against, and Quantower works
+            // out Tick direction itself. Buyer and Seller are otherwise empty for stocks, so they say
+            // outright when a print hit outside the quote. Both, for whichever a rule can test.
+            if (ToOutsideFlag(place) is { } outside)
+            {
+                last.Buyer = outside;
+                last.Seller = outside;
+            }
+
+            this.PushMessage(last);
         }
 
         Interlocked.Increment(ref this.printsPushed);
@@ -614,15 +626,11 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
         _ => side == PrintSide.Buy ? AggressorFlag.Buy : side == PrintSide.Sell ? AggressorFlag.Sell : AggressorFlag.None
     };
 
-    /// <summary>
-    /// A print has no bid or ask field for a table rule to compare against, so this says outright when
-    /// it hit outside the quote: Up above the ask, Down below the bid. It isn't the usual tick direction.
-    /// </summary>
-    private static TickDirection ToOutsideFlag(PrintPlace place) => place switch
+    private static string ToOutsideFlag(PrintPlace place) => place switch
     {
-        PrintPlace.AboveAsk => TickDirection.Up,
-        PrintPlace.BelowBid => TickDirection.Down,
-        _ => TickDirection.None
+        PrintPlace.AboveAsk => "ABOVE",
+        PrintPlace.BelowBid => "BELOW",
+        _ => null
     };
 
     private void MaybePushDayBar(SymbolState state, long nowTicks)
