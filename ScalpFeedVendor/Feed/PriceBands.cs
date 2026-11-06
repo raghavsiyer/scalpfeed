@@ -2,16 +2,34 @@ namespace ScalpFeedVendor.Feed;
 
 /// <summary>
 /// Sizes in the market depth panel, by your choice of 2026-11-06: in whole hundreds, so 2870 shares
-/// shows as 28, and with rows of 100 shares or fewer left out. That can leave out the best bid or ask
-/// itself. Only depth rows use this. The quote, tape and bars are unaffected.
+/// shows as 28, and with rows of 100 shares or fewer left out unless they're at the best price, because
+/// hiding those would show a wrong spread. Only depth rows use this. The quote, tape and bars are
+/// unaffected.
 /// </summary>
 internal static class DepthSizes
 {
     private const double MostSharesHidden = 100;
+    private const double SamePrice = 1e-9;
 
-    public static bool Shows(double shares) => shares > MostSharesHidden;
+    /// <param name="bestInBook">This side's best price among the depth rows.</param>
+    /// <param name="quoted">This side's price on IBKR's quote, which can differ from the book for a moment.</param>
+    public static bool Shows(double shares, double price, double bestInBook, double quoted) =>
+        shares > 0 && (shares > MostSharesHidden || Math.Abs(price - bestInBook) < SamePrice || Math.Abs(price - quoted) < SamePrice);
 
-    public static double ToHundreds(double shares) => Math.Floor(shares / 100);
+    /// <summary>A shown row reads at least 1, since 85 shares at the best price mustn't read as nothing there.</summary>
+    public static double ToHundreds(double shares) => Math.Max(1, Math.Floor(shares / 100));
+
+    public static double Best(List<IbkrDepthRow> rows, bool bids)
+    {
+        double best = double.NaN;
+        foreach (var row in rows)
+        {
+            if (double.IsNaN(best) || (bids ? row.Price > best : row.Price < best))
+                best = row.Price;
+        }
+
+        return best;
+    }
 }
 
 /// <summary>

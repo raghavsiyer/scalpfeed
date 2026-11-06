@@ -92,8 +92,15 @@ switch (args[0])
         Check(three.Select(b => b.Decimals).SequenceEqual(new[] { 3, 3, 2, 2 }) && three.Select(b => b.TickSize).SequenceEqual(new[] { 0.0001, 0.001, 0.01, 0.05 }), "several bands each keep their tick size");
         Check(DepthSizes.ToHundreds(2870) == 28 && DepthSizes.ToHundreds(100) == 1 && DepthSizes.ToHundreds(199) == 1, "depth sizes truncate to hundreds");
         Check(Enumerable.Range(1, 100000).All(n => DepthSizes.ToHundreds(n * 100) == n), "every whole hundred comes out exact");
-        Check(!DepthSizes.Shows(100) && !DepthSizes.Shows(99) && !DepthSizes.Shows(0.198), "rows of 100 shares or fewer don't show");
-        Check(DepthSizes.Shows(101) && DepthSizes.ToHundreds(101) == 1, "101 shares shows, as 1");
+        Check(!DepthSizes.Shows(100, 2.55, 2.57, 2.57) && !DepthSizes.Shows(99, 2.55, 2.57, 2.57), "behind the best price, 100 shares or fewer don't show");
+        Check(DepthSizes.Shows(101, 2.55, 2.57, 2.57) && DepthSizes.ToHundreds(101) == 1, "101 shares shows anywhere, as 1");
+        Check(DepthSizes.Shows(100, 2.57, 2.57, 2.57), "100 shares at the best price shows");
+        Check(DepthSizes.Shows(100, 2.57, 2.57, 2.56) && DepthSizes.Shows(100, 2.56, 2.57, 2.56), "the book's best and the quote's price both count, when they differ");
+        Check(DepthSizes.Shows(85, 342.00, 342.00, 342.00) && DepthSizes.ToHundreds(85) == 1, "85 shares at the best price shows, reading 1, not 0");
+        Check(!DepthSizes.Shows(0, 2.57, 2.57, 2.57), "an empty row never shows");
+        Check(DepthSizes.Shows(100, 2.57, 2.57, double.NaN), "with no quote, the book's best still shows");
+        var depthRows = new List<IbkrDepthRow> { new(2.55, 100, "A"), new(2.57, 100, "B"), new(2.56, 300, "C") };
+        Check(DepthSizes.Best(depthRows, true) == 2.57 && DepthSizes.Best(depthRows, false) == 2.55 && double.IsNaN(DepthSizes.Best(new List<IbkrDepthRow>(), true)), "the best price is found on each side");
         break;
     case "printplace":
         Check(PrintPlaces.Of(2.74, 2.70, 2.73) == PrintPlace.AboveAsk, "above the ask");

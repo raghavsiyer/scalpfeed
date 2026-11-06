@@ -296,12 +296,12 @@ internal sealed class IbkrBridge : IIbkrSink
     {
         var now = DateTime.UtcNow;
         var book = new DOMQuote(state.Id, now);
-        Fill(book.Bids, bids, QuotePriceType.Bid, this.bidIds, state.Id, now);
-        Fill(book.Asks, asks, QuotePriceType.Ask, this.askIds, state.Id, now);
+        Fill(book.Bids, bids, QuotePriceType.Bid, this.bidIds, state.Id, now, DepthSizes.Best(bids, true), state.IbkrBid);
+        Fill(book.Asks, asks, QuotePriceType.Ask, this.askIds, state.Id, now, DepthSizes.Best(asks, false), state.IbkrAsk);
         this.push(book);
     }
 
-    private static void Fill(List<Level2Quote> target, List<IbkrDepthRow> rows, QuotePriceType side, string[] ids, string symbolId, DateTime now)
+    private static void Fill(List<Level2Quote> target, List<IbkrDepthRow> rows, QuotePriceType side, string[] ids, string symbolId, DateTime now, double bestInBook, double quoted)
     {
         // Several venues can sit at one price, so a row's position is its identity, not its price.
         foreach (var row in rows)
@@ -309,7 +309,7 @@ internal sealed class IbkrBridge : IIbkrSink
             if (target.Count == ids.Length)
                 break;
 
-            if (DepthSizes.Shows(row.Size))
+            if (DepthSizes.Shows(row.Size, row.Price, bestInBook, quoted))
                 target.Add(new Level2Quote(side, symbolId, ids[target.Count], row.Price, DepthSizes.ToHundreds(row.Size), now) { Broker = row.Venue });
         }
     }
