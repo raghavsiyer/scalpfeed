@@ -214,7 +214,26 @@ tastytrade's 1-minute candle volume is exactly its own valid prints, in all 42 m
 - **No other candle gets more** (`analysis\candle_periods.py`): `=5m`, `=15m`, `=1h` and `price=last` add up to the same total as `=1m`. `tho=true` and `a=s` showed nothing from today's premarket. `price=mark` and `price=bid` gave no rows.
 - **Daily candles are right.** `{=d}` equals `prevDayVolume` exactly (RCT 108,628,849, CIIT 6,817,988). That day's 1-minute bars summed to only 32-41% of it. Today so far they're 46-67% of `dayVolume`.
 - **Live bars and reloaded bars disagree.** A forming bar is built from the tape, so with IBKR's tape it should be complete, but a reload swaps it for the partial candle. That's from reading the code, not checked on a chart.
-- **Routes to complete bars.** IBKR's `reqHistoricalData` (messages 20 and 25, not on the whitelist, not tested). From memory, IBKR filters some trade types out of its TRADES bars and limits small-bar requests, so it needs testing against the tape first. Or bars saved from IBKR's tape, which need no new message but only exist from when a symbol first had a tape slot, so not for a runner just opened.
+- **Other route not used:** bars saved from IBKR's tape need no new message, but only exist from when a symbol first had a tape slot, so not for a runner just opened.
+
+### IBKR's historical bars
+
+Tested 03:45 local (06:45 ET) with your OK, from a separate script that can send only messages 71, 20 and 25 (`analysis\ibkr_history.py`, compared by `history_vs_tape.py`). `IbkrClient.AllowedRequests` is unchanged, and the plugin doesn't use any of this yet. The tape comparison covers 05:22-05:35 and 06:36-06:39 ET: premarket only, real volume on RCT and moderate on CIIT and VSA. Recheck at the open.
+
+| Share of IBKR's tape, same bars | CIIT | RCT | VSA |
+|---|---|---|---|
+| IBKR 1-minute bars | 81.4% | 99.9% | 87.4% |
+| tastytrade 1-minute candles | 53.1% | 55.1% | 50.0% |
+
+- **IBKR's bars are the tape without odd lots, exactly.** 98 of 98 bars (50 at 1 minute, 48 at 10 seconds) equal the tape's prints without condition `I`, to the share. So the shortfall is only odd lots, large on low-share names (CIIT 19%, VSA 13%) and tiny on RCT (0.1%).
+- **The range follows the same rule.** The bar's high or low never went past the tape's. The tape printed past the bar's range in 3 of 14 bars on CIIT, 2 of 18 on RCT and 8 of 18 on VSA at 1 minute, and 12 of 24 on VSA at 10 seconds. Those would be odd lots.
+- **Fast enough for chart opens.** 3 days of 1-minute bars (2,086 bars) took 279 ms, 4 hours took 261-984 ms, 30 minutes of 10-second bars took 189-550 ms, and daily bars took about 120 ms. tastytrade's candles took 70-326 ms in the 00:57 log.
+- **No overnight bars.** Nothing between 20:00 and 04:00 ET on SMART, so those hours would stay on tastytrade's `O` candles. Bars run 04:00-20:00 ET, with zero-volume bars for quiet minutes.
+- **Daily bars are lower than tastytrade's.** Against `prevDayVolume`: RCT 99.8%, CIIT 84.3%, VSA 77.1%. Today against `dayVolume`: RCT 98.0%, CIIT 78.9%, VSA 86.9%. tastytrade's daily candles match the whole market, so daily bars should stay on tastytrade.
+- **Live and reloaded bars would still differ slightly.** Forming bars include odd lots, and reloaded ones wouldn't, so a reload could lower a bar's volume by the odd-lot share and narrow its range.
+- **Not tested:** IBKR's request limits. From memory: 60 requests per 10 minutes for bars of 30 seconds or less, and 6 per contract in 2 seconds. A chart open asks for several periods within a second, so a plugin version would have to space them.
+
+**To use it in the plugin:** add 20 and 25 to `AllowedRequests`, which is your decision. Use IBKR's bars for intraday periods from 04:00 to 20:00 ET, and tastytrade's for overnight, daily and longer bars, and whenever IBKR is down.
 
 ### IBKR against tastytrade, head to head
 
