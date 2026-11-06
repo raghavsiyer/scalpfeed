@@ -132,6 +132,12 @@ def receive():
                     say(f"row id={rid} {'|'.join(f[3:9])}")
             elif kind == "99":
                 rid = int(f[1])
+                if f[2] == "3" and capture:
+                    # Tick-by-tick BidAsk: time, bid, ask, bid size, ask size, mask.
+                    label = ids.get(rid, ("", "?", ""))
+                    now_ms = time.time() * 1000
+                    capture.write(f"{now_ms:.0f}\t{label[1]}\tBIDTBT\t{f[3]}\t{f[4]}\t{f[6]}\t\t\n")
+                    capture.write(f"{now_ms:.0f}\t{label[1]}\tASKTBT\t{f[3]}\t{f[5]}\t{f[7]}\t\t\n")
                 if f[2] in ("1", "2"):
                     record = (float(f[3]), f[4], f[5], f[7], f[8])
                     prints_by_id[rid].append(record)
@@ -158,6 +164,9 @@ def receive():
                     quote["ask"] = price
                 if tick in (1, 2):
                     quote["n"] += 1
+                    if capture:
+                        label = ids.get(rid, ("", "?", ""))
+                        capture.write(f"{time.time() * 1000:.0f}\t{label[1]}\t{'BID' if tick == 1 else 'ASK'}\t\t{price}\t{f[5]}\t\t\n")
     except (EOFError, OSError):
         sock_closed.set()
 

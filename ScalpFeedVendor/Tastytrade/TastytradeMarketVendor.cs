@@ -578,7 +578,6 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
         // and its place in line can't disagree. It's almost always uncontended.
         lock (state)
         {
-            var direction = price > state.LastPrice ? TickDirection.Up : price < state.LastPrice ? TickDirection.Down : TickDirection.None;
             state.LastPrice = price;
             state.LastSize = size;
 
@@ -589,28 +588,42 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
             long ticks = exchangeTicks > state.LastPrintTicks ? exchangeTicks : state.LastPrintTicks + 1;
             state.LastPrintTicks = ticks;
 
+            // IBKR's quote is the NBBO. tastytrade's is Nasdaq's own, for when IBKR isn't quoting.
+            bool hasNbbo = state.IbkrBid > 0 && state.IbkrAsk > 0;
+            var place = state.RecentQuotes.Judge(price, hasNbbo ? state.IbkrBid : bid, hasNbbo ? state.IbkrAsk : ask, bid, ask, DateTime.UtcNow.Ticks);
+
             this.PushMessage(new Last(state.Id, price, size, new DateTime(ticks, DateTimeKind.Utc))
             {
-                AggressorFlag = ToAggressor(side, price, bid, ask),
-                TickDirection = direction
+                AggressorFlag = ToAggressor(place, side),
+                TickDirection = ToOutsideFlag(place)
             });
         }
 
         Interlocked.Increment(ref this.printsPushed);
     }
 
-    private static AggressorFlag ToAggressor(PrintSide side, double price, double bid, double ask)
+    /// <summary>
+    /// The tape's color comes from this. tastytrade labels every print BUY or SELL, even though 66-97%
+    /// of them hit between its bid and ask, so the label only decides when there's no quote at all.
+    /// </summary>
+    private static AggressorFlag ToAggressor(PrintPlace place, PrintSide side) => place switch
     {
-        if (side == PrintSide.Buy)
-            return AggressorFlag.Buy;
-        if (side == PrintSide.Sell)
-            return AggressorFlag.Sell;
+        PrintPlace.AboveAsk or PrintPlace.AtAsk => AggressorFlag.Buy,
+        PrintPlace.BelowBid or PrintPlace.AtBid => AggressorFlag.Sell,
+        PrintPlace.Between => AggressorFlag.None,
+        _ => side == PrintSide.Buy ? AggressorFlag.Buy : side == PrintSide.Sell ? AggressorFlag.Sell : AggressorFlag.None
+    };
 
-        // This feed doesn't reliably label the side, so infer it from where the print hit.
-        if (price >= ask)
-            return AggressorFlag.Buy;
-        return price <= bid ? AggressorFlag.Sell : AggressorFlag.None;
-    }
+    /// <summary>
+    /// A print has no bid or ask field for a table rule to compare against, so this says outright when
+    /// it hit outside the quote: Up above the ask, Down below the bid. It isn't the usual tick direction.
+    /// </summary>
+    private static TickDirection ToOutsideFlag(PrintPlace place) => place switch
+    {
+        PrintPlace.AboveAsk => TickDirection.Up,
+        PrintPlace.BelowBid => TickDirection.Down,
+        _ => TickDirection.None
+    };
 
     private void MaybePushDayBar(SymbolState state, long nowTicks)
     {

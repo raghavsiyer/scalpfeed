@@ -82,6 +82,45 @@ switch (args[0])
     case "tapemerge":
         RunTapeMerge();
         break;
+    case "printplace":
+        Check(PrintPlaces.Of(2.74, 2.70, 2.73) == PrintPlace.AboveAsk, "above the ask");
+        Check(PrintPlaces.Of(2.73, 2.70, 2.73) == PrintPlace.AtAsk, "at the ask");
+        Check(PrintPlaces.Of(2.7188, 2.70, 2.73) == PrintPlace.Between, "between, including a sub-penny price");
+        Check(PrintPlaces.Of(2.70, 2.70, 2.73) == PrintPlace.AtBid, "at the bid");
+        Check(PrintPlaces.Of(2.69, 2.70, 2.73) == PrintPlace.BelowBid, "below the bid");
+        Check(PrintPlaces.Of(2.70, double.NaN, double.NaN) == PrintPlace.Unknown, "no quote yet is unknown");
+        Check(PrintPlaces.Of(2.70, -1, 2.73) == PrintPlace.Unknown && PrintPlaces.Of(2.70, 2.69, -1) == PrintPlace.Unknown, "a side with no market is unknown");
+        Check(PrintPlaces.Of(2.70, 2.70, 2.70) == PrintPlace.AtAsk, "a locked market counts as at the ask");
+
+        long tick = TimeSpan.TicksPerMillisecond;
+        var window = new QuoteWindow();
+        long now = 1_000_000 * tick;
+        window.Add(2.70, 2.73, now - (5000 * tick));
+        Check(window.Judge(2.74, 2.70, 2.73, double.NaN, double.NaN, now) == PrintPlace.AboveAsk, "beyond the NBBO, with nothing else to say otherwise, is above the ask");
+        Check(window.Judge(2.69, 2.70, 2.73, double.NaN, double.NaN, now) == PrintPlace.BelowBid, "and below the bid likewise");
+        Check(window.Judge(2.74, 2.70, 2.73, 2.60, 2.80, now) == PrintPlace.AtAsk, "not beyond its own quote means only at the ask");
+        Check(window.Judge(2.69, 2.70, 2.73, 2.60, 2.80, now) == PrintPlace.AtBid, "and only at the bid");
+        Check(window.Judge(2.74, 2.70, 2.73, 2.60, 2.73, now) == PrintPlace.AboveAsk, "beyond its own quote as well is above the ask");
+
+        window = new QuoteWindow();
+        window.Add(2.72, 2.75, now - (500 * tick));
+        window.Add(2.70, 2.73, now - (100 * tick));
+        Check(window.Judge(2.74, 2.70, 2.73, double.NaN, double.NaN, now) == PrintPlace.AtAsk, "an ask of the last moment that covers it means at the ask");
+        Check(window.Judge(2.76, 2.70, 2.73, double.NaN, double.NaN, now) == PrintPlace.AboveAsk, "beyond every ask of the last moment is above the ask");
+        window = new QuoteWindow();
+        window.Add(2.68, 2.72, now - (500 * tick));
+        window.Add(2.70, 2.73, now - (100 * tick));
+        Check(window.Judge(2.69, 2.70, 2.73, double.NaN, double.NaN, now) == PrintPlace.AtBid, "a bid of the last moment that covers it means at the bid");
+        Check(window.Judge(2.67, 2.70, 2.73, double.NaN, double.NaN, now) == PrintPlace.BelowBid, "beyond every bid of the last moment is below the bid");
+
+        window = new QuoteWindow();
+        window.Add(2.72, 2.75, now - (2000 * tick));
+        window.Add(2.70, 2.73, now - (1500 * tick));
+        Check(window.Judge(2.74, 2.70, 2.73, double.NaN, double.NaN, now) == PrintPlace.AboveAsk, "an old quote no longer counts, though the one still standing does");
+        window = new QuoteWindow();
+        window.Add(-1, -1, now);
+        Check(window.Judge(2.74, -1, -1, double.NaN, double.NaN, now) == PrintPlace.Unknown, "a halt stays unknown");
+        break;
     case "mergereplay":
         RunMergeReplay(args[1], args[2]);
         break;

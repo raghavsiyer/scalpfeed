@@ -35,6 +35,7 @@ internal sealed class SymbolState
     // Belong to IBKR's receive thread: the quote its prints are judged against.
     public double IbkrBid = double.NaN;
     public double IbkrAsk = double.NaN;
+    public readonly QuoteWindow RecentQuotes = new();
 
     public long LastPrintIndex;
     public long LastPrintTicks;

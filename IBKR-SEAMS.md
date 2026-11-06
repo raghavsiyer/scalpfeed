@@ -2,7 +2,7 @@
 
 Status: bid, ask, depth, the tape, the merged tape and intraday chart bars are built (`Feed/IbkrClient.cs`, `Feed/IbkrSession.cs`, `Feed/PrintFilter.cs`, `Feed/TapeMerge.cs`, `Feed/IbkrBars.cs`, `Ibkr/IbkrBridge.cs`). Quotes and depth were tested on paper and live Gateway, the tape and bars on live. Execution isn't started, and the client can't send order messages: `AllowedRequests` is a whitelist without them (71, 59, 1, 2, 10, 11, 97, 98, and by your decision of 2026-11-06, 20 and 25 for history).
 
-Installed and running since 2026-11-06 about 05:10 local: release build of commit `3a95473`, merged tape, no test triggers (`analysis\dll_strings.py`). You report the tape looks good on it. The build it replaced is parked beside it as `ScalpFeedVendor.20261106050506.old`.
+Running since 2026-11-06 05:09 local: release build of commit `3a95473`, merged tape, no test triggers (`analysis\dll_strings.py`). Installed for the next restart: the tape-color build ("Tape colors" below). Earlier builds are parked beside it with `.old` names.
 
 The plugin connects to a live Gateway on port 4001 by your decision of 2026-11-05, for data only. `allowLiveAccount` in `ibkr.json` is what permits that.
 
@@ -97,6 +97,33 @@ Every tastytrade print across these recordings has an IBKR partner or is under o
 - **Timing:** tastytrade's prints show at its own speed, and everything only IBKR has arrives about 0.4 s later.
 
 **First minutes inside Quantower** (release build, from 07:25 ET): no problems logged, 24% of one core. 17.5% of FINRA prints were added from IBKR, which was the symbol mix, not duplicates: DBGI alone is 26.5%. The plugin's counts balance: of 1,916 prints shown in one minute, 1,104 came from IBKR and 812 from tastytrade (743 FINRA, 45 Nasdaq, 24 with no partner). That's accounting and a replay, not a print-by-print check of what Quantower drew.
+
+### Tape colors
+
+You wanted a proper tape: gray between the bid and ask, green or red text at the ask or bid, and a green or red highlight above the ask or below the bid. Worked out 2026-11-06, 05:20-05:32 local (08:20-08:32 ET), premarket on CIIT and VSA.
+
+**Why a rule on Last against Ask did nothing:** the T&S Ask column is blank, because a print in Quantower's public API has no bid or ask field to fill (tried by compiling). How that column is ever filled isn't documented.
+
+**Why rows were green or red with some white:** tastytrade labels every print BUY or SELL (`aggressorSide`), yet 66-97% of labelled prints hit between its own bid and ask, and the plugin trusted the label. IBKR's rows have no label, so theirs came from the quote, and mid prints were white.
+
+**Now:** the side comes from where the print hit the NBBO (`PrintPlace`, `QuoteWindow`). Quantower's coloring by aggressor gives gray, green and red with no rules. The plugin puts above-ask and below-bid in Tick direction (Up, Down), so that field no longer means price direction, and two rules give the highlights. Delta tools that use the side now count between-the-market prints as neither.
+
+**A bare comparison with IBKR's quote gives false highlights**, because the quote reaches us late. Share of prints counted as outside the market (`analysis\quote_rules.py`):
+
+| | Recording | Bare NBBO | Plugin's rule |
+|---|---|---|---|
+| tastytrade rows, CIIT | 08:25-08:28 ET | 10.2% | 3.2% |
+| tastytrade rows, CIIT | 08:29-08:31 ET | 7.0% | 0% |
+| tastytrade rows, VSA | 08:25-08:28 ET | 21.6% | 0.2% |
+| tastytrade rows, VSA, moving fast | 08:29-08:31 ET | 40.7% | 17.5% |
+| IBKR-only rows, CIIT | 08:25-08:28 ET | 9.6% | 7.0% |
+| IBKR-only rows, VSA | 08:25-08:28 ET | 15.0% | 5.4% |
+
+- **The rule:** a print is outside only if it's beyond the NBBO now, the quote it came with (tastytrade's rows), and every quote standing in the last 800 ms. Short of that, it counts as at that side.
+- **VSA's 17.5% isn't settled.** Those prints are beyond every quote we had, so they're real or the quotes were behind in a fast move. Nothing here can tell which.
+- **Judging IBKR's late rows by an earlier quote made them worse,** so they use the quote on arrival.
+- **Tick-by-tick BidAsk isn't worth its slots.** Against `reqMktData` it was -18 to +81 ms at the median and gave nearly the same shares outside (CIIT 7.0% against 7.0%, VSA 38.5% against 40.7%), on 2 of the 5 tape slots. This settles that item on the recheck list for premarket.
+- **Between-the-market share differs by feed for a real reason:** tastytrade's rows include dark midpoint prints (33-51% between), while IBKR-only rows are exchange prints, mostly at the quote (9-26% between).
 
 ### The blinking latency and the tape's micro-pauses
 

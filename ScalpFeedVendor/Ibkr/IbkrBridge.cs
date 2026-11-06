@@ -177,6 +177,7 @@ internal sealed class IbkrBridge : IIbkrSink
 
         state.IbkrBid = bid;
         state.IbkrAsk = ask;
+        state.RecentQuotes.Add(bid, ask, DateTime.UtcNow.Ticks);
         if (!state.QuoteOn)
             return;
 
