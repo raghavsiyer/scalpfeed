@@ -23,11 +23,6 @@ internal sealed class IbkrBridge : IIbkrSink
     private const string Header = "ScalpFeed";
     private static readonly List<IbkrDepthRow> NoRows = new();
 
-    // IBKR's prints come stamped in whole seconds, about this long after they happened (measured
-    // 2026-11-05: 115 ms behind tastytrade, itself about 60 ms behind the exchange). Backing off
-    // by this much keeps them from pushing the times of tastytrade's prints forward.
-    private static readonly long TypicalLagTicks = TimeSpan.FromMilliseconds(175).Ticks;
-
     // A blip is over before a warning would help.
     private static readonly TimeSpan WarnAfter = TimeSpan.FromSeconds(2);
 
@@ -238,9 +233,10 @@ internal sealed class IbkrBridge : IIbkrSink
             Interlocked.Increment(ref reportedAdded);
         }
 
-        // Stays inside the second IBKR says it happened in, so it lands in the right bar.
-        long lastTickOfSecond = DateTime.UnixEpoch.Ticks + ((unixSeconds + 1) * TimeSpan.TicksPerSecond) - 1;
-        this.emitPrint(state, price, size, Math.Min(arrivalUtcTicks - TypicalLagTicks, lastTickOfSecond), bid, ask);
+        // Stamped when it arrived, since IBKR gives only whole seconds. Quantower's latency measure
+        // reads this stamp's age, and backdating it made that number blink between these rows and
+        // tastytrade's. A print near a bar's end can land in the next bar until the chart reloads.
+        this.emitPrint(state, price, size, arrivalUtcTicks, bid, ask);
     }
 
     public void OnIbkrTapeActive(string symbol, double price, double size, long unixSeconds, bool carried)

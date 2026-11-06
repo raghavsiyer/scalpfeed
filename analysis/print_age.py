@@ -1,11 +1,14 @@
 # How old each print's time stamp would be when the plugin hands it to Quantower in merged mode, using the
 # plugin's own stamping rules, replayed over two recordings by arrival. Also how evenly each feed's rows come.
-#   python -I print_age.py <tape.tsv from ibkr_raw.py --capture> <capture.jsonl from ScalpFeedProbe>
+#   python -I print_age.py <tape.tsv from ibkr_raw.py --capture> <capture.jsonl from ScalpFeedProbe> [old]
+# With "old", uses the rule before 2026-11-06: IBKR's rows backdated 175 ms and held to their own second.
+# Otherwise they're stamped on arrival. The plugin's stamps can only rise, in both cases.
 import json
 import sys
 from collections import defaultdict
 
-BACKDATE_MS = 175  # IbkrBridge.TypicalLagTicks
+OLD_RULE = len(sys.argv) > 3 and sys.argv[3] == "old"
+BACKDATE_MS = 175
 CARRIED = {"NASDAQ", "BEX", "PSX"}
 
 
@@ -55,11 +58,14 @@ for symbol, rows in sorted(events.items()):
         if source == "tasty":
             wanted = stamp
             rule = None
-        else:
+        elif OLD_RULE:
             backdated = arrival - BACKDATE_MS
             end_of_second = (stamp + 1) * 1000 - 0.0001
             wanted = min(backdated, end_of_second)
             rule = "ibkr, stamped by the 175 ms rule" if backdated <= end_of_second else "ibkr, held to its own second"
+        else:
+            wanted = arrival
+            rule = None
         final = wanted if wanted > last else last + 0.0001
         if source == "ibkr" and wanted <= last:
             rule = "ibkr, stamped just after tastytrade's last"

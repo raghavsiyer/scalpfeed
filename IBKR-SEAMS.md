@@ -98,12 +98,40 @@ Every tastytrade print across these recordings has an IBKR partner or is under o
 
 **First minutes inside Quantower** (release build, from 07:25 ET): no problems logged, 24% of one core. 17.5% of FINRA prints were added from IBKR, which was the symbol mix, not duplicates: DBGI alone is 26.5%. The plugin's counts balance: of 1,916 prints shown in one minute, 1,104 came from IBKR and 812 from tastytrade (743 FINRA, 45 Nasdaq, 24 with no partner). That's accounting and a replay, not a print-by-print check of what Quantower drew.
 
-**Open: you see a 100-200 ms latency number flash with tape micro-pauses** (07:30 ET).
+### The blinking latency and the tape's micro-pauses
 
-- **Not a block inside the plugin, as far as it can measure.** tastytrade's frames, including handing prints to Quantower and any wait on IBKR, took at most 0.13-1.3 ms per minute. IBKR's quote and depth flush peaked at 16.8 ms, once. IBKR's print path isn't timed on its own, but it holds the same lock those frames would wait on. Quantower's own drawing and garbage collection can't be seen from here.
-- **Candidate 1, the print stamps.** The plugin backdates IBKR's rows by 175 ms. `analysis\print_age.py` (RCT and VSA, 06:35 ET): tastytrade's rows are 23-27 ms old when handed over and never in that band. IBKR's have a median of 140-175 ms, and 52-61% are in it. When tastytrade's flow gaps, only IBKR's rows arrive, so the older stamp would show just as the tape looks paused.
-- **Candidate 2, the connection ping.** `Ping()` calls `PingMeter.MeasurePing()` synchronously, and its time goes to `Connection.PingTime`. TCP connect to the feed's host takes 67 ms, and a fresh HTTPS request 415 ms. Which thread Quantower calls it on isn't known.
-- **The lumps are real.** IBKR's rows come 3-7 at a time, every 570-710 ms, and that can read as a stutter on its own. tastytrade's flow has its own gaps too (RCT median 129 ms, p90 588), and merging makes gaps between rows smaller, not larger.
+You saw Quantower's latency measure blink 100-200 ms with the tape seeming to pause, and noted it sits steadily at 100-200 ms on an IBKR-only tape.
+
+**The number was the plugin's own doing.** It stamped IBKR's rows 175 ms in the past, and Quantower's measure evidently reads the stamp's age. Merged, the rows alternate between those and tastytrade's (23-27 ms old), so it blinked. That 175 ms was a guess, and IBKR's real lag is about 0.4 s. Rows are now stamped on arrival, so the measure no longer reflects IBKR's lag at all. `analysis\print_age.py` shows the difference.
+
+**Nothing is freezing, on anything measured** (07:30-08:01 ET, merged, DBGI and LABT open):
+
+- **Plugin:** tastytrade's frames, including handing prints to Quantower and any wait on IBKR, took at most 0.06-1.3 ms per minute. IBKR's quote and depth flush peaked at 16.8 ms, once.
+- **Quantower's main display thread** (`analysis\ui_stall.py`, a do-nothing window message every 10 ms): 8,632 answers in 90 s, median 0.06 ms, p99 0.71 ms, slowest 11.8 ms, none near 100 ms. Quantower used 33% of one core. That also rules out the network ping blocking the screen. Panels drawn on another thread wouldn't show here, though only one display thread has visible top-level windows.
+
+**So the pauses are moments when no row has reached us yet** (`analysis\tape_rhythm.py`, premarket):
+
+| | DBGI | LABT | RCT | VSA |
+|---|---|---|---|---|
+| Gaps of 500+ ms a minute, tastytrade alone | 32.4 | 37.4 | 28.9 | 34.4 |
+| Same, merged | 21.8 | 41.0 | 27.3 | 40.6 |
+| Gaps of 1+ s a minute, tastytrade alone | 5.1 | 23.3 | 10.4 | 19.9 |
+| Same, merged | 1.5 | 20.7 | 7.3 | 18.9 |
+| Gaps of 300+ ms ended by an IBKR lump | 41% | 21% | 30% | 34% |
+| IBKR-only rows per delivery | 5.1 | 3.1 | 5.6 | 3.8 |
+
+Merging mostly removes long gaps, though on thin names one long gap can split into two shorter ones. Most gaps end with a tastytrade row, so they're the market or tastytrade's own flow. When an IBKR lump ends one, 95-96% carry a print from a second overlapping the gap, so trades did happen while IBKR was holding them. IBKR stamps whole seconds, so that test is coarse.
+
+**Filling a gap means showing rows that have already arrived, later.** Spreading each IBKR batch evenly, simulated:
+
+| Spread | Gaps of 300+ ms a minute: DBGI, LABT, RCT, VSA | IBKR-only rows wait a further, median / p90 |
+|---|---|---|
+| None, today | 63.3, 61.7, 52.7, 53.8 | 0 |
+| 150 ms | 54.7, 61.2, 46.2, 52.2 | 50-75 / 125-199 ms |
+| 300 ms | 42.0, 58.6, 40.8, 50.7 | 100-150 / 250-470 ms |
+| 600 ms | 32.4, 57.6, 30.8, 49.2 | 205-4,453 / 520-11,775 ms, because the queue backs up on busy names |
+
+Not built: it helps busy names modestly, barely changes thin ones, and makes rows later on a tape used for speed. IBKR's delivery was also much quicker at midday (a gap of 179-274 ms and about 115 ms behind on 2026-11-05 against 570-710 ms and about 440 ms in premarket), so recheck this at the open before deciding anything.
 
 ## Why tastytrade's tape can't be made complete by settings
 
