@@ -32,6 +32,7 @@ string liveContract = Arg("--contract", "AUTO");
 var orderSources = Arg("--order-sources", "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 int tapeFromSeconds = int.Parse(Arg("--tape-from-seconds", "0"), CultureInfo.InvariantCulture);
 var tradeExtra = Arg("--trade-extra-fields", "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+var candleCodes = Arg("--candle-codes", "=1m").Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
 var appDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".scalpfeed");
 var configPath = Path.Combine(appDir, "tastytrade.json");
@@ -241,7 +242,8 @@ async Task Subscribe(int channel)
                     entry["fromTime"] = now - tapeFromSeconds * 1000L;
                 add.Add(entry);
             }
-            add.Add(new JsonObject { ["type"] = "Candle", ["symbol"] = symbol + "{=1m}", ["fromTime"] = now - candleDays * 86400000L });
+            foreach (var code in candleCodes)
+                add.Add(new JsonObject { ["type"] = "Candle", ["symbol"] = symbol + "{" + code + "}", ["fromTime"] = now - candleDays * 86400000L });
             foreach (var source in orderSources)
                 add.Add(new JsonObject { ["type"] = "Order", ["symbol"] = symbol, ["source"] = source });
         }

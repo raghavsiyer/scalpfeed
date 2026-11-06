@@ -10,7 +10,9 @@
 #   canceldepth SYM [plain]    cancels the newest depth id for SYM. plain sends isSmartDepth 0
 #   cancelgranted              cancels every depth id that wasn't refused
 #   quote SYM [EXCH]           reqMktData
-#   tape SYM [EXCH] [KIND]     reqTickByTickData, AllLast by default
+#   rtvol SYM                  reqMktData with generic ticks 233 and 375: IBKR's RT Volume strings. Captured
+#                              with exchange RTVOL or RTTRD, and milliseconds as a fraction in the seconds column
+#   tape SYM [EXCH] [KIND]     reqTickByTickData, AllLast by default. Other kinds are captured as EXCH/KIND
 #   canceltape SYM
 #   wait SECONDS
 #   retrybook SYM EVERY MAX    asks again under a new id every EVERY seconds until a depth row arrives
@@ -139,6 +141,14 @@ def receive():
                     if len(prints_by_id[rid]) <= args.print_ticks:
                         label = ids.get(rid, ("", "?", ""))
                         say(f"PRINT id={rid} {label[1]}@{label[2]} t={f[3]} px={f[4]} sz={f[5]} venue={f[7]} cond={f[8]!r}")
+            elif kind == "46":
+                rid, tick, value = int(f[2]), f[3], f[4]
+                if tick in ("48", "77") and capture:
+                    parts = value.split(";")
+                    label = ids.get(rid, ("", "?", ""))
+                    if len(parts) >= 3 and parts[0] and parts[2]:
+                        source = "RTVOL" if tick == "48" else "RTTRD"
+                        capture.write(f"{time.time() * 1000:.0f}\t{label[1]}\t{source}\t{float(parts[2]) / 1000:.3f}\t{parts[0]}\t{parts[1]}\t\t\n")
             elif kind == "1":
                 rid, tick, price = int(f[2]), int(f[3]), f[4]
                 quote = quotes_by_id[rid]
@@ -193,10 +203,14 @@ for raw_step in args.script.split(";"):
         rid = new_id("quote", parts[1], exchange)
         send(1, 11, rid, *contract(parts[1], exchange), False, "", False, False, "")
         say(f"-> reqMktData id={rid} {parts[1]}@{exchange}")
+    elif step == "rtvol":
+        rid = new_id("rtvol", parts[1], "SMART")
+        send(1, 11, rid, *contract(parts[1]), False, "233,375", False, False, "")
+        say(f"-> reqMktData id={rid} {parts[1]} generic 233,375")
     elif step == "tape":
         exchange = parts[2] if len(parts) > 2 else "SMART"
         tape_kind = parts[3] if len(parts) > 3 else "AllLast"
-        rid = new_id("tape", parts[1], exchange)
+        rid = new_id("tape", parts[1], exchange if tape_kind == "AllLast" else f"{exchange}/{tape_kind}")
         send(97, rid, *contract(parts[1], exchange), tape_kind, 0, False)
         say(f"-> reqTickByTick id={rid} {parts[1]}@{exchange} {tape_kind}")
     elif step == "canceltape":
