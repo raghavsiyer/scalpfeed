@@ -1,6 +1,6 @@
 # IBKR in ScalpFeed
 
-Status: bid, ask, depth and the tape are built (`Feed/IbkrClient.cs`, `Feed/IbkrSession.cs`, `Feed/PrintFilter.cs`, `Ibkr/IbkrBridge.cs`). Quotes and depth were tested on paper and live Gateway, the tape on live. Execution isn't started, and the client can't send order messages: `AllowedRequests` is a whitelist without them.
+Status: bid, ask, depth, the tape, the merged tape and intraday chart bars are built (`Feed/IbkrClient.cs`, `Feed/IbkrSession.cs`, `Feed/PrintFilter.cs`, `Feed/TapeMerge.cs`, `Feed/IbkrBars.cs`, `Ibkr/IbkrBridge.cs`). Quotes and depth were tested on paper and live Gateway, the tape and bars on live. Execution isn't started, and the client can't send order messages: `AllowedRequests` is a whitelist without them (71, 59, 1, 2, 10, 11, 97, 98, and by your decision of 2026-11-06, 20 and 25 for history).
 
 The plugin connects to a live Gateway on port 4001 by your decision of 2026-11-05, for data only. `allowLiveAccount` in `ibkr.json` is what permits that.
 
@@ -8,8 +8,9 @@ The plugin connects to a live Gateway on port 4001 by your decision of 2026-11-0
 
 | Data | Source | Why |
 |---|---|---|
-| Tape and live chart bars | IBKR `AllLast` by default, set by `tape` in `ibkr.json`: `ibkr`, `merged` or `tastytrade` | You chose to watch IBKR's full tape first. It adds up to 100-101% of `dayVolume`, but arrives batched. tastytrade's arrives in about 59 ms with no batching, but carries 49-73% |
-| Chart history | tastytrade | Candles include premarket and after-hours |
+| Tape and live chart bars | Both feeds, each trade once, set by `tape` in `ibkr.json` (`merged`, your choice of 2026-11-06). Also `ibkr` or `tastytrade` | See "What each feed really is". IBKR alone is complete but batched and about 0.4 s late |
+| Chart history, intraday | IBKR, 04:00-20:00 ET, on tastytrade's candles for overnight and when IBKR is down | tastytrade's candles count only its own valid prints, about half the market |
+| Chart history, daily and longer | tastytrade | Its daily candles match the whole market exactly |
 | Bid and ask | IBKR | tastytrade's are on a 500 ms timer and very likely not NBBO |
 | Depth | IBKR | tastytrade has no Level 2 |
 | Execution | IBKR | |
@@ -55,6 +56,42 @@ Items 1-3 come partly from the DLL inspection I shouldn't have done, so treat th
 - **Quantower's `InteractiveBrokersVendor`:** already written, and it's a public class, but it isn't documented for this use and may not run nested. Its own license check would still run.
 - **Our own client on IBKR's TWS API:** more work, but full control over reconnects and over smart depth, which is IBKR's name for consolidated depth. `ScalpFeedIbkrProbe` already speaks this protocol for read-only market data, against Gateway on port 4002 (paper) with no IBKR library.
 
+## What each feed really is
+
+Worked out 2026-11-06 after you pointed out that the missing trades were being treated as noise. "About 98%" was a measurement of a wrong rule, not an understanding of the tape.
+
+**tastytrade's tape is a defined product, not a partial feed.** dxFeed describes Nasdaq Last Sale as "all securities traded in Nasdaq systems and the FINRA Trade Reporting Facility ... operated in partnership with Nasdaq". The data fits that exactly. That tastytrade uses this product is inferred, since neither page says so. The support email could confirm it.
+
+| An IBKR print on | Is it on tastytrade's tape? | So in the merged tape |
+|---|---|---|
+| NASDAQ (BEX and PSX by definition, and in the 2026-11-05 midday measurement) | Always | Never shown from IBKR |
+| ARCA, BATS, DRCTEDGE, MEMX, PEARL, T24X and the rest | Never | Always shown from IBKR |
+| FINRA | Usually. IBKR's one name for every TRF, and 0.3-5.2% of its shares aren't on tastytrade's tape (22% on NVDA) | Shown unless tastytrade has the same print |
+
+- **The FINRA part it lacks would be the FINRA/NYSE TRF,** by elimination. Neither feed names the facility, so only matching the print can tell them apart, and nothing about size, price or condition separates them.
+- **`dayVolume` is the whole market, while the prints and intraday candles are Nasdaq Last Sale.** That's why the candles were short and the daily bar wasn't.
+- **IBKR's tape is whole shares, and tastytrade's isn't.** tastytrade sends 2.67 shares as 2 and 0.67, and IBKR has the 2. Prints under one share exist only on tastytrade (94 of 980 on NVDA, 15 of 72 on SPY) and do count in `dayVolume`.
+- **IBKR rounds some prices to the cent:** 735.4799 becomes 735.48. None of its prints at $12.51, $16.15, $189 or $735 had finer prices, while $2 stocks keep theirs, so it starts somewhere in between. On RCT at $0.05 the feeds can differ by 0.0001. That, with fractional sizes, is what an earlier note here misread as IBKR "rounding or combining" FINRA prints.
+
+Every tastytrade print across these recordings has an IBKR partner or is under one share. Replaying the real `TapeMerge` over the recordings, in arrival order (`ScalpFeedHarness mergereplay`):
+
+| Recording, session | Symbol | IBKR's tape, shares | Merged, shares | Merged / tape |
+|---|---|---|---|---|
+| 05:21-05:36 ET | CIIT | 246,071 | 246,071 | 100.000% |
+| | RCT | 23,651,212 | 23,650,212 | 99.996% |
+| | VSA | 537,973 | 537,873 | 99.981% |
+| 06:35-06:40 ET | RCT | 8,500,565 | 8,500,565 | 100.000% |
+| | VSA | 101,753 | 101,753 | 100.000% |
+| About 07:00 ET | NVDA | 96,222 | 96,249 | 100.028% |
+| | SPY | 6,826 | 6,829 | 100.038% |
+| About 07:05 ET | F | 8,795 | 8,796 | 100.009% |
+| | SOFI | 6,204 | 6,204 | 100.006% |
+
+- **Above 100% is the fractions:** IBKR's tape doesn't have them, and the merged tape does.
+- **Below 100%:** 1,000 shares on RCT and 100 on VSA, about one print each in 15 minutes. Not traced. A trade at the same price and size within a second on another facility would do it.
+- **Not checked yet:** the open, or anything with heavy FINRA fractional flow in regular hours. All of this is premarket. SPY, NVDA, F and SOFI were thin at those times.
+- **Timing:** tastytrade's prints show at its own speed, and everything only IBKR has arrives about 0.4 s later.
+
 ## Why tastytrade's tape can't be made complete by settings
 
 Tested 2026-11-05, after claims that `AUTO` drops prints and `STREAM` or `fromTime` delivers all of them:
@@ -66,7 +103,7 @@ Tested 2026-11-05, after claims that `AUTO` drops prints and `STREAM` or `fromTi
 
 Regular-hours `AUTO` and `STREAM` weren't run side by side. A burst heavy enough to overflow a buffer wasn't tested either, though valid prints matched candle volume exactly in earlier regular-hours runs.
 
-## Still open: the tape is partial
+## tastytrade's tape against IBKR's, midday
 
 Measured against IBKR's tick-by-tick tape, recorded together on 2026-11-05 (SPY and AEHL, 76 s, midday):
 
@@ -77,16 +114,11 @@ Measured against IBKR's tick-by-tick tape, recorded together on 2026-11-05 (SPY 
 | Median gap between deliveries | 35 ms (SPY), 98 ms (AEHL) | 179 ms (SPY), 274 ms (AEHL) |
 | Shared prints | First 90-95% of the time | Later by a median of about 115 ms, p99 about 400 ms |
 
-tastytrade's tape misses ARCA (15-23% of these shares), Cboe, NYSE, IEX, MEMX and more, so charts built from it can miss highs, lows and volume. tastytrade stays the tape for now because of its speed.
+tastytrade's tape misses ARCA (15-23% of these shares), Cboe, NYSE, IEX, MEMX and more, so charts built from it can miss highs, lows and volume.
 
-Options if the gap matters while trading:
+An earlier "about half of FINRA" was wrong. It came from matching FINRA prints by exact price and size, which fails on IBKR's cent-rounded prices and whole-share sizes (tastytrade has 735.378 and 19.55 shares where IBKR has 735 and 19), and that overcounted by 12-18%.
 
-- **IBKR's tape instead:** complete, but later and batched, with a limit of 5 tick-by-tick slots.
-- **Merge the two, by venue, with no print matching:** everything from tastytrade, plus IBKR's prints from venues other than NASDAQ, BEX, PSX and FINRA. The two sets don't overlap, so there's nothing to match and no state to keep.
-
-An earlier "about half of FINRA" was wrong. It came from matching FINRA prints one by one, which fails because IBKR rounds or combines them (tastytrade has 735.378 and 19.55 shares where IBKR doesn't), and that matching overcounted by 12-18%.
-
-Replay of the same recording through the venue rule (`simulate_merge.py`, 84 s):
+Replay of the same recording through the old venue rule, which dropped all of IBKR's FINRA prints and is replaced by `TapeMerge` (`simulate_merge.py`, 84 s):
 
 | | AEHL | SPY |
 |---|---|---|
@@ -96,14 +128,13 @@ Replay of the same recording through the venue rule (`simulate_merge.py`, 84 s):
 
 The 174% is one bucket. A large print landing in different buckets on the two feeds would explain it, but that isn't confirmed.
 
-Before building it:
+What still applies to merged mode:
 
-- **Premarket is untested.** Overnight, SMART `AllLast` has no prints at all, and tastytrade's `O` prints aren't IBKR's BLUEOCEAN prints: see "Overnight tape" below.
+- **Overnight isn't merged.** SMART `AllLast` has no overnight prints, and tastytrade's `O` prints aren't IBKR's BLUEOCEAN prints, so the overnight tape is tastytrade's and partial: see "Overnight tape" below.
 - **IBKR's rows arrive late and batched,** so rows can be out of exchange order by a few hundred ms. They need arrival-time stamps, or Quantower's strictly rising per-symbol times will push them forward anyway.
 - **Each merged symbol uses a tick-by-tick slot,** 5 by your measurement.
 - **IBKR's prints have no side,** so aggressor has to come from IBKR's own quote.
 - **Off-market prints have to be filtered from IBKR by condition** (4, 7, W, V, B) to match `PrintFilter`, which keeps normal odd lots (I on IBKR) and hides the rest, with the same 3% guard against the quote.
-- **History stays tastytrade-only,** so a chart reload loses the added venues' volume and highs and lows on bars already built.
 
 ## Measured 2026-11-05 evening
 
@@ -218,7 +249,7 @@ tastytrade's 1-minute candle volume is exactly its own valid prints, in all 42 m
 
 ### IBKR's historical bars
 
-Tested 03:45 local (06:45 ET) with your OK, from a separate script that can send only messages 71, 20 and 25 (`analysis\ibkr_history.py`, compared by `history_vs_tape.py`). `IbkrClient.AllowedRequests` is unchanged, and the plugin doesn't use any of this yet. The tape comparison covers 05:22-05:35 and 06:36-06:39 ET: premarket only, real volume on RCT and moderate on CIIT and VSA. Recheck at the open.
+Tested 03:45 local (06:45 ET) with your OK, from a separate script that can send only messages 71, 20 and 25 (`analysis\ibkr_history.py`, compared by `history_vs_tape.py`). The tape comparison covers 05:22-05:35 and 06:36-06:39 ET: premarket only, real volume on RCT and moderate on CIIT and VSA. Recheck at the open.
 
 | Share of IBKR's tape, same bars | CIIT | RCT | VSA |
 |---|---|---|---|
@@ -230,10 +261,14 @@ Tested 03:45 local (06:45 ET) with your OK, from a separate script that can send
 - **Fast enough for chart opens.** 3 days of 1-minute bars (2,086 bars) took 279 ms, 4 hours took 261-984 ms, 30 minutes of 10-second bars took 189-550 ms, and daily bars took about 120 ms. tastytrade's candles took 70-326 ms in the 00:57 log.
 - **No overnight bars.** Nothing between 20:00 and 04:00 ET on SMART, so those hours would stay on tastytrade's `O` candles. Bars run 04:00-20:00 ET, with zero-volume bars for quiet minutes.
 - **Daily bars are lower than tastytrade's.** Against `prevDayVolume`: RCT 99.8%, CIIT 84.3%, VSA 77.1%. Today against `dayVolume`: RCT 98.0%, CIIT 78.9%, VSA 86.9%. tastytrade's daily candles match the whole market, so daily bars should stay on tastytrade.
-- **Live and reloaded bars would still differ slightly.** Forming bars include odd lots, and reloaded ones wouldn't, so a reload could lower a bar's volume by the odd-lot share and narrow its range.
-- **Not tested:** IBKR's request limits. From memory: 60 requests per 10 minutes for bars of 30 seconds or less, and 6 per contract in 2 seconds. A chart open asks for several periods within a second, so a plugin version would have to space them.
+- **Live and reloaded bars still differ.** Forming bars include odd lots, and reloaded ones don't, so a reload lowers a bar's volume by the odd-lot share and can narrow its range. Bars carry no odd lots from either source, so history can't be made exact from bars. From memory, the consolidated tape's rules keep odd lots from setting the last price, high or low, which would be why both feeds treat them this way. IBKR's tick history (message 96, not on the whitelist and not tested) is the one other place they might be.
 
-**To use it in the plugin:** add 20 and 25 to `AllowedRequests`, which is your decision. Use IBKR's bars for intraday periods from 04:00 to 20:00 ET, and tastytrade's for overnight, daily and longer bars, and whenever IBKR is down.
+**Built 2026-11-06,** after you approved adding 20 and 25 to `AllowedRequests`. `IbkrClient.LoadBarsAsync` asks, `IbkrBars.Overlay` puts IBKR's bars over tastytrade's, and a chart gets tastytrade's alone if IBKR is down, refuses or takes over 10 s. Not yet run inside Quantower.
+
+- **Periods from IBKR:** 1, 5, 10, 15 and 30 seconds, 1, 5, 15 and 30 minutes, 1 hour. 4-hour, daily and longer stay on tastytrade, because tastytrade's 4-hour bars start at 03:00 ET, and IBKR's alignment for that length wasn't tested.
+- **Limits measured** on RCT at 03:52 local: 1 s takes 1,800 S and refuses 3,600 S ("invalid step"); 5 s took 7,200 S; 10 s took 28,800 S but in 4.9 s, so the plugin asks for 14,400 S; 15 s took 28,800 S in 1.4 s, so also 14,400 S; 30 s took 2 D; 1 minute to 1 hour took 30 D in under a second. Older spans work with an end time in UTC. Anything older than one request's span shows tastytrade's bars.
+- **Bars line up.** Every bar sits on the clock, and of tastytrade's candles in IBKR's hours, 1,242 of 1,245 fall on an IBKR bar at 1 second and all but one elsewhere (RCT, `ibkrbarslive`). The misses are the two feeds putting a print in neighbouring seconds, which is why an empty IBKR bar clears tastytrade's bar at that time.
+- **Pacing is from memory, not tested:** 6 requests per contract in 2 seconds, no identical request within 15 seconds, 60 per 10 minutes for bars of 30 seconds or less. The plugin spaces requests 400 ms apart, and answers an identical repeat from the last result. Going past the 60 would come back as an error, and that chart would show tastytrade's bars.
 
 ### IBKR against tastytrade, head to head
 
