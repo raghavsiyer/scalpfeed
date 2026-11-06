@@ -68,7 +68,7 @@ Worked out 2026-11-06 after you pointed out that the missing trades were being t
 |---|---|---|
 | NASDAQ (BEX and PSX by definition, and in the 2026-11-05 midday measurement) | Always | Never shown from IBKR |
 | ARCA, BATS, DRCTEDGE, MEMX, PEARL, T24X and the rest | Never | Always shown from IBKR |
-| FINRA | Usually. IBKR's one name for every TRF, and 0.3-5.2% of its shares aren't on tastytrade's tape (22% on NVDA) | Shown unless tastytrade has the same print |
+| FINRA | Usually. IBKR's one name for every TRF, and the part not on tastytrade's tape varies widely by symbol: 0.3-5.2% of shares on most so far, 22% on NVDA, 26.5% on DBGI | Shown unless tastytrade has the same print |
 
 - **The FINRA part it lacks would be the FINRA/NYSE TRF,** by elimination. Neither feed names the facility, so only matching the print can tell them apart, and nothing about size, price or condition separates them.
 - **`dayVolume` is the whole market, while the prints and intraday candles are Nasdaq Last Sale.** That's why the candles were short and the daily bar wasn't.
@@ -88,11 +88,22 @@ Every tastytrade print across these recordings has an IBKR partner or is under o
 | | SPY | 6,826 | 6,829 | 100.038% |
 | About 07:05 ET | F | 8,795 | 8,796 | 100.009% |
 | | SOFI | 6,204 | 6,204 | 100.006% |
+| 07:28-07:31 ET, with the new build running in Quantower | DBGI | 238,203 | 238,203 | 100.000% |
+| | LABT | 146,765 | 146,765 | 100.000% |
 
 - **Above 100% is the fractions:** IBKR's tape doesn't have them, and the merged tape does.
 - **Below 100%:** 1,000 shares on RCT and 100 on VSA, about one print each in 15 minutes. Not traced. A trade at the same price and size within a second on another facility would do it.
 - **Not checked yet:** the open, or anything with heavy FINRA fractional flow in regular hours. All of this is premarket. SPY, NVDA, F and SOFI were thin at those times.
 - **Timing:** tastytrade's prints show at its own speed, and everything only IBKR has arrives about 0.4 s later.
+
+**First minutes inside Quantower** (release build, from 07:25 ET): no problems logged, 24% of one core. 17.5% of FINRA prints were added from IBKR, which was the symbol mix, not duplicates: DBGI alone is 26.5%. The plugin's counts balance: of 1,916 prints shown in one minute, 1,104 came from IBKR and 812 from tastytrade (743 FINRA, 45 Nasdaq, 24 with no partner). That's accounting and a replay, not a print-by-print check of what Quantower drew.
+
+**Open: you see a 100-200 ms latency number flash with tape micro-pauses** (07:30 ET).
+
+- **Not a block inside the plugin, as far as it can measure.** tastytrade's frames, including handing prints to Quantower and any wait on IBKR, took at most 0.13-1.3 ms per minute. IBKR's quote and depth flush peaked at 16.8 ms, once. IBKR's print path isn't timed on its own, but it holds the same lock those frames would wait on. Quantower's own drawing and garbage collection can't be seen from here.
+- **Candidate 1, the print stamps.** The plugin backdates IBKR's rows by 175 ms. `analysis\print_age.py` (RCT and VSA, 06:35 ET): tastytrade's rows are 23-27 ms old when handed over and never in that band. IBKR's have a median of 140-175 ms, and 52-61% are in it. When tastytrade's flow gaps, only IBKR's rows arrive, so the older stamp would show just as the tape looks paused.
+- **Candidate 2, the connection ping.** `Ping()` calls `PingMeter.MeasurePing()` synchronously, and its time goes to `Connection.PingTime`. TCP connect to the feed's host takes 67 ms, and a fresh HTTPS request 415 ms. Which thread Quantower calls it on isn't known.
+- **The lumps are real.** IBKR's rows come 3-7 at a time, every 570-710 ms, and that can read as a stutter on its own. tastytrade's flow has its own gaps too (RCT median 129 ms, p90 588), and merging makes gaps between rows smaller, not larger.
 
 ## Why tastytrade's tape can't be made complete by settings
 
