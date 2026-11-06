@@ -2,6 +2,8 @@
 
 Status: bid, ask, depth, the tape, the merged tape and intraday chart bars are built (`Feed/IbkrClient.cs`, `Feed/IbkrSession.cs`, `Feed/PrintFilter.cs`, `Feed/TapeMerge.cs`, `Feed/IbkrBars.cs`, `Ibkr/IbkrBridge.cs`). Quotes and depth were tested on paper and live Gateway, the tape and bars on live. Execution isn't started, and the client can't send order messages: `AllowedRequests` is a whitelist without them (71, 59, 1, 2, 10, 11, 97, 98, and by your decision of 2026-11-06, 20 and 25 for history).
 
+Installed 2026-11-06 04:17 local: release build of commit `a39e25b`, no test triggers (`analysis\dll_strings.py`). It loads at Quantower's next restart, and hasn't run inside Quantower yet. The build it replaced is parked beside it as `ScalpFeedVendor.20261106041707.old`.
+
 The plugin connects to a live Gateway on port 4001 by your decision of 2026-11-05, for data only. `allowLiveAccount` in `ibkr.json` is what permits that.
 
 **Decisions (2026-11-05, yours):** IBKR goes inside this connection, and it supplies the bid and ask as well as depth and execution. The license question and a separate-connection alternative were raised and set aside.
