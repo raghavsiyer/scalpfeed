@@ -1,11 +1,16 @@
 namespace ScalpFeedVendor.Feed;
 
 /// <summary>
-/// Sizes in the market depth panel, in whole hundreds by your choice of 2026-11-06: 2870 shares shows
-/// as 28, and 100 as 1. Under 100 shares is 0. Only depth rows use this. The tape and bars keep shares.
+/// Sizes in the market depth panel, by your choice of 2026-11-06: in whole hundreds, so 2870 shares
+/// shows as 28, and with rows of 100 shares or fewer left out. That can leave out the best bid or ask
+/// itself. Only depth rows use this. The quote, tape and bars are unaffected.
 /// </summary>
 internal static class DepthSizes
 {
+    private const double MostSharesHidden = 100;
+
+    public static bool Shows(double shares) => shares > MostSharesHidden;
+
     public static double ToHundreds(double shares) => Math.Floor(shares / 100);
 }
 

@@ -130,7 +130,7 @@ You wanted a proper tape: gray between the bid and ask, green or red text at the
 - **Tick-by-tick BidAsk isn't worth its slots.** Against `reqMktData` it was -18 to +81 ms at the median and gave nearly the same shares outside (CIIT 7.0% against 7.0%, VSA 38.5% against 40.7%), on 2 of the 5 tape slots. This settles that item on the recheck list for premarket.
 - **Between-the-market share differs by feed for a real reason:** tastytrade's rows include dark midpoint prints (33-51% between), while IBKR-only rows are exchange prints, mostly at the quote (9-26% between).
 
-**Depth sizes:** the market depth panel shows whole hundreds by your choice (`DepthSizes`): 2870 shares reads 28, and 100 reads 1. The plugin divides the rows it sends for depth, so anything in Quantower that reads depth sizes gets hundreds as well, including the panel's totals. The tape, volume and bars keep shares. How Quantower treats a row of under 100 shares, sent as 0, hasn't been seen: it may show 0 or drop the row. Those rows have been seen on high-priced stocks (AAPL 85 shares).
+**Depth sizes:** the market depth panel shows whole hundreds and leaves out rows of 100 shares or fewer, by your choice (`DepthSizes`): 2870 shares reads 28, 101-199 reads 1. The plugin changes the rows it sends for depth, so anything in Quantower that reads depth gets the same, including the panel's totals. The quote, tape, volume and bars are unaffected. Rows of exactly 100 shares are common at the inside of thin stocks (2.58 x 100 on CIIT), so the top of the panel can be wider than the real market, while the bid and ask from the quote stay right.
 
 ### The blinking latency and the tape's micro-pauses
 

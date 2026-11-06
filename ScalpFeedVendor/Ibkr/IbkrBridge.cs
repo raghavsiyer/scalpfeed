@@ -304,11 +304,13 @@ internal sealed class IbkrBridge : IIbkrSink
     private static void Fill(List<Level2Quote> target, List<IbkrDepthRow> rows, QuotePriceType side, string[] ids, string symbolId, DateTime now)
     {
         // Several venues can sit at one price, so a row's position is its identity, not its price.
-        int count = Math.Min(rows.Count, ids.Length);
-        for (int i = 0; i < count; i++)
+        foreach (var row in rows)
         {
-            var row = rows[i];
-            target.Add(new Level2Quote(side, symbolId, ids[i], row.Price, DepthSizes.ToHundreds(row.Size), now) { Broker = row.Venue });
+            if (target.Count == ids.Length)
+                break;
+
+            if (DepthSizes.Shows(row.Size))
+                target.Add(new Level2Quote(side, symbolId, ids[target.Count], row.Price, DepthSizes.ToHundreds(row.Size), now) { Broker = row.Venue });
         }
     }
 }
