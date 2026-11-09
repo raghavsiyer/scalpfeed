@@ -132,7 +132,9 @@ You wanted a proper tape: gray between the bid and ask, green or red text at the
 
 **Depth sizes:** the market depth panel shows whole hundreds, and leaves out rows of 100 shares or fewer behind the best price, by your choice (`DepthSizes`): 2870 shares reads 28, 101-199 reads 1. Rows at the book's best price or IBKR's quoted price always show, so hiding them can't show a wrong spread, and a row under 100 shares there reads 1. The plugin changes the rows it sends for depth, so anything in Quantower that reads depth gets the same, including the panel's totals. The quote, tape, volume and bars are unaffected.
 
-The panel's top row can still differ from the true inside when the best price is on a venue this account has no depth for (ARCA, BEX, NYSE). That's a permissions limit, and the bid and ask from the quote stay right.
+**The book holds top-of-book from many venues, not just the three with full depth** (you pointed this out, and I'd said otherwise). Gateway's 2152 lists full depth from NASDAQ, BATS and IEX and top of book from BYX, AMEX, PEARL, T24X, MEMX, EDGEA, TXSE, CHX, NYSENAT, IBEOS, PSX, LTSE, ISE and DRCTEDGE. The rows also show Nasdaq market makers (VIRT, IMCC, ETMM and others). On 2026-11-06 at 07:17-07:21 local, the venues at the best price included DRCTEDGE, EDGEA, MEMX, PEARL and TXSE as well as NSDQ, BATS and IEX (`analysis\depth_vs_nbbo.py`). ARCA, BEX and NYSE appear in neither list, so a best price there could still be missing from the book.
+
+By time, CIIT's book best matched the NBBO 100% of a 60 s run. LABT's didn't: for 33 s the book's best bid sat at 0.3354 against an NBBO bid of 0.3901, and for 2.7 s its best ask at 0.456 against 0.3932. That isn't explained. It could be my script rebuilding the book wrongly, a venue the book doesn't have, or a stale book. It's the "wrong spread" case, so it needs a recheck. An earlier count by samples rather than time, 39.7% "book better than the NBBO" on CIIT, didn't hold up when measured by time.
 
 ### The blinking latency and the tape's micro-pauses
 
