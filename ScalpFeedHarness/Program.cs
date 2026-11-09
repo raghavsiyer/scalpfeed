@@ -73,6 +73,9 @@ switch (args[0])
     case "depthpacing":
         await RunDepthPacing();
         break;
+    case "venuetops":
+        await RunVenueTops();
+        break;
     case "tapewatch":
         await RunTapeWatch();
         break;
@@ -257,6 +260,89 @@ async Task RunDepthPacing()
     Console.WriteLine($"  after reconnect: {string.Join(" ", again.Select(r => $"{r.Symbol}@{r.Ms}"))}");
     Check(again.Select(r => r.Symbol).Distinct().Count() == again.Count && again.Count == 3, $"each wanted symbol is requested once after a reconnect ({again.Count})");
     Check(gateway.MostUnanswered <= 1, "still one at a time after a reconnect");
+
+    await client.StopAsync();
+}
+
+// ARCA, NYSE and BX rows in the depth, from each venue's own quote. First the merge on its own, then
+// the client against the stand-in for Gateway.
+async Task RunVenueTops()
+{
+    string Venues(List<IbkrDepthRow> rows) => string.Join(" ", rows.Select(r => r.Venue));
+    var merged = new List<IbkrDepthRow>();
+    var bids = new List<IbkrDepthRow> { new(5.00, 300, "NASDAQ"), new(4.99, 200, "BATS") };
+    VenueTops.Merge(bids, [new(5.01, 400, "ARCA"), new(5.00, 200, "NYSE"), new(4.90, 100, "BEX")], true, merged);
+    Check(Venues(merged) == "ARCA NASDAQ NYSE BATS BEX", $"bids: each venue in price order, after rows already at its price ({Venues(merged)})");
+    Check(bids.Count == 2, "the book itself is left alone");
+
+    var asks = new List<IbkrDepthRow> { new(5.03, 300, "NASDAQ"), new(5.05, 200, "BATS") };
+    VenueTops.Merge(asks, [new(5.02, 400, "ARCA"), new(5.05, 100, "NYSE"), new(-1, 0, "BEX")], false, merged);
+    Check(Venues(merged) == "ARCA NASDAQ BATS NYSE", $"asks: lowest first, and a venue with no market adds nothing ({Venues(merged)})");
+
+    VenueTops.Merge(bids, [new(0, 100, "ARCA"), new(double.NaN, 100, "NYSE"), new(5.02, 0, "BEX")], true, merged);
+    Check(Venues(merged) == "NASDAQ BATS", "a zero price, no price, or no size adds nothing");
+
+    var withArca = new List<IbkrDepthRow> { new(5.00, 300, "ARCA") };
+    VenueTops.Merge(withArca, [new(5.01, 400, "ARCA")], true, merged);
+    Check(merged.Count == 1 && merged[0].Price == 5.00, "a venue the book already carries isn't added twice");
+
+    using var gateway = new FakeGateway();
+    var sink = new IbkrTestSink();
+    var client = new IbkrClient(new IbkrConfig(true, "127.0.0.1", gateway.Port, 1, false));
+    client.SetSink(sink);
+    client.Start();
+    var timer = Stopwatch.StartNew();
+    while (client.State != IbkrState.Live && timer.Elapsed < TimeSpan.FromSeconds(10))
+        await Task.Delay(20);
+    Check(client.State == IbkrState.Live, "the client goes live against the stand-in");
+
+    async Task<bool> Until(Func<bool> done)
+    {
+        var wait = Stopwatch.StartNew();
+        while (!done() && wait.Elapsed < TimeSpan.FromSeconds(3))
+            await Task.Delay(10);
+        return done();
+    }
+
+    // The stand-in's book: NASDAQ bid 5.00 x 100, NASDAQ ask 5.05 x 300.
+    gateway.VenueQuotes["VEN@ARCA"] = (5.01, 400, 5.04, 200, 0);
+    gateway.VenueQuotes["VEN@NYSE"] = (0, 0, 0, 0, 354);
+    client.SetDepth("VEN", true);
+    Check(await Until(() => sink.Depth.TryGetValue("VEN", out var d) && d.BidTop == 5.01),
+        "ARCA's bid above the book's best becomes the top row");
+    var view = sink.Depth["VEN"];
+    Console.WriteLine($"  book: {view.Bids} bids from {view.BidTop}, {view.Asks} asks from {view.AskTop}, venues {string.Join(" ", view.Venues.Order())}");
+    Check(view.AskTop == 5.04 && view.AskTopSize == 200, "and its ask below the book's best does too, with its size");
+    Check(view.Venues.SetEquals(new[] { "NASDAQ", "ARCA" }), "NYSE, refused, and BX, with no market, add no rows");
+    var asked = gateway.MarketDataRequests.Where(r => r.Symbol == "VEN").ToList();
+    Check(asked.Select(r => r.Exchange).Order().SequenceEqual(new[] { "ARCA", "BEX", "NYSE" }), $"one quote per venue, no SMART quote ({string.Join(" ", asked.Select(r => r.Exchange))})");
+    Check(sink.Problems.Any(p => p.StartsWith("VEN Venue:NYSE 354")), "the refusal is reported as the venue's");
+    Check(!sink.Quotes.ContainsKey("VEN"), "venue quotes never reach the symbol's own quote");
+
+    int deliveries = sink.DepthCount["VEN"];
+    gateway.SendVenueQuote("VEN", "ARCA", 4.98, 100, 5.04, 200);
+    Check(await Until(() => sink.Depth["VEN"].BidTop == 5.00 && sink.DepthCount["VEN"] > deliveries),
+        "a venue's own change sends the book again, with no depth row changing");
+    Check(sink.Depth["VEN"].Bids == 2, "ARCA's lower bid now sits under NASDAQ's");
+
+    gateway.SendVenueQuote("VEN", "ARCA", -1, 0, -1, 0);
+    Check(await Until(() => sink.Depth["VEN"].Venues.SetEquals(new[] { "NASDAQ" })), "a venue that stops quoting leaves the book");
+
+    // A symbol that gets no depth slot shows nothing, rather than a book of only these rows.
+    gateway.Policy["NOSLOT"] = (FakeGateway.Answer.Refused, 20);
+    gateway.VenueQuotes["NOSLOT@ARCA"] = (5.01, 400, 5.04, 200, 0);
+    client.SetDepth("NOSLOT", true);
+    await Task.Delay(600);
+    Check(sink.DepthCount.GetValueOrDefault("NOSLOT") == 0, "venue quotes alone never make a book");
+
+    // Turning depth off cancels the venue quotes with it.
+    var venueIds = asked.Select(r => r.Id).ToHashSet();
+    client.SetDepth("VEN", false);
+    await Until(() => gateway.MarketDataCancels.Count(venueIds.Contains) >= 2);
+    await Task.Delay(100);
+    Check(gateway.MarketDataCancels.Count(venueIds.Contains) == 2, $"the venue quotes are cancelled with the depth, all but the refused one ({gateway.MarketDataCancels.Count(venueIds.Contains)})");
+    Check(client.State == IbkrState.Live, "the canary is untouched");
+    Check(IbkrClient.AllowedRequests.SetEquals(new[] { 71, 59, 1, 2, 10, 11, 97, 98, 20, 25 }), "the whitelist is unchanged");
 
     await client.StopAsync();
 }
@@ -2003,6 +2089,19 @@ internal sealed class FakeGateway : IDisposable
 
     public List<int> HistoryCancels { get; } = new();
 
+    /// <summary>By "SYMBOL@EXCHANGE": a directed quote's answer, or an error code to refuse it with. No entry means no market.</summary>
+    public ConcurrentDictionary<string, (double Bid, double BidSize, double Ask, double AskSize, int Error)> VenueQuotes { get; } = new();
+
+    public ConcurrentQueue<(int Id, string Symbol, string Exchange)> MarketDataRequests { get; } = new();
+
+    public ConcurrentQueue<int> MarketDataCancels { get; } = new();
+
+    public void SendVenueQuote(string symbol, string exchange, double bid, double bidSize, double ask, double askSize)
+    {
+        int id = this.MarketDataRequests.Last(r => r.Symbol == symbol && r.Exchange == exchange).Id;
+        this.SendQuote(id, bid, bidSize, ask, askSize);
+    }
+
     public void ClearLog()
     {
         lock (this.gate)
@@ -2074,9 +2173,10 @@ internal sealed class FakeGateway : IDisposable
                             this.Send("15\01\0DU000000\0");
                             break;
                         case "1":
-                            // A real-looking quote, so the client goes live on its canary.
-                            this.Send($"1\06\0{f[2]}\01\0100\010\00\0");
-                            this.Send($"1\06\0{f[2]}\02\0101\010\00\0");
+                            this.OnMarketDataRequest(int.Parse(f[2], CultureInfo.InvariantCulture), f[4], f[10]);
+                            break;
+                        case "2":
+                            this.MarketDataCancels.Enqueue(int.Parse(f[2], CultureInfo.InvariantCulture));
                             break;
                         case "10":
                             this.OnDepthRequest(int.Parse(f[2], CultureInfo.InvariantCulture), f[4]);
@@ -2107,6 +2207,31 @@ internal sealed class FakeGateway : IDisposable
             {
             }
         }
+    }
+
+    private void OnMarketDataRequest(int id, string symbol, string exchange)
+    {
+        this.MarketDataRequests.Enqueue((id, symbol, exchange));
+        if (exchange == "SMART")
+        {
+            // A real-looking quote, so the client goes live on its canary.
+            this.SendQuote(id, 100, 10, 101, 10);
+            return;
+        }
+
+        if (!this.VenueQuotes.TryGetValue($"{symbol}@{exchange}", out var answer))
+            this.SendQuote(id, -1, 0, -1, 0);
+        else if (answer.Error != 0)
+            this.Send($"4\02\0{id}\0{answer.Error}\0Requested market data is not subscribed.\0");
+        else
+            this.SendQuote(id, answer.Bid, answer.BidSize, answer.Ask, answer.AskSize);
+    }
+
+    private void SendQuote(int id, double bid, double bidSize, double ask, double askSize)
+    {
+        string Text(double value) => value.ToString(CultureInfo.InvariantCulture);
+        this.Send($"1\06\0{id}\01\0{Text(bid)}\0{Text(bidSize)}\00\0");
+        this.Send($"1\06\0{id}\02\0{Text(ask)}\0{Text(askSize)}\00\0");
     }
 
     private void OnHistoryRequest(string[] f)
@@ -2146,7 +2271,10 @@ internal sealed class FakeGateway : IDisposable
             if (answer == Answer.Refused)
                 this.Send($"4\02\0{id}\0309\0Max number (3) of market depth requests has been reached\0");
             else
+            {
                 this.Send($"13\01\0{id}\00\0NASDAQ\00\01\05.00\0100\01\0");
+                this.Send($"13\01\0{id}\00\0NASDAQ\00\00\05.05\0300\01\0");
+            }
         });
     }
 

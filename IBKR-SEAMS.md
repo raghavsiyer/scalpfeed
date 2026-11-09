@@ -33,8 +33,9 @@ The plugin connects to a live Gateway on port 4001 by your decision of 2026-11-0
 | IBKR down or a symbol refused | `IbkrBridge` | Quote goes back to tastytrade's. The depth panel empties, because a frozen book looks real. One warning sound after 2 s, one all-clear on return, none overnight or when markets are shut |
 | Halts and one-sided books | `IbkrBridge.OnIbkrQuote` | IBKR's -1 becomes an empty side rather than leaving the old price up |
 | Quantower's reconnects | `IbkrSession`, static, because Quantower builds a new vendor each time | Gateway connection stays up. Only a difference in subscriptions reaches Gateway, 3 s after the takeover. Closes 10 s after the last vendor leaves |
+| ARCA, NYSE and BX in the depth | `IbkrClient` asks each venue's own quote with every depth symbol; `VenueTops.Merge` adds them as rows | Smart depth leaves those venues out for this account. One row a side per venue, as fresh as the NBBO; none before the smart book has a row; a refused venue just drops out |
 | Slot limits | `IbkrClient` | 3 depth symbols (309) and 5 tick-by-tick symbols (10190), shared by every client on the Gateway. Refused requests wait: retried each second for 10 s after a release, and every 15 s otherwise. A symbol with no tape slot stays on tastytrade's tape |
-| Settings | `.scalpfeed\ibkr.json`, optional: `enabled`, `host`, `port`, `clientId`, `allowLiveAccount`, `depthRows`, `tape` | Code defaults: on, port 4002, client 78, paper only, 50 rows, `ibkr` tape. Your file sets port 4001 and allows the live account |
+| Settings | `.scalpfeed\ibkr.json`, optional: `enabled`, `host`, `port`, `clientId`, `allowLiveAccount`, `depthRows`, `tape` | Code defaults: on, port 4002, client 78, paper only, 50 rows, `ibkr` tape. Your file sets port 4002 (paper, since 2026-11-09), allows the live account, and sets the `merged` tape |
 | Symbols | `IbkrClient.ToIbkrSymbol` | `BRK/B` becomes `BRK B`; tested on `BRK/B` and `BF/B` |
 
 Still to add:
@@ -135,6 +136,21 @@ You wanted a proper tape: gray between the bid and ask, green or red text at the
 **The book holds top-of-book from many venues, not just the three with full depth** (you pointed this out, and I'd said otherwise). Gateway's 2152 lists full depth from NASDAQ, BATS and IEX and top of book from BYX, AMEX, PEARL, T24X, MEMX, EDGEA, TXSE, CHX, NYSENAT, IBEOS, PSX, LTSE, ISE and DRCTEDGE. The rows also show Nasdaq market makers (VIRT, IMCC, ETMM and others). On 2026-11-06 at 07:17-07:21 local, the venues at the best price included DRCTEDGE, EDGEA, MEMX, PEARL and TXSE as well as NSDQ, BATS and IEX (`analysis\depth_vs_nbbo.py`). ARCA, BEX and NYSE appear in neither list, so a best price there could still be missing from the book.
 
 By time, CIIT's book best matched the NBBO 100% of a 60 s run. LABT's didn't: for 33 s the book's best bid sat at 0.3354 against an NBBO bid of 0.3901, and for 2.7 s its best ask at 0.456 against 0.3932. That isn't explained. It could be my script rebuilding the book wrongly, a venue the book doesn't have, or a stale book. It's the "wrong spread" case, so it needs a recheck. An earlier count by samples rather than time, 39.7% "book better than the NBBO" on CIIT, didn't hold up when measured by time.
+
+**ARCA, NYSE and BX rows (2026-11-09, paper, premarket).** You saw ARCA in TWS but not in the DOM. The account can't have their full books (ARCA's is refused with 354), but each venue's own best bid and ask comes through `reqMktData` with the exchange set (`analysis\venue_quotes.py`). On CKX, ARCA's own quote equalled the NBBO when IBKR named ARCA at the best, and IBKR's best-venue strings (ticks 32 and 33) often named ARCA alone. Now each depth symbol also asks for those three quotes (three market data lines, no depth slot), and `VenueTops.Merge` puts each as a row in price order, after rows already at that price. A venue with no market adds nothing, and the rows never show before the smart book has a row, so a symbol without a depth slot doesn't get a book of only these. A venue's change sends the book again. On OMH over 90 s (`analysis\venue_book_check.py`, about 18,000 book row changes):
+
+| Best price vs the NBBO, by time | Book alone | With the venue rows |
+|---|---|---|
+| Bid the same | 53.6% | 95.2% |
+| Ask the same | 33.5% | 95.8% |
+| Bid / ask worse | 44.7% / 63.9% | 3.1% / 1.6% |
+| Bid / ask better | 1.7% / 2.6% | 1.7% / 2.6% |
+
+- **The venue rows are exactly as fresh as the NBBO quote:** ARCA's own quote reached each new price at the same moment the NBBO did (median 0 ms over 88 prices, later in 6). Both come on `reqMktData`'s cadence, about 3 updates a second here, against the book's 200 row changes a second, so in a fast move these rows can trail the book's other rows the way the NBBO does.
+- **They never put the book ahead of the NBBO for any length of time:** "better" time is the same with and without them. The 225 samples where they did were within a single burst from Gateway, which the plugin's 30 ms settle hides.
+- **What's left of "worse"** is time when IBKR named NASDAQ, EDGX or BZX at the NBBO, venues the book already has, so it's the book and the quote moving at different moments, not a missing venue.
+- **NYSE and BX** had no quote on OMH or CKX premarket (price -1), so they add nothing yet. Recheck at the open.
+- This probably explains the LABT gap above, but venues weren't recorded then, so that's a guess.
 
 ### The blinking latency and the tape's micro-pauses
 

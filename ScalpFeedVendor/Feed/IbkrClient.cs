@@ -76,13 +76,17 @@ internal interface IIbkrSink
 /// and tick-by-tick prints. It can only send the requests in AllowedRequests, and order messages
 /// aren't among them. Quotes go to the sink as soon as a burst from the server ends. Depth rows arrive in
 /// many small writes, so a book waits a moment to settle and the sink sees whole books rather
-/// than each row change.
+/// than each row change. Each depth symbol also has a quote from each venue in VenueTops, which
+/// goes into its book as that venue's row.
 /// </summary>
 internal sealed class IbkrClient
 {
     public const string QuoteFeed = "Quote";
     public const string DepthFeed = "Depth";
     public const string TapeFeed = "Tape";
+    public const string VenueFeedPrefix = "Venue:";
+
+    private static readonly string[] VenueFeeds = VenueTops.Venues.Select(v => VenueFeedPrefix + v).ToArray();
 
     /// <summary>
     /// startApi, reqMarketDataType, reqMktData, cancelMktData, reqMktDepth, cancelMktDepth,
@@ -138,6 +142,10 @@ internal sealed class IbkrClient
     private readonly ConcurrentDictionary<FeedKey, bool> slotRefusalsLogged = new();
     private readonly List<Stream> dirtyQuotes = new();
     private readonly List<Stream> dirtyDepth = new();
+    private readonly List<IbkrDepthRow> topBids = new();
+    private readonly List<IbkrDepthRow> topAsks = new();
+    private readonly List<IbkrDepthRow> bookBids = new();
+    private readonly List<IbkrDepthRow> bookAsks = new();
     private readonly List<string> venueNames = new();
     private readonly HashSet<int> codesLogged = new();
     private readonly object depthGate = new();
@@ -167,6 +175,7 @@ internal sealed class IbkrClient
 
     // Written on the receive thread, read by the timer.
     private long quoteUpdates;
+    private long venueQuoteUpdates;
     private long depthUpdates;
     private long depthDeliveries;
     private long maxFlushMicros;
@@ -288,7 +297,14 @@ internal sealed class IbkrClient
 
     public void SetQuote(string symbol, bool on) => this.SetInterest(new FeedKey(QuoteFeed, ToIbkrSymbol(symbol)), on);
 
-    public void SetDepth(string symbol, bool on) => this.SetInterest(new FeedKey(DepthFeed, ToIbkrSymbol(symbol)), on);
+    public void SetDepth(string symbol, bool on)
+    {
+        // The venue quotes take no depth slot, only a market data line each.
+        string ibkrSymbol = ToIbkrSymbol(symbol);
+        this.SetInterest(new FeedKey(DepthFeed, ibkrSymbol), on);
+        foreach (var feed in VenueFeeds)
+            this.SetInterest(new FeedKey(feed, ibkrSymbol), on);
+    }
 
     public void SetTape(string symbol, bool on)
     {
@@ -332,7 +348,9 @@ internal sealed class IbkrClient
 
     private static string Clip(string text) => text.Length <= 220 ? text : text[..220] + "...";
 
-    private static object[] Contract(string symbol) => [0, symbol, "STK", "", "0.0", "", "", "SMART", "", "USD", "", ""];
+    private static object[] Contract(string symbol, string exchange = "SMART") => [0, symbol, "STK", "", "0.0", "", "", exchange, "", "USD", "", ""];
+
+    private static bool IsVenueFeed(string feed) => feed.StartsWith(VenueFeedPrefix, StringComparison.Ordinal);
 
     private void SetInterest(FeedKey key, bool on)
     {
@@ -555,6 +573,8 @@ internal sealed class IbkrClient
 
         if (key.EventType == QuoteFeed)
             await this.SendAsync(CancellationToken.None, [1, 11, stream.Id, .. Contract(key.Symbol), false, "", false, false, ""]).ConfigureAwait(false);
+        else if (IsVenueFeed(key.EventType))
+            await this.SendAsync(CancellationToken.None, [1, 11, stream.Id, .. Contract(key.Symbol, key.EventType[VenueFeedPrefix.Length..]), false, "", false, false, ""]).ConfigureAwait(false);
         else if (key.EventType == DepthFeed)
             await this.QueueDepthRequestAsync(stream).ConfigureAwait(false);
         else
@@ -630,7 +650,7 @@ internal sealed class IbkrClient
         if (stream.Failed || stream.WaitingForSlot || stream.DepthQueued)
             return false;
 
-        if (key.EventType == QuoteFeed)
+        if (key.EventType == QuoteFeed || IsVenueFeed(key.EventType))
         {
             await this.SendAsync(CancellationToken.None, 2, 2, stream.Id).ConfigureAwait(false);
         }
@@ -786,12 +806,35 @@ internal sealed class IbkrClient
         {
             var stream = this.dirtyDepth[i];
             stream.IsDirty = false;
-            target?.OnIbkrDepth(stream.Key.Symbol, stream.Bids, stream.Asks);
+            if (target != null)
+            {
+                this.AddVenueTops(stream);
+                target.OnIbkrDepth(stream.Key.Symbol, this.bookBids, this.bookAsks);
+            }
+
             this.depthDeliveries++;
         }
 
         this.dirtyDepth.RemoveRange(0, due);
         this.NoteFlushTime(now);
+    }
+
+    /// <summary>Fills bookBids and bookAsks with the smart book plus each venue's own quote.</summary>
+    private void AddVenueTops(Stream depth)
+    {
+        this.topBids.Clear();
+        this.topAsks.Clear();
+        for (int i = 0; i < VenueFeeds.Length; i++)
+        {
+            if (this.streamsByKey.TryGetValue(new FeedKey(VenueFeeds[i], depth.Key.Symbol), out var venue) && !venue.Failed)
+            {
+                this.topBids.Add(new IbkrDepthRow(venue.Bid, venue.BidSize, VenueTops.Venues[i]));
+                this.topAsks.Add(new IbkrDepthRow(venue.Ask, venue.AskSize, VenueTops.Venues[i]));
+            }
+        }
+
+        VenueTops.Merge(depth.Bids, this.topBids, true, this.bookBids);
+        VenueTops.Merge(depth.Asks, this.topAsks, false, this.bookAsks);
     }
 
     private void NoteFlushTime(long stamp)
@@ -803,6 +846,16 @@ internal sealed class IbkrClient
 
     private void MarkDirty(Stream stream, long now)
     {
+        if (IsVenueFeed(stream.Key.EventType))
+        {
+            // A venue's quote is part of its symbol's book, so the book goes out again. Not before the
+            // book has a row, though: alone, these rows would pass for the whole market.
+            if (this.streamsByKey.TryGetValue(new FeedKey(DepthFeed, stream.Key.Symbol), out var depth)
+                && depth.HasBook && !depth.Failed && !depth.WaitingForSlot)
+                this.MarkDirty(depth, Stopwatch.GetTimestamp());
+            return;
+        }
+
         if (stream.IsDirty)
             return;
         stream.IsDirty = true;
@@ -947,8 +1000,14 @@ internal sealed class IbkrClient
             return;
         }
 
-        this.quoteUpdates++;
         this.MarkDirty(stream, 0);
+        if (stream.Key.EventType != QuoteFeed)
+        {
+            this.venueQuoteUpdates++;
+            return;
+        }
+
+        this.quoteUpdates++;
         if (stream.Key.Symbol == FeedHealth.CanarySymbol)
             this.OnCanary();
     }
@@ -968,7 +1027,7 @@ internal sealed class IbkrClient
             return;
 
         this.MarkDirty(stream, 0);
-        if (stream.Key.Symbol == FeedHealth.CanarySymbol)
+        if (stream.Key.EventType == QuoteFeed && stream.Key.Symbol == FeedHealth.CanarySymbol)
             this.OnCanary();
     }
 
@@ -1002,6 +1061,7 @@ internal sealed class IbkrClient
         else if (operation == 2 && position < rows.Count)
             rows.RemoveAt(position);
 
+        stream.HasBook = true;
         this.depthUpdates++;
         this.MarkDirty(stream, Stopwatch.GetTimestamp());
         if (ReferenceEquals(this.depthAwaited, stream))
@@ -1079,6 +1139,10 @@ internal sealed class IbkrClient
 
         if (!slotRefusal || this.slotRefusalsLogged.TryAdd(stream.Key, true))
             Log.Info($"[ibkr] {stream.Key.Symbol} {stream.Key.EventType} problem {code}: {Clip(message)}");
+
+        // A venue that fails leaves the book, and the rest of the book stays.
+        if (IsVenueFeed(stream.Key.EventType))
+            this.MarkDirty(stream, 0);
         Volatile.Read(ref this.sink)?.OnIbkrProblem(stream.Key.Symbol, stream.Key.EventType, code, message);
         if (ReferenceEquals(this.depthAwaited, stream))
             this.OnDepthAnswered(stream);
@@ -1130,13 +1194,14 @@ internal sealed class IbkrClient
             {
                 this.nextStatsUtc = now.AddMinutes(1);
                 long quotes = Interlocked.Exchange(ref this.quoteUpdates, 0);
+                long venueQuotes = Interlocked.Exchange(ref this.venueQuoteUpdates, 0);
                 long depth = Interlocked.Exchange(ref this.depthUpdates, 0);
                 long books = Interlocked.Exchange(ref this.depthDeliveries, 0);
                 long flush = Interlocked.Exchange(ref this.maxFlushMicros, 0);
                 long added = Interlocked.Exchange(ref this.printsAdded, 0);
                 long carried = Interlocked.Exchange(ref this.printsCarried, 0);
                 long offMarket = Interlocked.Exchange(ref this.printsOffMarket, 0);
-                Log.Info($"[ibkr] stats 60s: state={this.state} quoteUpdates={quotes} depthRowChanges={depth} booksDelivered={books} printsAdded={added} printsCarried={carried} printsOffMarket={offMarket} maxFlushUs={flush} streams={this.streams.Count}");
+                Log.Info($"[ibkr] stats 60s: state={this.state} quoteUpdates={quotes} venueQuoteUpdates={venueQuotes} depthRowChanges={depth} booksDelivered={books} printsAdded={added} printsCarried={carried} printsOffMarket={offMarket} maxFlushUs={flush} streams={this.streams.Count}");
             }
         }
         catch (Exception ex)
@@ -1175,6 +1240,7 @@ internal sealed class IbkrClient
         public volatile bool Failed;
         public volatile bool WaitingForSlot;
         public volatile bool DepthQueued;
+        public bool HasBook;
         public double Bid;
         public double BidSize;
         public double Ask;

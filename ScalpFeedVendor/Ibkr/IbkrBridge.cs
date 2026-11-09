@@ -275,7 +275,9 @@ internal sealed class IbkrBridge : IIbkrSink
             state.IbkrQuotes = false;
         else if (feed == IbkrClient.TapeFeed)
             state.IbkrTape = false;
-        else if (state.DepthOn)
+
+        // A venue quote's problem only takes that venue's rows out, which the client does itself.
+        else if (feed == IbkrClient.DepthFeed && state.DepthOn)
             this.PushBook(state, NoRows, NoRows);
     }
 
