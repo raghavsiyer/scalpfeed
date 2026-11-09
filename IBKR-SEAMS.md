@@ -151,6 +151,7 @@ By time, CIIT's book best matched the NBBO 100% of a 60 s run. LABT's didn't: fo
 - **What's left of "worse"** is time when IBKR named NASDAQ, EDGX or BZX at the NBBO, venues the book already has, so it's the book and the quote moving at different moments, not a missing venue.
 - **NYSE and BX** had no quote on OMH or CKX premarket (price -1), so they add nothing yet. Recheck at the open.
 - This probably explains the LABT gap above, but venues weren't recorded then, so that's a guess.
+- **Installed and confirmed on screen** at 06:19 local, OMH: ARCA rows show in the depth. The plugin's first minute had 100 venue quote updates and no refusals.
 
 ### The blinking latency and the tape's micro-pauses
 
