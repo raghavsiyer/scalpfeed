@@ -82,6 +82,9 @@ switch (args[0])
     case "stallwatch":
         await RunStallWatch();
         break;
+    case "luld":
+        await RunLuld();
+        break;
     case "tapewatch":
         await RunTapeWatch();
         break;
@@ -354,6 +357,101 @@ async Task RunVenueTops()
     Check(client.State == IbkrState.Live, "the canary is untouched");
     Check(IbkrClient.AllowedRequests.SetEquals(new[] { 71, 59, 1, 2, 10, 11, 97, 98, 20, 25 }), "the whitelist is unchanged");
 
+    await client.StopAsync();
+}
+
+// Computed LULD bands, by the plan's rules, on a made-up session in Eastern time, then IBKR's halt flag and
+// odd-lot marker through the stand-in for Gateway.
+async Task RunLuld()
+{
+    var eastern = TimeZoneInfo.FindSystemTimeZoneById("Eastern Standard Time");
+    long Et(int h, int m, double s, int day = 11) =>
+        TimeZoneInfo.ConvertTimeToUtc(new DateTime(2026, 11, day, h, m, 0, DateTimeKind.Unspecified), eastern).Ticks + (long)(s * TimeSpan.TicksPerSecond);
+    string Show(LuldBand b, long t, double prevClose, bool tier1 = false) =>
+        b.TryGetBands(t, prevClose, tier1, out var x) ? $"{x.Lower}/{x.Upper} ref {x.Reference:0.####}{(x.Exact ? "" : " ~")}" : "none";
+
+    var luld = new LuldBand();
+    luld.OnTrade(9.80, Et(9, 0, 0), true);
+    Check(Show(luld, Et(9, 10, 0), 9.50) == "none", "no band in premarket, and premarket prints don't count");
+
+    luld.OnTrade(10.00, Et(9, 30, 5), true);
+    Check(Show(luld, Et(9, 30, 6), 9.50) == "9/11 ref 10", $"the first print from 9:30 sets the reference: Tier 2 over $3 is 10% ({Show(luld, Et(9, 30, 6), 9.50)})");
+    Check(Show(luld, Et(9, 30, 6), 9.50, tier1: true) == "9.5/10.5 ref 10", "Tier 1 over $3 is 5%");
+
+    for (int i = 0; i < 10; i++)
+        luld.OnTrade(10.05, Et(9, 30, 10 + i), true);
+    Check(Show(luld, Et(9, 31, 0), 9.50) == "9/11 ref 10", "a mean under 1% away leaves the reference alone");
+
+    for (int i = 0; i < 20; i++)
+        luld.OnTrade(10.40, Et(9, 30, 40 + i), false);
+    Check(Show(luld, Et(9, 31, 0), 9.50) == "9/11 ref 10", "odd lots don't move it");
+
+    // The mean of the 11 round lots so far is 10.0455. At 10.40 a print, the second takes it to exactly 10.10,
+    // 1% away, and the plan moves the reference to that mean at once, not to the last price.
+    for (int i = 0; i < 20; i++)
+        luld.OnTrade(10.40, Et(9, 31, 0 + i), true);
+    string moved = Show(luld, Et(9, 31, 20), 9.50);
+    Check(moved == "9.09/11.11 ref 10.1", $"a mean at least 1% away, after 30 s, becomes the reference at once ({moved})");
+
+    for (int i = 0; i < 20; i++)
+        luld.OnTrade(11.50, Et(9, 31, 21 + i * 0.1), true);
+    Check(Show(luld, Et(9, 31, 25), 9.50) == moved, "each reference stands at least 30 s");
+    Check(Show(luld, Et(9, 31, 51), 9.50) != moved, "and moves once the 30 s are up");
+
+    luld.OnTrade(11.00, Et(9, 45, 0), true);
+    string later = Show(luld, Et(9, 45, 0), 9.50);
+    Check(later == "9.9/12.1 ref 11", $"trades over five minutes old drop out of the mean ({later})");
+
+    luld.OnHalt(true);
+    Check(Show(luld, Et(9, 46, 0), 9.50) == "none", "no band during a pause");
+    luld.OnHalt(false);
+    Check(Show(luld, Et(9, 51, 0), 9.50) == "none", "nor after it until the reopening print");
+    luld.OnTrade(13.20, Et(9, 51, 2), true);
+    Check(Show(luld, Et(9, 51, 3), 9.50) == "11.88/14.52 ref 13.2", "the reopening print is the new reference");
+
+    var low = new LuldBand();
+    low.OnTrade(2.50, Et(9, 30, 1), true);
+    Check(Show(low, Et(10, 0, 0), 2.10) == "2/3 ref 2.5", "prev close from $0.75 to $3 is 20%");
+    Check(Show(low, Et(15, 36, 0), 2.10) == "1.5/3.5 ref 2.5", "doubled in the last 25 minutes for Tier 2 under $3");
+    Check(Show(low, Et(16, 0, 0), 2.10) == "none", "no band from 16:00");
+
+    var big = new LuldBand();
+    big.OnTrade(20.00, Et(15, 30, 0), true);
+    Check(Show(big, Et(15, 36, 0), 19.00) == "18/22 ref 20 ~", $"Tier 2 over $3 isn't doubled at the close ({Show(big, Et(15, 36, 0), 19.00)})");
+    Check(Show(big, Et(15, 36, 0), 19.00, tier1: true) == "18/22 ref 20 ~", "Tier 1 is, 5% to 10%");
+    Check(!big.TryGetBands(Et(15, 36, 0), 19.00, false, out var bigBand) || !bigBand.Exact, "a symbol first seen mid-session is marked as rough");
+
+    var penny = new LuldBand();
+    penny.OnTrade(0.50, Et(9, 30, 1), true);
+    Check(Show(penny, Et(10, 0, 0), 0.48) == "0.35/0.65 ref 0.5", "under $0.75, the lesser of $0.15 or 75%: $0.15 here");
+    var subpenny = new LuldBand();
+    subpenny.OnTrade(0.10, Et(9, 30, 1), true);
+    Check(Show(subpenny, Et(10, 0, 0), 0.09) == "0.03/0.18 ref 0.1", "and 75% here, rounded to the penny");
+    Check(Show(subpenny, Et(15, 40, 0), 0.09) == "none/0.25 ref 0.1".Replace("none", "NaN"), "a lower band at or under zero isn't there");
+
+    luld.OnTrade(12.00, Et(9, 30, 3, day: 12), true);
+    Check(Show(luld, Et(9, 30, 4, day: 12), 13.0) == "10.8/13.2 ref 12", "a new day starts over");
+
+    Check(PrintFilter.IsOddLot("F I"u8) && PrintFilter.IsOddLot("I"u8) && !PrintFilter.IsOddLot("F"u8) && !PrintFilter.IsOddLot(""u8), "IBKR's condition I marks an odd lot");
+
+    using var gateway = new FakeGateway();
+    var sink = new IbkrTestSink();
+    var client = new IbkrClient(new IbkrConfig(true, "127.0.0.1", gateway.Port, 1, false));
+    client.SetSink(sink);
+    client.Start();
+    var timer = Stopwatch.StartNew();
+    while (client.State != IbkrState.Live && timer.Elapsed < TimeSpan.FromSeconds(10))
+        await Task.Delay(20);
+    client.SetQuote("HALT", true);
+    client.SetTape("ODD", true);
+    while (timer.Elapsed < TimeSpan.FromSeconds(10) && (gateway.TapeRequestId == 0 || !gateway.MarketDataRequests.Any(r => r.Symbol == "HALT")))
+        await Task.Delay(20);
+    gateway.SendHalted("HALT", 2);
+    gateway.SendPrint("F I");
+    gateway.SendPrint("F");
+    await Task.Delay(300);
+    Check(sink.Halts.Contains(("HALT", 2)), "IBKR's Halted tick reaches the bridge, 2 for a volatility pause");
+    Check(sink.OddLots.GetValueOrDefault("ODD") == 1 && sink.Prints.GetValueOrDefault("ODD")?.Count == 2, "odd lots still reach the tape, marked so the band skips them");
     await client.StopAsync();
 }
 
@@ -2124,8 +2222,16 @@ internal sealed class IbkrTestSink : IIbkrSink
     /// <summary>Only touched on the client's receive thread until the client has stopped.</summary>
     public Dictionary<string, List<(double Price, double Size, string Venue, long Seconds, long ArrivalTicks)>> Prints { get; } = new();
 
-    public void OnIbkrPrint(string symbol, double price, double size, long unixSeconds, string venue, long arrivalUtcTicks)
+    public readonly System.Collections.Concurrent.ConcurrentQueue<(string Symbol, int Halted)> Halts = new();
+
+    public void OnIbkrHalted(string symbol, int halted) => this.Halts.Enqueue((symbol, halted));
+
+    public readonly System.Collections.Concurrent.ConcurrentDictionary<string, int> OddLots = new();
+
+    public void OnIbkrPrint(string symbol, double price, double size, long unixSeconds, string venue, long arrivalUtcTicks, bool roundLot)
     {
+        if (!roundLot)
+            this.OddLots.AddOrUpdate(symbol, 1, (_, n) => n + 1);
         if (!this.Prints.TryGetValue(symbol, out var list))
             this.Prints[symbol] = list = new();
         list.Add((price, size, venue, unixSeconds, arrivalUtcTicks));
@@ -2193,6 +2299,13 @@ internal sealed class FakeGateway : IDisposable
     public ConcurrentQueue<(int Id, string Symbol, string Exchange)> MarketDataRequests { get; } = new();
 
     public ConcurrentQueue<int> MarketDataCancels { get; } = new();
+
+    /// <summary>IBKR's Halted tick (49) on the symbol's SMART quote, as a tickGeneric message.</summary>
+    public void SendHalted(string symbol, int value)
+    {
+        int id = this.MarketDataRequests.Last(r => r.Symbol == symbol && r.Exchange == "SMART").Id;
+        this.Send($"45\06\0{id}\049\0{value}\0");
+    }
 
     public void SendVenueQuote(string symbol, string exchange, double bid, double bidSize, double ask, double askSize)
     {

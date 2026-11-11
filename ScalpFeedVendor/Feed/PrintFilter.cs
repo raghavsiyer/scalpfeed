@@ -37,6 +37,9 @@ internal static class PrintFilter
 
     public const string ReportedVenue = "FINRA";
 
+    /// <summary>IBKR's condition I: an odd lot, which shows on the tape but doesn't count toward LULD.</summary>
+    public static bool IsOddLot(ReadOnlySpan<byte> conditions) => conditions.IndexOf((byte)'I') >= 0;
+
     /// <summary>
     /// IBKR's condition codes for what tastytrade marks invalid and PrintFilter hides, plus special
     /// settlement and out-of-sequence prints. Codes are one character each, with or without spaces

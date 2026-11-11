@@ -138,6 +138,7 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
             // Quantower measures latency with its internet-corrected clock, so the plugin stamps with it too.
             FeedClock.Use(QuantowerClock);
             Log.Info($"clock: Quantower's is {FeedClock.AheadOfPcMs:F0} ms ahead of the PC's, {MeasureClockReadNs():F0} ns a read");
+            Log.Info($"luld: {LuldBand.LoadTier1(Path.Combine(Log.AppDir, "luld-tier1.txt"))} Tier 1 symbols in luld-tier1.txt, the rest Tier 2");
             if (File.Exists(Path.Combine(Log.AppDir, StallWatch.TriggerFile)) && !StallWatch.On)
             {
                 StallWatch.Start();
@@ -507,10 +508,10 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
         if (this.ibkr is { IsMerged: true })
         {
             if (state.Merge.OnTastytradePrint(row.Price, row.Size, row.Time / 1000, row.ArrivalUtcTicks))
-                this.EmitPrint(state, row.Price, row.Size, exchangeTicks, row.Aggressor, row.Bid, row.Ask);
+                this.EmitPrint(state, row.Price, row.Size, exchangeTicks, row.Aggressor, row.Bid, row.Ask, row.ValidTick);
         }
         else if (!state.IbkrTape || row.Exchange == 'O')
-            this.EmitPrint(state, row.Price, row.Size, exchangeTicks, row.Aggressor, row.Bid, row.Ask);
+            this.EmitPrint(state, row.Price, row.Size, exchangeTicks, row.Aggressor, row.Bid, row.Ask, row.ValidTick);
         else if (delay < FreshPrintTicks)
             state.IbkrTapeWatch.OnExpectedPrint(row.ArrivalUtcTicks);
 
@@ -529,7 +530,7 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
             Interlocked.Increment(ref this.unprintedTrades);
 
         if (this.fallbackOn && !state.IbkrTape && row.Time > state.LastTradeTimeMs && !double.IsNaN(row.Price))
-            this.EmitPrint(state, row.Price, row.Size, ToUtcTicks(row.Time), PrintSide.Undefined, double.NaN, double.NaN);
+            this.EmitPrint(state, row.Price, row.Size, ToUtcTicks(row.Time), PrintSide.Undefined, double.NaN, double.NaN, true);
 
         state.LastTradeTimeMs = Math.Max(state.LastTradeTimeMs, row.Time);
         this.MaybePushDayBar(state, row.ArrivalUtcTicks);
@@ -564,10 +565,10 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
     private static long ToUtcTicks(long unixMs) => DateTime.UnixEpoch.Ticks + (unixMs * TimeSpan.TicksPerMillisecond);
 
     /// <summary>On IBKR's receive thread: a print for this symbol's tape.</summary>
-    private void OnIbkrPrint(SymbolState state, double price, double size, long utcTicks, double bid, double ask) =>
-        this.EmitPrint(state, price, size, utcTicks, PrintSide.Undefined, bid, ask);
+    private void OnIbkrPrint(SymbolState state, double price, double size, long utcTicks, double bid, double ask, bool roundLot) =>
+        this.EmitPrint(state, price, size, utcTicks, PrintSide.Undefined, bid, ask, roundLot);
 
-    private void EmitPrint(SymbolState state, double price, double size, long exchangeTicks, PrintSide side, double bid, double ask)
+    private void EmitPrint(SymbolState state, double price, double size, long exchangeTicks, PrintSide side, double bid, double ask, bool roundLot)
     {
         // Two feeds write this tape, and the push stays inside the lock so that a print's time
         // and its place in line can't disagree. It's almost always uncontended.
@@ -576,6 +577,9 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
             var direction = price > state.LastPrice ? TickDirection.Up : price < state.LastPrice ? TickDirection.Down : TickDirection.None;
             state.LastPrice = price;
             state.LastSize = size;
+
+            // Each trade reaches here once, from whichever feed put it on the tape, so the LULD mean counts it once.
+            state.Luld.OnTrade(price, FeedClock.UtcNowTicks, roundLot);
 
             if (!state.LastOn)
                 return;

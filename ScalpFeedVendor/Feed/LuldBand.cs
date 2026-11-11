@@ -1,0 +1,185 @@
+namespace ScalpFeedVendor.Feed;
+
+/// <summary>
+/// Limit Up-Limit Down price bands, worked out from the tape by the LULD Plan's published rules
+/// (luldplan.com, permanent since 2019), because neither IBKR's API nor tastytrade's feed carries the
+/// SIPs' own (IBKR-SEAMS.md, "LULD bands"). The rules: the reference price is the arithmetic mean of
+/// eligible trades over the prior five minutes; the first of the day is the opening price; it changes only
+/// when that mean is at least 1% away, and each one stands for at least 30 seconds; with no eligible trades
+/// it stays. Band = reference +/- reference x percentage, rounded to the penny, the percentage set by the
+/// previous close and tier. 9:30-16:00 ET only.
+///
+/// Where this can differ from the SIPs': the opening price is taken as the first eligible print from 9:30,
+/// not the primary market's official open; eligible means a round lot that isn't off-market; IBKR rounds
+/// some prices to the cent; trades are timed on arrival, about 0.3 s after the SIPs see them. A symbol
+/// picked up mid-session starts from its first print, so until a reopening or the next day its band can be
+/// off by up to about 1% of the price, and is labelled LULD~ instead of LULD.
+/// </summary>
+internal sealed class LuldBand
+{
+    public const string Venue = "LULD";
+    public const string RoughVenue = "LULD~";
+
+    /// <summary>The size a band's row carries in the depth: shown as 1, the smallest a row can read.</summary>
+    public const double MarkerShares = 100;
+
+    private static readonly TimeZoneInfo Eastern = TimeZoneInfo.FindSystemTimeZoneById("Eastern Standard Time");
+    private static readonly TimeSpan SessionOpen = new(9, 30, 0);
+    private static readonly TimeSpan SessionClose = new(16, 0, 0);
+    private static readonly TimeSpan DoubledFrom = new(15, 35, 0);
+    private static readonly TimeSpan OpeningGrace = TimeSpan.FromMinutes(1);
+    private static readonly long WindowTicks = TimeSpan.FromMinutes(5).Ticks;
+    private static readonly long MinHoldTicks = TimeSpan.FromSeconds(30).Ticks;
+    private static HashSet<string> tier1 = new(StringComparer.OrdinalIgnoreCase);
+
+    private readonly object gate = new();
+    private readonly Queue<(long Ticks, double Price)> window = new();
+    private double sum;
+    private DateTime day;
+    private double reference = double.NaN;
+    private long referenceSince;
+    private bool halted;
+    private bool awaitingReopen;
+    private bool exact;
+
+    public readonly record struct Bands(double Lower, double Upper, double Reference, bool Exact);
+
+    /// <summary>Tier 1 is the S&P 500, the Russell 1000 and some ETPs; everything else is Tier 2.</summary>
+    public static bool IsTier1(string symbol) => Volatile.Read(ref tier1).Contains(symbol);
+
+    /// <summary>One symbol per line; blank lines and lines starting with # are skipped. Returns how many.</summary>
+    public static int LoadTier1(string path)
+    {
+        var symbols = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (File.Exists(path))
+        {
+            foreach (var line in File.ReadAllLines(path))
+            {
+                var symbol = line.Trim();
+                if (symbol.Length > 0 && symbol[0] != '#')
+                    symbols.Add(symbol);
+            }
+        }
+
+        Volatile.Write(ref tier1, symbols);
+        return symbols.Count;
+    }
+
+    /// <summary>A print that went on the tape. Only round lots count toward the reference price.</summary>
+    public void OnTrade(double price, long utcTicks, bool roundLot)
+    {
+        if (!roundLot || !(price > 0) || !InSession(utcTicks, out var et))
+            return;
+
+        lock (this.gate)
+        {
+            this.StartDay(et.Date);
+            if (this.halted)
+                return;
+
+            if (double.IsNaN(this.reference) || this.awaitingReopen)
+            {
+                // The opening print, or the reopening one after a pause, is the first reference price.
+                this.exact = this.awaitingReopen || et.TimeOfDay - SessionOpen < OpeningGrace;
+                this.reference = price;
+                this.referenceSince = utcTicks;
+                this.awaitingReopen = false;
+                this.window.Clear();
+                this.sum = 0;
+            }
+
+            this.window.Enqueue((utcTicks, price));
+            this.sum += price;
+            this.Advance(utcTicks);
+        }
+    }
+
+    /// <summary>IBKR's Halted tick: no bands during a pause, and the reopening print starts them again.</summary>
+    public void OnHalt(bool isHalted)
+    {
+        lock (this.gate)
+        {
+            if (isHalted)
+            {
+                this.halted = true;
+            }
+            else if (this.halted)
+            {
+                this.halted = false;
+                this.awaitingReopen = true;
+            }
+        }
+    }
+
+    public bool TryGetBands(long utcTicks, double prevClose, bool isTier1, out Bands bands)
+    {
+        bands = default;
+        if (!InSession(utcTicks, out var et))
+            return false;
+
+        lock (this.gate)
+        {
+            this.StartDay(et.Date);
+            if (this.halted || this.awaitingReopen || double.IsNaN(this.reference))
+                return false;
+
+            this.Advance(utcTicks);
+
+            // In decimal, so a band of 0.175 rounds to 0.18 the way the plan's penny rounding would, not to the
+            // 0.17 that 0.1 + 0.075 gives in binary.
+            decimal basis = prevClose > 0 ? (decimal)prevClose : (decimal)this.reference;
+            decimal r = (decimal)this.reference;
+            decimal offset = basis > 3.00m ? r * (isTier1 ? 0.05m : 0.10m)
+                : basis >= 0.75m ? r * 0.20m
+                : Math.Min(0.15m, r * 0.75m);
+            if (et.TimeOfDay >= DoubledFrom && (isTier1 || basis <= 3.00m))
+                offset *= 2;
+
+            double upper = (double)Math.Round(r + offset, 2, MidpointRounding.AwayFromZero);
+            double lower = (double)Math.Round(r - offset, 2, MidpointRounding.AwayFromZero);
+            bands = new Bands(lower > 0 ? lower : double.NaN, upper, this.reference, this.exact);
+            return true;
+        }
+    }
+
+    private static bool InSession(long utcTicks, out DateTime et)
+    {
+        et = TimeZoneInfo.ConvertTimeFromUtc(new DateTime(utcTicks, DateTimeKind.Utc), Eastern);
+        return et.DayOfWeek is not (DayOfWeek.Saturday or DayOfWeek.Sunday)
+            && et.TimeOfDay >= SessionOpen && et.TimeOfDay < SessionClose;
+    }
+
+    private void StartDay(DateTime date)
+    {
+        if (date == this.day)
+            return;
+
+        this.day = date;
+        this.reference = double.NaN;
+        this.awaitingReopen = false;
+        this.exact = false;
+        this.window.Clear();
+        this.sum = 0;
+    }
+
+    /// <summary>Drops trades older than five minutes, then moves the reference if the plan would.</summary>
+    private void Advance(long utcTicks)
+    {
+        while (this.window.Count > 0 && this.window.Peek().Ticks <= utcTicks - WindowTicks)
+            this.sum -= this.window.Dequeue().Price;
+
+        if (this.window.Count == 0)
+        {
+            this.sum = 0;
+            return;
+        }
+
+        // "At least 1%": a mean exactly 1% away counts, though binary arithmetic can land it a hair short.
+        double mean = this.sum / this.window.Count;
+        if (Math.Abs(mean - this.reference) >= (0.01 * this.reference) - 1e-9 && utcTicks - this.referenceSince >= MinHoldTicks)
+        {
+            this.reference = mean;
+            this.referenceSince = utcTicks;
+        }
+    }
+}

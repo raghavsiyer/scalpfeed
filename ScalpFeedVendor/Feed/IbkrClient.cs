@@ -58,7 +58,10 @@ internal interface IIbkrSink
     void OnIbkrDepth(string symbol, List<IbkrDepthRow> bids, List<IbkrDepthRow> asks);
 
     /// <summary>A print for the tape, already filtered for the tape mode. Its time is whole seconds only.</summary>
-    void OnIbkrPrint(string symbol, double price, double size, long unixSeconds, string venue, long arrivalUtcTicks);
+    void OnIbkrPrint(string symbol, double price, double size, long unixSeconds, string venue, long arrivalUtcTicks, bool roundLot);
+
+    /// <summary>IBKR's Halted tick on the symbol's quote: 0 trading, 1 a halt, 2 a volatility (LULD) pause.</summary>
+    void OnIbkrHalted(string symbol, int halted);
 
     /// <summary>
     /// Any print at all on this symbol's tape, including ones that stay off the screen. Carried means
@@ -888,6 +891,10 @@ internal sealed class IbkrClient
                 f.Skip();
                 this.OnTickSize(ref f);
                 break;
+            case 45:
+                f.Skip();
+                this.OnTickGeneric(ref f);
+                break;
             case 13:
                 f.Skip();
                 this.OnDepth(ref f, true);
@@ -972,7 +979,7 @@ internal sealed class IbkrClient
         {
             this.printsAdded++;
             stream.SharesAdded += size;
-            Volatile.Read(ref this.sink)?.OnIbkrPrint(stream.Key.Symbol, price, size, unixSeconds, this.InternVenue(venue), this.frameArrivalUtcTicks);
+            Volatile.Read(ref this.sink)?.OnIbkrPrint(stream.Key.Symbol, price, size, unixSeconds, this.InternVenue(venue), this.frameArrivalUtcTicks, !PrintFilter.IsOddLot(conditions));
         }
     }
 
@@ -1030,6 +1037,17 @@ internal sealed class IbkrClient
         this.MarkDirty(stream, 0);
         if (stream.Key.EventType == QuoteFeed && stream.Key.Symbol == FeedHealth.CanarySymbol)
             this.OnCanary();
+    }
+
+    private void OnTickGeneric(ref FieldReader f)
+    {
+        const int Halted = 49;
+        if (!this.streams.TryGetValue(f.Int(), out var stream) || stream.Key.EventType != QuoteFeed || f.Int() != Halted)
+            return;
+
+        double value = f.Double();
+        if (!double.IsNaN(value))
+            Volatile.Read(ref this.sink)?.OnIbkrHalted(stream.Key.Symbol, (int)value);
     }
 
     private void OnCanary()

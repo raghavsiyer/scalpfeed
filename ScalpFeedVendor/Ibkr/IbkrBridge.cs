@@ -18,7 +18,7 @@ namespace ScalpFeedVendor.Ibkr;
 internal sealed class IbkrBridge : IIbkrSink
 {
     /// <summary>Puts one print on the symbol's tape, with the quote that decides its side.</summary>
-    public delegate void PrintHandler(SymbolState state, double price, double size, long utcTicks, double bid, double ask);
+    public delegate void PrintHandler(SymbolState state, double price, double size, long utcTicks, double bid, double ask, bool roundLot);
 
     private const string Header = "ScalpFeed";
     private static readonly List<IbkrDepthRow> NoRows = new();
@@ -41,6 +41,11 @@ internal sealed class IbkrBridge : IIbkrSink
     private readonly ConcurrentDictionary<string, SymbolState> statesByIbkr = new();
     private readonly string[] bidIds;
     private readonly string[] askIds;
+
+    // IBKR's receive thread only: the book with a LULD band's row put in.
+    private readonly List<IbkrDepthRow> bandRow = new(1);
+    private readonly List<IbkrDepthRow> bidsWithBand = new();
+    private readonly List<IbkrDepthRow> asksWithBand = new();
 
     private IbkrClient client;
     private DateTime notLiveSinceUtc;
@@ -201,7 +206,19 @@ internal sealed class IbkrBridge : IIbkrSink
             this.PushBook(state, bids, asks);
     }
 
-    public void OnIbkrPrint(string symbol, double price, double size, long unixSeconds, string venue, long arrivalUtcTicks)
+    public void OnIbkrHalted(string symbol, int halted)
+    {
+        if (!this.statesByIbkr.TryGetValue(symbol, out var state) || halted == state.IbkrHalted)
+            return;
+
+        bool wasKnown = state.IbkrHalted >= 0;
+        state.IbkrHalted = halted;
+        state.Luld.OnHalt(halted > 0);
+        if (wasKnown || halted > 0)
+            Log.Info($"[luld] {symbol} {(halted == 2 ? "volatility pause" : halted > 0 ? "halted" : "trading again; the reopening print sets the band")}");
+    }
+
+    public void OnIbkrPrint(string symbol, double price, double size, long unixSeconds, string venue, long arrivalUtcTicks, bool roundLot)
     {
         if (!this.statesByIbkr.TryGetValue(symbol, out var state) || !state.LastOn)
             return;
@@ -238,7 +255,7 @@ internal sealed class IbkrBridge : IIbkrSink
         // Stamped when it arrived, since IBKR gives only whole seconds. Quantower's latency measure
         // reads this stamp's age, and backdating it made that number blink between these rows and
         // tastytrade's. A print near a bar's end can land in the next bar until the chart reloads.
-        this.emitPrint(state, price, size, arrivalUtcTicks, bid, ask);
+        this.emitPrint(state, price, size, arrivalUtcTicks, bid, ask, roundLot);
     }
 
     public void OnIbkrTapeActive(string symbol, double price, double size, long unixSeconds, bool carried)
@@ -299,9 +316,43 @@ internal sealed class IbkrBridge : IIbkrSink
     {
         var now = FeedClock.UtcNow;
         var book = new DOMQuote(state.Id, now);
-        Fill(book.Bids, bids, QuotePriceType.Bid, this.bidIds, state.Id, now, DepthSizes.Best(bids, true), state.IbkrBid);
-        Fill(book.Asks, asks, QuotePriceType.Ask, this.askIds, state.Id, now, DepthSizes.Best(asks, false), state.IbkrAsk);
+        double bestBid = DepthSizes.Best(bids, true);
+        double bestAsk = DepthSizes.Best(asks, false);
+
+        // The computed LULD bands go in as one marked row a side, the lower among the bids and the upper
+        // among the asks. Never into an empty book, where they'd pass for the market.
+        if (bids.Count + asks.Count > 0 && state.Luld.TryGetBands(now.Ticks, state.PrevClose, state.IsTier1, out var band))
+        {
+            string venue = band.Exact ? LuldBand.Venue : LuldBand.RoughVenue;
+            if (band.Lower > 0)
+                bids = this.WithBandRow(bids, band.Lower, venue, true, this.bidsWithBand);
+            asks = this.WithBandRow(asks, band.Upper, venue, false, this.asksWithBand);
+            LogBand(state, band);
+        }
+
+        Fill(book.Bids, bids, QuotePriceType.Bid, this.bidIds, state.Id, now, bestBid, state.IbkrBid);
+        Fill(book.Asks, asks, QuotePriceType.Ask, this.askIds, state.Id, now, bestAsk, state.IbkrAsk);
         this.push(book);
+    }
+
+    private List<IbkrDepthRow> WithBandRow(List<IbkrDepthRow> rows, double price, string venue, bool bids, List<IbkrDepthRow> into)
+    {
+        this.bandRow.Clear();
+        this.bandRow.Add(new IbkrDepthRow(price, LuldBand.MarkerShares, venue));
+        VenueTops.Merge(rows, this.bandRow, bids, into);
+        return into;
+    }
+
+    private static void LogBand(SymbolState state, LuldBand.Bands band)
+    {
+        if (band.Upper == state.LuldLoggedUpper && (band.Lower == state.LuldLoggedLower || (double.IsNaN(band.Lower) && double.IsNaN(state.LuldLoggedLower))))
+            return;
+
+        state.LuldLoggedLower = band.Lower;
+        state.LuldLoggedUpper = band.Upper;
+        Log.Info($"[luld] {state.Streamer} bands {band.Lower}/{band.Upper}, reference {band.Reference:0.####}, " +
+                 $"{(state.IsTier1 ? "Tier 1" : "Tier 2")}, prev close {state.PrevClose}" +
+                 (band.Exact ? "" : ", picked up mid-session so it can be off by up to 1%"));
     }
 
     private static void Fill(List<Level2Quote> target, List<IbkrDepthRow> rows, QuotePriceType side, string[] ids, string symbolId, DateTime now, double bestInBook, double quoted)
@@ -312,7 +363,8 @@ internal sealed class IbkrBridge : IIbkrSink
             if (target.Count == ids.Length)
                 break;
 
-            if (DepthSizes.Shows(row.Size, row.Price, bestInBook, quoted))
+            bool band = row.Venue is LuldBand.Venue or LuldBand.RoughVenue;
+            if (band || DepthSizes.Shows(row.Size, row.Price, bestInBook, quoted))
                 target.Add(new Level2Quote(side, symbolId, ids[target.Count], row.Price, DepthSizes.ToHundreds(row.Size), now) { Broker = row.Venue });
         }
     }

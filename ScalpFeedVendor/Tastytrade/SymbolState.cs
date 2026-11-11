@@ -32,6 +32,16 @@ internal sealed class SymbolState
     public readonly TapeMerge Merge = new();
     public bool IsCanary;
 
+    /// <summary>Computed LULD bands, fed by the tape. Locks for itself, since both feeds print.</summary>
+    public readonly LuldBand Luld = new();
+
+    // Belong to IBKR's receive thread: what was last said in the log about this symbol's LULD.
+    public int IbkrHalted = -1;
+    public double LuldLoggedLower = double.NaN;
+    public double LuldLoggedUpper = double.NaN;
+
+    public bool IsTier1 => LuldBand.IsTier1(this.Streamer);
+
     // Belong to IBKR's receive thread: the quote its prints are judged against.
     public double IbkrBid = double.NaN;
     public double IbkrAsk = double.NaN;
