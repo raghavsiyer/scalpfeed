@@ -13,12 +13,16 @@ namespace ScalpFeedVendor.Feed;
 /// not the primary market's official open; eligible means a round lot that isn't off-market; IBKR rounds
 /// some prices to the cent; trades are timed on arrival, about 0.3 s after the SIPs see them. A symbol
 /// picked up mid-session starts from its first print, so until a reopening or the next day its band can be
-/// off by up to about 1% of the price, and is labelled LULD~ instead of LULD.
+/// off by up to about 1% of the price, and its rows carry a ~ (Limit Up ~, Limit Down ~).
+///
+/// After a pause the listing market's reopening auction prints (condition 5) about 0.2 s before IBKR's
+/// halt flag clears (NXXT 2026-11-11: auction prints at 13:56:40.190 ET, tastytrade's status 13:56:40.357),
+/// so a reopening print restarts the band itself instead of waiting for the flag.
 /// </summary>
 internal sealed class LuldBand
 {
-    public const string Venue = "LULD";
-    public const string RoughVenue = "LULD~";
+    // Each row's label in the depth's venue column: [lower, upper], then the same with the rough mark.
+    private static readonly string[] Labels = ["Limit Down", "Limit Up", "Limit Down ~", "Limit Up ~"];
 
     /// <summary>The size a band's row carries in the depth: shown as 1, the smallest a row can read.</summary>
     public const double MarkerShares = 100;
@@ -40,9 +44,15 @@ internal sealed class LuldBand
     private long referenceSince;
     private bool halted;
     private bool awaitingReopen;
+    private bool flagStillUp;
     private bool exact;
 
     public readonly record struct Bands(double Lower, double Upper, double Reference, bool Exact);
+
+    /// <summary>What a band's row says in the depth: Limit Up or Limit Down, with a ~ when it's rough.</summary>
+    public static string Label(bool upper, bool exact) => Labels[(upper ? 1 : 0) + (exact ? 0 : 2)];
+
+    public static bool IsLabel(string venue) => Array.IndexOf(Labels, venue) >= 0;
 
     /// <summary>Tier 1 is the S&P 500, the Russell 1000 and some ETPs; everything else is Tier 2.</summary>
     public static bool IsTier1(string symbol) => Volatile.Read(ref tier1).Contains(symbol);
@@ -65,22 +75,34 @@ internal sealed class LuldBand
         return symbols.Count;
     }
 
-    /// <summary>A print that went on the tape. Only round lots count toward the reference price.</summary>
-    public void OnTrade(double price, long utcTicks, bool roundLot)
+    /// <summary>
+    /// A print that went on the tape. Only round lots count toward the reference price; a reopening
+    /// print (condition 5) sets it whatever its size.
+    /// </summary>
+    public void OnTrade(double price, long utcTicks, bool roundLot, bool reopening = false)
     {
-        if (!roundLot || !(price > 0) || !InSession(utcTicks, out var et))
+        if (!(roundLot || reopening) || !(price > 0) || !InSession(utcTicks, out var et))
             return;
 
         lock (this.gate)
         {
             this.StartDay(et.Date);
-            if (this.halted)
+            bool reopensNow = reopening && (this.halted || this.awaitingReopen);
+            if (reopensNow)
+            {
+                // The auction beat the halt flag here; when the flag does clear, the band is already running.
+                this.flagStillUp = this.halted;
+                this.halted = false;
+            }
+            else if (this.halted)
+            {
                 return;
+            }
 
-            if (double.IsNaN(this.reference) || this.awaitingReopen)
+            if (double.IsNaN(this.reference) || this.awaitingReopen || reopensNow)
             {
                 // The opening print, or the reopening one after a pause, is the first reference price.
-                this.exact = this.awaitingReopen || et.TimeOfDay - SessionOpen < OpeningGrace;
+                this.exact = this.awaitingReopen || reopensNow || et.TimeOfDay - SessionOpen < OpeningGrace;
                 this.reference = price;
                 this.referenceSince = utcTicks;
                 this.awaitingReopen = false;
@@ -88,8 +110,12 @@ internal sealed class LuldBand
                 this.sum = 0;
             }
 
-            this.window.Enqueue((utcTicks, price));
-            this.sum += price;
+            if (roundLot)
+            {
+                this.window.Enqueue((utcTicks, price));
+                this.sum += price;
+            }
+
             this.Advance(utcTicks);
         }
     }
@@ -102,6 +128,11 @@ internal sealed class LuldBand
             if (isHalted)
             {
                 this.halted = true;
+                this.flagStillUp = false;
+            }
+            else if (this.flagStillUp)
+            {
+                this.flagStillUp = false;
             }
             else if (this.halted)
             {
@@ -157,6 +188,7 @@ internal sealed class LuldBand
         this.day = date;
         this.reference = double.NaN;
         this.awaitingReopen = false;
+        this.flagStillUp = false;
         this.exact = false;
         this.window.Clear();
         this.sum = 0;

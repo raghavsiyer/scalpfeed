@@ -317,6 +317,7 @@ internal sealed class FeedFrameParser
                 break;
             case Column.Conditions:
                 r.NormalOddLot = reader.TokenType == JsonTokenType.String && PrintFilter.IsNormalOddLot(reader.ValueSpan);
+                r.Reopening = reader.TokenType == JsonTokenType.String && PrintFilter.IsReopening(reader.ValueSpan);
                 break;
         }
     }

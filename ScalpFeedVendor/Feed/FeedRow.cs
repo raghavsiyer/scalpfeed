@@ -65,6 +65,9 @@ internal sealed class FeedRow
     public bool ValidTick;
     public bool NormalOddLot;
 
+    /// <summary>Condition 5: the listing market's reopening auction after a halt or pause.</summary>
+    public bool Reopening;
+
     /// <summary>Arrival time of the frame, in UTC ticks, stamped before parsing.</summary>
     public long ArrivalUtcTicks;
 
@@ -97,6 +100,7 @@ internal sealed class FeedRow
         this.ExtendedHours = false;
         this.ValidTick = true;
         this.NormalOddLot = false;
+        this.Reopening = false;
     }
 }
 

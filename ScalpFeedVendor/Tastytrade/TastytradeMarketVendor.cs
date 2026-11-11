@@ -508,10 +508,10 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
         if (this.ibkr is { IsMerged: true })
         {
             if (state.Merge.OnTastytradePrint(row.Price, row.Size, row.Time / 1000, row.ArrivalUtcTicks))
-                this.EmitPrint(state, row.Price, row.Size, exchangeTicks, row.Aggressor, row.Bid, row.Ask, row.ValidTick);
+                this.EmitPrint(state, row.Price, row.Size, exchangeTicks, row.Aggressor, row.Bid, row.Ask, row.ValidTick, row.Reopening);
         }
         else if (!state.IbkrTape || row.Exchange == 'O')
-            this.EmitPrint(state, row.Price, row.Size, exchangeTicks, row.Aggressor, row.Bid, row.Ask, row.ValidTick);
+            this.EmitPrint(state, row.Price, row.Size, exchangeTicks, row.Aggressor, row.Bid, row.Ask, row.ValidTick, row.Reopening);
         else if (delay < FreshPrintTicks)
             state.IbkrTapeWatch.OnExpectedPrint(row.ArrivalUtcTicks);
 
@@ -530,7 +530,7 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
             Interlocked.Increment(ref this.unprintedTrades);
 
         if (this.fallbackOn && !state.IbkrTape && row.Time > state.LastTradeTimeMs && !double.IsNaN(row.Price))
-            this.EmitPrint(state, row.Price, row.Size, ToUtcTicks(row.Time), PrintSide.Undefined, double.NaN, double.NaN, true);
+            this.EmitPrint(state, row.Price, row.Size, ToUtcTicks(row.Time), PrintSide.Undefined, double.NaN, double.NaN, true, false);
 
         state.LastTradeTimeMs = Math.Max(state.LastTradeTimeMs, row.Time);
         this.MaybePushDayBar(state, row.ArrivalUtcTicks);
@@ -565,10 +565,10 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
     private static long ToUtcTicks(long unixMs) => DateTime.UnixEpoch.Ticks + (unixMs * TimeSpan.TicksPerMillisecond);
 
     /// <summary>On IBKR's receive thread: a print for this symbol's tape.</summary>
-    private void OnIbkrPrint(SymbolState state, double price, double size, long utcTicks, double bid, double ask, bool roundLot) =>
-        this.EmitPrint(state, price, size, utcTicks, PrintSide.Undefined, bid, ask, roundLot);
+    private void OnIbkrPrint(SymbolState state, double price, double size, long utcTicks, double bid, double ask, bool roundLot, bool reopening) =>
+        this.EmitPrint(state, price, size, utcTicks, PrintSide.Undefined, bid, ask, roundLot, reopening);
 
-    private void EmitPrint(SymbolState state, double price, double size, long exchangeTicks, PrintSide side, double bid, double ask, bool roundLot)
+    private void EmitPrint(SymbolState state, double price, double size, long exchangeTicks, PrintSide side, double bid, double ask, bool roundLot, bool reopening)
     {
         // Two feeds write this tape, and the push stays inside the lock so that a print's time
         // and its place in line can't disagree. It's almost always uncontended.
@@ -579,7 +579,7 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
             state.LastSize = size;
 
             // Each trade reaches here once, from whichever feed put it on the tape, so the LULD mean counts it once.
-            state.Luld.OnTrade(price, FeedClock.UtcNowTicks, roundLot);
+            state.Luld.OnTrade(price, FeedClock.UtcNowTicks, roundLot, reopening);
 
             if (!state.LastOn)
                 return;

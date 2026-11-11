@@ -41,6 +41,12 @@ internal static class PrintFilter
     public static bool IsOddLot(ReadOnlySpan<byte> conditions) => conditions.IndexOf((byte)'I') >= 0;
 
     /// <summary>
+    /// Condition 5, Re-Opening Prints, the same code on both SIPs' tapes: the listing market's auction
+    /// after a halt or pause. tastytrade sends it as @5 X (round lot) or @5 x (odd lot).
+    /// </summary>
+    public static bool IsReopening(ReadOnlySpan<byte> conditions) => conditions.IndexOf((byte)'5') >= 0;
+
+    /// <summary>
     /// IBKR's condition codes for what tastytrade marks invalid and PrintFilter hides, plus special
     /// settlement and out-of-sequence prints. Codes are one character each, with or without spaces
     /// between them (premarket shows TI and FTI). Odd lots (I), sweeps (F) and extended hours (T)

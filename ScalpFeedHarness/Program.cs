@@ -409,6 +409,32 @@ async Task RunLuld()
     luld.OnTrade(13.20, Et(9, 51, 2), true);
     Check(Show(luld, Et(9, 51, 3), 9.50) == "11.88/14.52 ref 13.2", "the reopening print is the new reference");
 
+    // NXXT 2026-11-11: the auction's prints came about 0.2 s before the halt flag cleared, then a
+    // 3.1812 print off the auction became the reference instead of the auction's 3.45.
+    var early = new LuldBand();
+    early.OnTrade(3.00, Et(13, 0, 0), true);
+    early.OnHalt(true);
+    early.OnTrade(3.40, Et(13, 10, 0), true);
+    Check(Show(early, Et(13, 10, 0), 0.1865) == "none", "an ordinary print during a pause starts nothing");
+    early.OnTrade(3.45, Et(13, 10, 40.18), false, reopening: true);
+    early.OnTrade(3.45, Et(13, 10, 40.18), true, reopening: true);
+    early.OnTrade(3.1812, Et(13, 10, 40.30), true);
+    string reopened = Show(early, Et(13, 10, 40.30), 0.1865);
+    Check(reopened == "3.3/3.6 ref 3.45", $"a reopening print (condition 5) restarts the band before the halt flag clears, exact ({reopened})");
+    early.OnHalt(false);
+    early.OnTrade(3.50, Et(13, 10, 41), true);
+    Check(Show(early, Et(13, 10, 41), 0.1865) == "3.3/3.6 ref 3.45", "and the flag clearing after it doesn't restart it again");
+    early.OnHalt(true);
+    Check(Show(early, Et(13, 11, 0), 0.1865) == "none", "the next pause still stops it");
+    early.OnHalt(false);
+    early.OnTrade(3.60, Et(13, 16, 0), true);
+    Check(Show(early, Et(13, 16, 0), 0.1865) == "3.45/3.75 ref 3.6", "and a reopening that follows the flag still works without condition 5");
+
+    Check(LuldBand.Label(true, true) == "Limit Up" && LuldBand.Label(false, true) == "Limit Down"
+          && LuldBand.Label(true, false) == "Limit Up ~" && LuldBand.Label(false, false) == "Limit Down ~", "the rows read Limit Up and Limit Down, with ~ when rough");
+    Check(LuldBand.IsLabel("Limit Down ~") && !LuldBand.IsLabel("LULD") && !LuldBand.IsLabel("ARCA"), "and only those count as band rows");
+    Check(PrintFilter.IsReopening("@5 X"u8) && PrintFilter.IsReopening("@5 x"u8) && !PrintFilter.IsReopening("@  o"u8) && !PrintFilter.IsReopening("F I"u8), "condition 5 marks a reopening print");
+
     var low = new LuldBand();
     low.OnTrade(2.50, Et(9, 30, 1), true);
     Check(Show(low, Et(10, 0, 0), 2.10) == "2/3 ref 2.5", "prev close from $0.75 to $3 is 20%");
@@ -449,9 +475,11 @@ async Task RunLuld()
     gateway.SendHalted("HALT", 2);
     gateway.SendPrint("F I");
     gateway.SendPrint("F");
+    gateway.SendPrint("5");
     await Task.Delay(300);
     Check(sink.Halts.Contains(("HALT", 2)), "IBKR's Halted tick reaches the bridge, 2 for a volatility pause");
-    Check(sink.OddLots.GetValueOrDefault("ODD") == 1 && sink.Prints.GetValueOrDefault("ODD")?.Count == 2, "odd lots still reach the tape, marked so the band skips them");
+    Check(sink.OddLots.GetValueOrDefault("ODD") == 1 && sink.Prints.GetValueOrDefault("ODD")?.Count == 3, "odd lots still reach the tape, marked so the band skips them");
+    Check(sink.Reopenings.GetValueOrDefault("ODD") == 1, "IBKR's condition 5 reaches the bridge marked as a reopening print");
     await client.StopAsync();
 }
 
@@ -2228,10 +2256,14 @@ internal sealed class IbkrTestSink : IIbkrSink
 
     public readonly System.Collections.Concurrent.ConcurrentDictionary<string, int> OddLots = new();
 
-    public void OnIbkrPrint(string symbol, double price, double size, long unixSeconds, string venue, long arrivalUtcTicks, bool roundLot)
+    public readonly System.Collections.Concurrent.ConcurrentDictionary<string, int> Reopenings = new();
+
+    public void OnIbkrPrint(string symbol, double price, double size, long unixSeconds, string venue, long arrivalUtcTicks, bool roundLot, bool reopening)
     {
         if (!roundLot)
             this.OddLots.AddOrUpdate(symbol, 1, (_, n) => n + 1);
+        if (reopening)
+            this.Reopenings.AddOrUpdate(symbol, 1, (_, n) => n + 1);
         if (!this.Prints.TryGetValue(symbol, out var list))
             this.Prints[symbol] = list = new();
         list.Add((price, size, venue, unixSeconds, arrivalUtcTicks));

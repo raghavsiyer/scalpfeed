@@ -58,7 +58,7 @@ internal interface IIbkrSink
     void OnIbkrDepth(string symbol, List<IbkrDepthRow> bids, List<IbkrDepthRow> asks);
 
     /// <summary>A print for the tape, already filtered for the tape mode. Its time is whole seconds only.</summary>
-    void OnIbkrPrint(string symbol, double price, double size, long unixSeconds, string venue, long arrivalUtcTicks, bool roundLot);
+    void OnIbkrPrint(string symbol, double price, double size, long unixSeconds, string venue, long arrivalUtcTicks, bool roundLot, bool reopening);
 
     /// <summary>IBKR's Halted tick on the symbol's quote: 0 trading, 1 a halt, 2 a volatility (LULD) pause.</summary>
     void OnIbkrHalted(string symbol, int halted);
@@ -979,7 +979,8 @@ internal sealed class IbkrClient
         {
             this.printsAdded++;
             stream.SharesAdded += size;
-            Volatile.Read(ref this.sink)?.OnIbkrPrint(stream.Key.Symbol, price, size, unixSeconds, this.InternVenue(venue), this.frameArrivalUtcTicks, !PrintFilter.IsOddLot(conditions));
+            Volatile.Read(ref this.sink)?.OnIbkrPrint(stream.Key.Symbol, price, size, unixSeconds, this.InternVenue(venue), this.frameArrivalUtcTicks,
+                !PrintFilter.IsOddLot(conditions), PrintFilter.IsReopening(conditions));
         }
     }
 
