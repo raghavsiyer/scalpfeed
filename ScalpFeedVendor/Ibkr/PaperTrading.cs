@@ -28,12 +28,17 @@ internal sealed class PaperTrading : ITraderSink
     };
 
     private readonly Action<Message> push;
+    private readonly string vendorKey;
     private readonly ConcurrentDictionary<string, DateTime> positionOpened = new();
     private readonly ConcurrentDictionary<int, bool> historyStarted = new();
     private readonly ConcurrentDictionary<string, bool> tradesPushed = new();
     private IbkrTrader trader;
 
-    public PaperTrading(Action<Message> push) => this.push = push;
+    public PaperTrading(Action<Message> push, string vendorKey)
+    {
+        this.push = push;
+        this.vendorKey = vendorKey;
+    }
 
     public void Start() => this.trader = TraderSession.Attach(this);
 
@@ -72,7 +77,7 @@ internal sealed class PaperTrading : ITraderSink
         this.trader?.Positions().Select(this.PositionMessage).ToList() ?? [];
 
     public IList<MessageTrade> GetTrades() =>
-        this.trader?.Fills().Select(TradeMessage).ToList() ?? [];
+        this.trader?.Fills().Select(this.TradeMessage).ToList() ?? [];
 
     public TradingOperationResult PlaceOrder(PlaceOrderRequestParameters p)
     {
@@ -83,7 +88,7 @@ internal sealed class PaperTrading : ITraderSink
         if (!ToIbkrType.TryGetValue(p.OrderTypeId ?? "", out var type))
             return TradingOperationResult.CreateError(p.RequestId, $"order type {p.OrderTypeId} isn't supported");
 
-        var ticket = new IbkrOrderTicket(IbkrClient.ToIbkrSymbol(p.Symbol.Id), p.Side == Side.Buy, p.Quantity, type, p.Price, p.TriggerPrice, ToIbkrTif(p.TimeInForce));
+        var ticket = new IbkrOrderTicket(TradingSymbols.ToIbkr(p.Symbol.Id), p.Side == Side.Buy, p.Quantity, type, p.Price, p.TriggerPrice, ToIbkrTif(p.TimeInForce));
         var (id, error) = this.trader.Place(ticket);
         Log.Info(error == null
             ? $"[trade] placed order {id}: {(ticket.Buy ? "buy" : "sell")} {ticket.Quantity} {ticket.Symbol} {ticket.Type} {Describe(ticket)} {ticket.Tif}"
@@ -131,7 +136,7 @@ internal sealed class PaperTrading : ITraderSink
             return TradingOperationResult.CreateError(p.RequestId, "outside regular hours IBKR won't fill a market order: close with a limit order");
 
         double quantity = p.CloseQuantity > 0 ? p.CloseQuantity : position.Quantity;
-        var ticket = new IbkrOrderTicket(IbkrClient.ToIbkrSymbol(position.Symbol.Id), position.Side != Side.Buy, quantity, "MKT", double.NaN, double.NaN, "DAY");
+        var ticket = new IbkrOrderTicket(TradingSymbols.ToIbkr(position.Symbol.Id), position.Side != Side.Buy, quantity, "MKT", double.NaN, double.NaN, "DAY");
         var (id, error) = this.trader.Place(ticket);
         Log.Info(error == null ? $"[trade] closing {position.Symbol.Id} with market order {id} for {quantity}" : $"[trade] close refused: {error}");
         return error == null
@@ -207,7 +212,7 @@ internal sealed class PaperTrading : ITraderSink
             return;
 
         var latest = this.trader?.Fills().FirstOrDefault(f => f.ExecId == fill.ExecId) ?? fill;
-        this.push(TradeMessage(latest));
+        this.push(this.TradeMessage(latest));
     }
 
     public void OnTraderOrderMessage(int orderId, int code, string text, bool endedOrder)
@@ -222,7 +227,7 @@ internal sealed class PaperTrading : ITraderSink
 
     #region Messages
 
-    private static string SymbolId(string ibkrSymbol) => ibkrSymbol.Replace(' ', '/');
+    private string SymbolId(string ibkrSymbol) => TradingSymbols.FromIbkr(ibkrSymbol, this.vendorKey);
 
     private static string PositionId(IbkrPosition p) => p.Account + ":" + p.Symbol;
 
@@ -274,10 +279,10 @@ internal sealed class PaperTrading : ITraderSink
     private static double Value(IReadOnlyDictionary<string, string> values, string tag) =>
         values.TryGetValue(tag, out var text) && double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out double value) ? value : 0;
 
-    private static MessageTrade TradeMessage(IbkrFill f) => new()
+    private MessageTrade TradeMessage(IbkrFill f) => new()
     {
         TradeId = f.ExecId,
-        SymbolId = SymbolId(f.Symbol),
+        SymbolId = this.SymbolId(f.Symbol),
         AccountId = f.Account,
         OrderId = f.OrderId.ToString(CultureInfo.InvariantCulture),
         DateTime = f.TimeUtc,
@@ -329,7 +334,7 @@ internal sealed class PaperTrading : ITraderSink
     private MessageOpenPosition PositionMessage(IbkrPosition p)
     {
         string id = PositionId(p);
-        return new MessageOpenPosition(SymbolId(p.Symbol))
+        return new MessageOpenPosition(this.SymbolId(p.Symbol))
         {
             PositionId = id,
             AccountId = p.Account,
@@ -342,7 +347,7 @@ internal sealed class PaperTrading : ITraderSink
 
     private MessageOpenOrder OrderMessage(IbkrOrder o)
     {
-        var message = new MessageOpenOrder(SymbolId(o.Symbol))
+        var message = new MessageOpenOrder(this.SymbolId(o.Symbol))
         {
             OrderId = o.Id.ToString(CultureInfo.InvariantCulture),
             AccountId = o.Account,

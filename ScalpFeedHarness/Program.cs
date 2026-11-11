@@ -419,6 +419,12 @@ async Task RunTrader()
     Check(IbkrTrader.AllowedRequests.SetEquals([71, 61, 62, 5, 7, 3, 4]), "the trading connection can send only startApi, positions, account summary, open orders, fills, place and cancel");
     Check(IbkrTrader.ParseTime("20261111  13:45:00 US/Eastern") == new DateTime(2026, 11, 11, 18, 45, 0, DateTimeKind.Utc), "IBKR's fill time with its zone reads as UTC");
 
+    // 2026-11-11: orders went out as "WHLR | tasty" and IBKR answered 200, no security definition.
+    Check(TradingSymbols.ToIbkr("WHLR | tasty") == "WHLR" && TradingSymbols.ToIbkr("BRK/B | tasty") == "BRK B" && TradingSymbols.ToIbkr("NXXT") == "NXXT",
+        "Quantower's symbol ID loses its connection tag on the way to IBKR, and a share class gets IBKR's space");
+    Check(TradingSymbols.FromIbkr("WHLR", "tasty") == "WHLR | tasty" && TradingSymbols.FromIbkr("BRK B", "tasty") == "BRK/B | tasty",
+        "and IBKR's symbol gets it back on the way to Quantower");
+
     // A paper account.
     using var gateway = new FakeTradingGateway();
     var sink = new TraderTestSink();

@@ -47,7 +47,7 @@ public sealed class ScalpFeedVendor : MultiVendor
         var result = base.Connect(connectRequestParameters);
         if (this.trading == null)
         {
-            this.trading = new PaperTrading(this.PushMessage);
+            this.trading = new PaperTrading(this.PushMessage, TastytradeKey);
             this.trading.Start();
         }
 
