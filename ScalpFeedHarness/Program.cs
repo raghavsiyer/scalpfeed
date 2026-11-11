@@ -85,6 +85,9 @@ switch (args[0])
     case "luld":
         await RunLuld();
         break;
+    case "trader":
+        await RunTrader();
+        break;
     case "tapewatch":
         await RunTapeWatch();
         break;
@@ -358,6 +361,161 @@ async Task RunVenueTops()
     Check(IbkrClient.AllowedRequests.SetEquals(new[] { 71, 59, 1, 2, 10, 11, 97, 98, 20, 25 }), "the whitelist is unchanged");
 
     await client.StopAsync();
+}
+
+// Paper trading against a stand-in for Gateway: the order message field for field against ib_insync's,
+// the account and order lifecycle, a reconnect, and refusal of anything but a paper account. No real
+// Gateway or account is involved.
+async Task RunTrader()
+{
+    static async Task<bool> WaitFor(Func<bool> condition, double seconds = 5)
+    {
+        var clock = Stopwatch.StartNew();
+        while (!condition() && clock.Elapsed.TotalSeconds < seconds)
+            await Task.Delay(20);
+        return condition();
+    }
+
+    // Built by ib_insync 0.9.86's own placeOrder for server version 176, with no connection
+    // (analysis\ibinsync_order_fields.py, run with momo-algo's .venv): LMT buy, MKT sell, STP sell, STP LMT buy GTC.
+    string[] reference =
+    [
+        "3|101|0|NXXT|STK||0.0|||SMART||USD|||||BUY|100|LMT|3.45||DAY||DU000000|O|0||1|0|0|0|0|0|1|0||0.0||||||||0||-1|0|||0|||0|0||0||||||0|||||0|||||||||||0|||0|0|||0||0|0|0|0|||||||0|||||||||0|0|0|0|||0||",
+        "3|102|0|NXXT|STK||0.0|||SMART||USD|||||SELL|250|MKT|||DAY||DU000000|O|0||1|0|0|0|0|0|0|0||0.0||||||||0||-1|0|||0|||0|0||0||||||0|||||0|||||||||||0|||0|0|||0||0|0|0|0|||||||0|||||||||0|0|0|0|||0||",
+        "3|103|0|NXXT|STK||0.0|||SMART||USD|||||SELL|100|STP||3.1|DAY||DU000000|O|0||1|0|0|0|0|0|0|0||0.0||||||||0||-1|0|||0|||0|0||0||||||0|||||0|||||||||||0|||0|0|||0||0|0|0|0|||||||0|||||||||0|0|0|0|||0||",
+        "3|104|0|NXXT|STK||0.0|||SMART||USD|||||BUY|300|STP LMT|0.1234|0.12|GTC||DU000000|O|0||1|0|0|0|0|0|1|0||0.0||||||||0||-1|0|||0|||0|0||0||||||0|||||0|||||||||||0|||0|0|||0||0|0|0|0|||||||0|||||||||0|0|0|0|||0||",
+    ];
+    IbkrOrder Ord(int id, bool buy, double qty, string type, double lmt, double stp, string tif) =>
+        new(id, "DU000000", "NXXT", buy, qty, type, lmt, stp, tif, IbkrTrader.OutsideRthFor(type), "PendingSubmit", 0, 0, DateTime.UtcNow);
+    string Joined(IEnumerable<object> fields) =>
+        string.Join("|", fields.Select(f => f is bool b ? (b ? "1" : "0") : Convert.ToString(f, CultureInfo.InvariantCulture)));
+    string FirstDifference(string a, string b)
+    {
+        var x = a.Split('|');
+        var y = b.Split('|');
+        for (int i = 0; i < Math.Max(x.Length, y.Length); i++)
+        {
+            if (i >= x.Length || i >= y.Length || x[i] != y[i])
+                return $"field {i}: ours '{(i < x.Length ? x[i] : "(none)")}', ib_insync '{(i < y.Length ? y[i] : "(none)")}'";
+        }
+
+        return "same";
+    }
+
+    var ours = new[]
+    {
+        Ord(101, true, 100, "LMT", 3.45, double.NaN, "DAY"),
+        Ord(102, false, 250, "MKT", double.NaN, double.NaN, "DAY"),
+        Ord(103, false, 100, "STP", double.NaN, 3.1, "DAY"),
+        Ord(104, true, 300, "STP LMT", 0.1234, 0.12, "GTC"),
+    };
+    for (int i = 0; i < ours.Length; i++)
+    {
+        string mine = Joined(IbkrTrader.PlaceOrderFields(ours[i]));
+        Check(mine == reference[i], $"placeOrder for {ours[i].Type} matches ib_insync field for field, 115 fields ({FirstDifference(mine, reference[i])})");
+    }
+
+    Check(!IbkrClient.AllowedRequests.Overlaps([3, 4, 5, 6, 7, 8, 61, 62]), "the market data connection still can't send an order or ask about the account");
+    Check(IbkrTrader.AllowedRequests.SetEquals([71, 61, 62, 5, 7, 3, 4]), "the trading connection can send only startApi, positions, account summary, open orders, fills, place and cancel");
+    Check(IbkrTrader.ParseTime("20261111  13:45:00 US/Eastern") == new DateTime(2026, 11, 11, 18, 45, 0, DateTimeKind.Utc), "IBKR's fill time with its zone reads as UTC");
+
+    // A paper account.
+    using var gateway = new FakeTradingGateway();
+    var sink = new TraderTestSink();
+    var trader = new IbkrTrader("127.0.0.1", gateway.Port, 79);
+    trader.SetSink(sink);
+    trader.Start();
+    await WaitFor(() => trader.Ready && gateway.Count("7") == 1);
+    Check(trader.Ready && trader.Account == "DU000000", "ready on the paper account the Gateway names");
+    Check(string.Join(",", gateway.Received.Select(r => r[0])) == "71,61,62,5,7", $"asks only for positions, the account summary, open orders and today's fills ({string.Join(",", gateway.Received.Select(r => r[0]))})");
+    Check(gateway.Received.First()[2] == "79", "on its own client ID");
+
+    var (id, error) = trader.Place(new IbkrOrderTicket("NXXT", true, 100, "LMT", 3.45, double.NaN, "DAY"));
+    await WaitFor(() => gateway.Count("3") == 1);
+    string sent = gateway.Count("3") == 1 ? string.Join("|", gateway.LastOf("3")) : "";
+    Check(error == null && id == 101 && sent == reference[0], $"a limit order goes out as ib_insync sends it, on the Gateway's next order ID ({FirstDifference(sent, reference[0])})");
+    Check(sink.Orders.Any(o => o.Id == 101 && o.Status == "PendingSubmit"), "and shows at once as pending");
+
+    gateway.Send("5", "101", "0", "NXXT", "STK", "", "0", "", "", "SMART", "USD", "NXXT", "NMS", "BUY", "100", "LMT", "3.45", "0", "DAY", "", "DU000000", "O", "0", "", "79", "123", "1", "0");
+    gateway.Send("3", "101", "Submitted", "0", "100", "0", "123", "0", "0", "79", "", "0");
+    await WaitFor(() => trader.Order(101)?.Status == "Submitted");
+    Check(trader.Order(101)?.Status == "Submitted" && trader.OpenOrders().Count == 1 && trader.Order(101).OutsideRth, "IBKR's open order and status make it working, allowed outside regular hours");
+
+    gateway.Send("11", "-1", "101", "0", "NXXT", "STK", "", "0", "", "", "ISLAND", "USD", "NXXT", "NMS", "0001.01", "20261111 13:45:00 US/Eastern", "DU000000", "ISLAND", "BOT", "100", "3.45", "123", "79", "0", "100", "3.45", "", "", "", "", "1");
+    gateway.Send("59", "1", "0001.01", "1.0", "USD", "1.7976931348623157E308", "1.7976931348623157E308", "");
+    gateway.Send("3", "101", "Filled", "100", "0", "3.45", "123", "0", "3.45", "79", "", "0");
+    gateway.Send("61", "3", "DU000000", "0", "NXXT", "STK", "", "0", "", "", "NASDAQ", "USD", "NXXT", "NMS", "100", "3.46");
+    gateway.Send("63", "1", "9001", "DU000000", "NetLiquidation", "1000000.00", "USD");
+    await WaitFor(() => trader.Positions().Count == 1 && trader.Fills().Any(f => f.Commission == 1.0) && trader.Order(101).IsDone && sink.Accounts.Any());
+    var fill = trader.Fills().FirstOrDefault();
+    Check(trader.Order(101).IsDone && trader.OpenOrders().Count == 0, "filled, it's no longer working");
+    Check(fill is { Buy: true, Shares: 100, Price: 3.45, Commission: 1.0, OrderId: 101 } && fill.TimeUtc == new DateTime(2026, 11, 11, 18, 45, 0, DateTimeKind.Utc), $"the fill has its commission and IBKR's time ({fill})");
+    Check(trader.Positions() is [{ Symbol: "NXXT", Quantity: 100, AvgCost: 3.46 }], "the position is IBKR's");
+    Check(sink.Accounts.Any(a => a.Account == "DU000000" && a.Values.GetValueOrDefault("NetLiquidation") == "1000000.00"), "the account's values reach the sink");
+
+    var (id2, _) = trader.Place(new IbkrOrderTicket("NXXT", false, 100, "LMT", 3.60, double.NaN, "DAY"));
+    gateway.Send("3", id2.ToString(CultureInfo.InvariantCulture), "Submitted", "0", "100", "0", "124", "0", "0", "79", "", "0");
+    await WaitFor(() => trader.Order(id2)?.Status == "Submitted");
+    string modifyError = trader.Modify(id2, 100, 3.65, double.NaN);
+    await WaitFor(() => gateway.Count("3") == 3);
+    var modified = gateway.LastOf("3");
+    Check(id2 == 102 && modifyError == null && modified[1] == "102" && modified[19] == "3.65" && modified[16] == "SELL", "a change goes out on the same order ID with the new price");
+    string cancelError = trader.Cancel(id2);
+    await WaitFor(() => gateway.Count("4") == 1);
+    Check(cancelError == null && string.Join("|", gateway.LastOf("4") ?? []) == "4|1|102|", "a cancel is 4, 1, the ID and an empty time");
+    gateway.Send("3", "102", "Cancelled", "0", "100", "0", "124", "0", "0", "79", "", "0");
+    await WaitFor(() => sink.Orders.LastOrDefault(o => o.Id == 102)?.Status == "Cancelled");
+    Check(trader.Order(102)?.IsDone == true && sink.Orders.Last(o => o.Id == 102).Status == "Cancelled", "cancelled, it's done");
+
+    var (id3, _) = trader.Place(new IbkrOrderTicket("NXXT", true, 100, "LMT", 3.457, double.NaN, "DAY"));
+    gateway.Send("4", "2", id3.ToString(CultureInfo.InvariantCulture), "110", "The price does not conform to the minimum price variation for this contract.", "");
+    await WaitFor(() => sink.Orders.LastOrDefault(o => o.Id == id3)?.IsDone == true);
+    Check(gateway.LastOf("3")[19] == "3.457", "a price goes out exactly as entered, not cut to the display's decimals");
+    Check(sink.Messages.Any(m => m.OrderId == id3 && m.Code == 110 && m.Ended) && trader.Order(id3)?.Status == "Inactive",
+        "IBKR's 110 on an order it never acknowledged reaches the sink as a refusal, and the order is done");
+
+    // A warning on a working order leaves it working; an error ends it, as in ib_insync.
+    var (idWarn, _) = trader.Place(new IbkrOrderTicket("NXXT", true, 100, "LMT", 3.30, double.NaN, "DAY"));
+    gateway.Send("3", idWarn.ToString(CultureInfo.InvariantCulture), "Submitted", "0", "100", "0", "126", "0", "0", "79", "", "0");
+    await WaitFor(() => trader.Order(idWarn)?.Status == "Submitted");
+    gateway.Send("4", "2", idWarn.ToString(CultureInfo.InvariantCulture), "399", "Order Message: warning", "");
+    await WaitFor(() => sink.Messages.Any(m => m.OrderId == idWarn));
+    Check(sink.Messages.Any(m => m.OrderId == idWarn && !m.Ended) && !trader.Order(idWarn).IsDone, "a warning (399) leaves a working order working");
+    gateway.Send("4", "2", idWarn.ToString(CultureInfo.InvariantCulture), "201", "Order rejected - reason: test", "");
+    await WaitFor(() => sink.Orders.LastOrDefault(o => o.Id == idWarn)?.IsDone == true);
+    Check(trader.Order(idWarn)?.Status == "Cancelled" && sink.Messages.Any(m => m.OrderId == idWarn && m.Code == 201 && m.Ended), "an error (201) ends it");
+
+    Check(trader.Place(new IbkrOrderTicket("NXXT", true, 10.5, "LMT", 3, double.NaN, "DAY")).Error != null, "part shares are refused before anything is sent");
+    Check(trader.Place(new IbkrOrderTicket("NXXT", true, 100, "LMT", double.NaN, double.NaN, "DAY")).Error != null, "so is a limit order with no price");
+    Check(trader.Place(new IbkrOrderTicket("NXXT", true, 100, "TRAIL", double.NaN, double.NaN, "DAY")).Error != null, "and an order type that isn't built");
+    Check(gateway.Count("3") == 5, "none of those went out");
+
+    // A reconnect: what IBKR no longer reports is no longer shown, and order IDs don't repeat.
+    var (id4, _) = trader.Place(new IbkrOrderTicket("NXXT", true, 100, "LMT", 3.40, double.NaN, "DAY"));
+    gateway.Send("3", id4.ToString(CultureInfo.InvariantCulture), "Submitted", "0", "100", "0", "125", "0", "0", "79", "", "0");
+    await WaitFor(() => trader.Order(id4)?.Status == "Submitted");
+    gateway.Drop();
+    await WaitFor(() => gateway.Connections == 2 && trader.Ready && gateway.Count("7") == 2, 10);
+    gateway.Send("62", "1");
+    gateway.Send("53", "1");
+    await WaitFor(() => trader.Positions().Count == 0 && trader.Order(id4)?.Status == IbkrTrader.GoneStatus);
+    Check(sink.States.Any(s => !s.Ready) && trader.Ready, "the trader says when it's down and comes back by itself");
+    Check(trader.Positions().Count == 0 && sink.Positions.Last().Quantity == 0, "a position missing from IBKR's list after a reconnect shows as closed");
+    Check(trader.Order(id4)?.Status == IbkrTrader.GoneStatus && trader.OpenOrders().Count == 0, "a working order IBKR no longer reports isn't shown as working");
+    var (id5, _) = trader.Place(new IbkrOrderTicket("NXXT", true, 100, "LMT", 3.40, double.NaN, "DAY"));
+    Check(id5 > id4, $"the Gateway's next ID after a reconnect (101 here) doesn't reuse one already used ({id5})");
+    await trader.StopAsync();
+
+    // A live account: nothing but startApi, and every order refused.
+    using var live = new FakeTradingGateway { Accounts = "U1234567" };
+    var liveTrader = new IbkrTrader("127.0.0.1", live.Port, 79);
+    liveTrader.Start();
+    await WaitFor(() => live.Received.Count >= 1);
+    await Task.Delay(500);
+    var liveOrder = liveTrader.Place(new IbkrOrderTicket("NXXT", true, 100, "LMT", 3.45, double.NaN, "DAY"));
+    Check(!liveTrader.Ready && liveOrder.Error != null, $"logged in to a live account it isn't ready and refuses orders ({liveOrder.Error})");
+    Check(live.Received.All(r => r[0] == "71"), $"and sends nothing but startApi ({string.Join(",", live.Received.Select(r => r[0]))})");
+    await liveTrader.StopAsync();
 }
 
 // Computed LULD bands, by the plan's rules, on a made-up session in Eastern time, then IBKR's halt flag and
@@ -2619,4 +2777,144 @@ internal sealed class CountingSink : IFeedSink
 
     public override string ToString() =>
         $"quotes={this.Quotes} prints={this.Prints} trades={this.Trades} summaries={this.Summaries} lastQuote={this.LastQuote} lastPrint={this.LastPrint}";
+}
+
+/// <summary>
+/// A stand-in for Gateway as the trading connection sees it: answers startApi with an account list
+/// and a next order ID, records every message, and sends whatever a test gives it. No orders go anywhere.
+/// </summary>
+internal sealed class FakeTradingGateway : IDisposable
+{
+    private readonly System.Net.Sockets.TcpListener listener = new(System.Net.IPAddress.Loopback, 0);
+    private readonly CancellationTokenSource stop = new();
+    private readonly object gate = new();
+    private System.Net.Sockets.NetworkStream current;
+    private System.Net.Sockets.TcpClient currentClient;
+    private int connections;
+
+    public FakeTradingGateway()
+    {
+        this.listener.Start();
+        _ = Task.Run(this.AcceptAsync);
+    }
+
+    public string Accounts { get; init; } = "DU000000";
+
+    public int Port => ((System.Net.IPEndPoint)this.listener.LocalEndpoint).Port;
+
+    public int Connections => Volatile.Read(ref this.connections);
+
+    public ConcurrentQueue<string[]> Received { get; } = new();
+
+    public int Count(string messageId) => this.Received.Count(r => r[0] == messageId);
+
+    public string[] LastOf(string messageId) => this.Received.LastOrDefault(r => r[0] == messageId);
+
+    public void Send(params string[] fields)
+    {
+        var body = Encoding.ASCII.GetBytes(string.Concat(fields.Select(f => f + "\0")));
+        var frame = new byte[body.Length + 4];
+        System.Buffers.Binary.BinaryPrimitives.WriteInt32BigEndian(frame, body.Length);
+        body.CopyTo(frame, 4);
+        lock (this.gate)
+            this.current?.Write(frame);
+    }
+
+    /// <summary>Closes the current connection, as a Gateway restart would.</summary>
+    public void Drop()
+    {
+        lock (this.gate)
+        {
+            this.currentClient?.Close();
+            this.current = null;
+        }
+    }
+
+    public void Dispose()
+    {
+        this.stop.Cancel();
+        this.listener.Stop();
+        this.Drop();
+    }
+
+    private async Task AcceptAsync()
+    {
+        try
+        {
+            while (!this.stop.IsCancellationRequested)
+            {
+                var tcp = await this.listener.AcceptTcpClientAsync(this.stop.Token);
+                Interlocked.Increment(ref this.connections);
+                _ = Task.Run(() => this.ServeAsync(tcp));
+            }
+        }
+        catch (Exception ex) when (ex is OperationCanceledException or ObjectDisposedException or System.Net.Sockets.SocketException)
+        {
+        }
+    }
+
+    private async Task ServeAsync(System.Net.Sockets.TcpClient tcp)
+    {
+        using (tcp)
+        {
+            try
+            {
+                var net = tcp.GetStream();
+                await net.ReadExactlyAsync(new byte[4], this.stop.Token);
+                await ReadFrameAsync(net, this.stop.Token);
+                lock (this.gate)
+                {
+                    this.current = net;
+                    this.currentClient = tcp;
+                }
+
+                this.Send("176", "20261111 12:00:00 EST");
+                while (true)
+                {
+                    string text = await ReadFrameAsync(net, this.stop.Token);
+                    var fields = text.EndsWith('\0') ? text[..^1].Split('\0') : text.Split('\0');
+                    this.Received.Enqueue(fields);
+                    if (fields[0] == "71")
+                    {
+                        this.Send("15", "1", this.Accounts);
+                        this.Send("9", "1", "101");
+                    }
+                }
+            }
+            catch (Exception ex) when (ex is IOException or OperationCanceledException or ObjectDisposedException or EndOfStreamException or System.Net.Sockets.SocketException)
+            {
+            }
+        }
+    }
+
+    private static async Task<string> ReadFrameAsync(System.Net.Sockets.NetworkStream net, CancellationToken ct)
+    {
+        var header = new byte[4];
+        await net.ReadExactlyAsync(header, ct);
+        var body = new byte[System.Buffers.Binary.BinaryPrimitives.ReadInt32BigEndian(header)];
+        await net.ReadExactlyAsync(body, ct);
+        return Encoding.ASCII.GetString(body);
+    }
+}
+
+internal sealed class TraderTestSink : ITraderSink
+{
+    public readonly ConcurrentQueue<(bool Ready, string Detail)> States = new();
+    public readonly ConcurrentQueue<(string Account, IReadOnlyDictionary<string, string> Values)> Accounts = new();
+    public readonly ConcurrentQueue<IbkrPosition> Positions = new();
+    public readonly ConcurrentQueue<IbkrOrder> Orders = new();
+    public readonly ConcurrentQueue<IbkrFill> Fills = new();
+    public readonly ConcurrentQueue<(int OrderId, int Code, string Text, bool Ended)> Messages = new();
+
+    public void OnTraderState(bool ready, string detail) => this.States.Enqueue((ready, detail));
+
+    public void OnTraderAccount(string account, IReadOnlyDictionary<string, string> values) => this.Accounts.Enqueue((account, values));
+
+    public void OnTraderPosition(IbkrPosition position) => this.Positions.Enqueue(position);
+
+    public void OnTraderOrder(IbkrOrder order) => this.Orders.Enqueue(order);
+
+    public void OnTraderFill(IbkrFill fill) => this.Fills.Enqueue(fill);
+
+    public void OnTraderOrderMessage(int orderId, int code, string text, bool endedOrder) => this.Messages.Enqueue((orderId, code, text, endedOrder));
 }

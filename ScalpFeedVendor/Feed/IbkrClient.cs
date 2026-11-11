@@ -13,9 +13,12 @@ namespace ScalpFeedVendor.Feed;
 /// <summary>Where the tape comes from: IBKR alone, tastytrade plus IBKR's other venues, or tastytrade alone.</summary>
 internal enum TapeMode { Ibkr, Merged, Tastytrade }
 
-internal sealed record IbkrConfig(bool Enabled, string Host, int Port, int ClientId, bool AllowLiveAccount, int DepthRows = 50, TapeMode Tape = TapeMode.Ibkr)
+internal sealed record IbkrConfig(bool Enabled, string Host, int Port, int ClientId, bool AllowLiveAccount, int DepthRows = 50, TapeMode Tape = TapeMode.Ibkr, int TradingClientIdSetting = 0)
 {
     public static string FilePath => Path.Combine(Log.AppDir, "ibkr.json");
+
+    /// <summary>The trading connection's own client ID: tradingClientId in ibkr.json, else the data one plus 1.</summary>
+    public int TradingClientId => this.TradingClientIdSetting > 0 ? this.TradingClientIdSetting : this.ClientId + 1;
 
     /// <summary>Reads ibkr.json, which is optional. The defaults suit a paper IB Gateway.</summary>
     public static IbkrConfig Load()
@@ -34,7 +37,8 @@ internal sealed record IbkrConfig(bool Enabled, string Host, int Port, int Clien
                 json["clientId"]?.GetValue<int>() ?? config.ClientId,
                 json["allowLiveAccount"]?.GetValue<bool>() ?? config.AllowLiveAccount,
                 json["depthRows"]?.GetValue<int>() ?? config.DepthRows,
-                Enum.TryParse<TapeMode>((string)json["tape"], true, out var tape) ? tape : config.Tape);
+                Enum.TryParse<TapeMode>((string)json["tape"], true, out var tape) ? tape : config.Tape,
+                json["tradingClientId"]?.GetValue<int>() ?? config.TradingClientIdSetting);
         }
         catch (Exception ex) when (ex is JsonException or InvalidOperationException or IOException)
         {
