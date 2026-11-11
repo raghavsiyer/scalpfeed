@@ -370,15 +370,20 @@ async Task RunVenueTops()
     await client.StopAsync();
 }
 
-// The indicator's session VWAP: made-up bars around the reset, then, given IBKR's 1-minute bars saved by
-// analysis\ibkr_history.py, today's values at 11:00, 13:40 and 16:00 ET to compare with the ones worked
-// out separately in Python (NXXT from 4:00 ET with (H+L+C)/3: 1.0399, 1.4008, 1.4833).
+// The indicator's session VWAP: made-up bars around each restart, then, given IBKR's 1-minute bars saved by
+// analysis\ibkr_history.py, NXXT's values on 2026-11-11 to compare with the ones worked out separately in
+// Python with (H+L+C)/3: from 4:00 ET only, 1.0399, 1.4008 and 1.4833 at 11:00, 13:40 and 16:00 ET; by
+// session (4:00, 9:30, 16:00 ET), 0.1653, 1.5157 and 4.7286 at 9:30, 16:00 and 18:00 ET. The after-hours
+// one is what the user's reference showed: about 4.65 at about 18:15 ET.
 void RunSessionVwap(string barsFile)
 {
     var eastern = TimeZoneInfo.FindSystemTimeZoneById("Eastern Standard Time");
     DateTime Et(int day, int h, int m) => TimeZoneInfo.ConvertTimeToUtc(new DateTime(2026, 11, day, h, m, 0), eastern);
+    var premarket = new TimeSpan(4, 0, 0);
+    var open = new TimeSpan(9, 30, 0);
+    var afterHours = new TimeSpan(16, 0, 0);
 
-    var vwap = new SessionVwap(new TimeSpan(4, 0, 0));
+    var vwap = new SessionVwap(premarket);
     double v1 = vwap.Update(Et(10, 19, 0), default, 0.20, 0.18, 0.19, 1_000_000);
     double v2 = vwap.Update(Et(11, 3, 59), Et(10, 19, 0), 0.25, 0.23, 0.24, 1_000_000);
     Check(Math.Abs(v2 - (0.19 + 0.24) / 2) < 1e-9, $"after-hours and overnight bars before 4:00 ET belong to the day before ({v2})");
@@ -388,38 +393,69 @@ void RunSessionVwap(string barsFile)
     Check(Math.Abs(v4 - 1.50) < 1e-9, "and later bars weigh in by volume");
     double v4Again = vwap.Update(Et(11, 4, 1), Et(11, 4, 0), 2.10, 1.90, 2.00, 1_500_000);
     Check(Math.Abs(v4Again - 1.75) < 1e-9, "a bar that's still forming replaces its own earlier contribution, not adds to it");
-    Check(double.IsNaN(new SessionVwap(new TimeSpan(9, 30, 0)).Update(Et(11, 9, 30), default, 1, 1, 1, 0)), "no volume, no VWAP yet");
-    var regular = new SessionVwap(new TimeSpan(9, 30, 0));
+    Check(double.IsNaN(new SessionVwap(open).Update(Et(11, 9, 30), default, 1, 1, 1, 0)), "no volume, no VWAP yet");
+    var regular = new SessionVwap(open);
     Check(regular.SessionOf(Et(11, 9, 29)) != regular.SessionOf(Et(11, 9, 30)), "with a 9:30 start, 9:29 belongs to the day before");
+
+    // By session: premarket, regular hours and after hours each start over.
+    var sessions = new SessionVwap(afterHours, premarket, open);
+    Check(sessions.SessionOf(Et(11, 9, 29)) != sessions.SessionOf(Et(11, 9, 30)), "9:30 starts the regular session");
+    Check(sessions.SessionOf(Et(11, 15, 59)) != sessions.SessionOf(Et(11, 16, 0)), "16:00 starts after hours");
+    Check(sessions.SessionOf(Et(11, 4, 0)) != sessions.SessionOf(Et(11, 3, 59)), "4:00 starts premarket");
+    Check(sessions.SessionOf(Et(10, 16, 0)) == sessions.SessionOf(Et(11, 3, 59)), "overnight stays with the after-hours session before it");
+    Check(sessions.SessionOf(Et(11, 9, 30)) == new DateTime(2026, 11, 11, 9, 30, 0), "a session is named by its start, New York time, whatever order the starts came in");
+    double a1 = sessions.Update(Et(11, 15, 59), default, 1.00, 1.00, 1.00, 1_000);
+    double a2 = sessions.Update(Et(11, 16, 0), Et(11, 15, 59), 5.00, 5.00, 5.00, 1_000);
+    Check(Math.Abs(a1 - 1.00) < 1e-9 && Math.Abs(a2 - 5.00) < 1e-9, $"the after-hours VWAP leaves the regular session out ({a2})");
+
+    // Where the line breaks: the first bar of a session with a VWAP, not a quiet bar before it.
+    var lines = new SessionVwap(premarket, open, afterHours);
+    lines.Update(Et(11, 3, 59), default, 1, 1, 1, 100);
+    lines.Update(Et(11, 4, 0), Et(11, 3, 59), 1, 1, 1, 0);
+    lines.Update(Et(11, 4, 1), Et(11, 4, 0), 1, 1, 1, 100);
+    lines.Update(Et(11, 4, 2), Et(11, 4, 1), 1, 1, 1, 100);
+    Check(lines.BeginsLine(Et(11, 3, 59)), "the chart's first bar with volume begins a line");
+    Check(!lines.BeginsLine(Et(11, 4, 0)), "a session's opening bar with no volume has no VWAP, so no line begins there");
+    Check(lines.BeginsLine(Et(11, 4, 1)), "the session's first bar with volume begins its line");
+    Check(!lines.BeginsLine(Et(11, 4, 2)), "later bars carry on the line");
 
     if (barsFile == null)
         return;
 
     foreach (var symbol in File.ReadLines(barsFile).Select(l => l.Split('\t')[0]).Distinct())
     {
-        var day = new SessionVwap(new TimeSpan(4, 0, 0));
         var bars = File.ReadLines(barsFile).Select(l => l.Split('\t')).Where(f => f[0] == symbol)
             .Select(f => (Time: DateTime.UnixEpoch.AddSeconds(long.Parse(f[2], CultureInfo.InvariantCulture)), H: double.Parse(f[4], CultureInfo.InvariantCulture),
                 L: double.Parse(f[5], CultureInfo.InvariantCulture), C: double.Parse(f[6], CultureInfo.InvariantCulture), V: double.Parse(f[7], CultureInfo.InvariantCulture)))
             .OrderBy(b => b.Time).ToList();
-        var at = new[] { Et(11, 11, 0), Et(11, 13, 40), Et(11, 16, 0) };
-        var shown = new List<string>();
-        DateTime previous = default;
-        double last = double.NaN;
-        int next = 0;
-        foreach (var bar in bars)
+
+        // The VWAP through the last bar before each time, and where lines began.
+        string Replay(SessionVwap replay, DateTime[] at)
         {
-            while (next < at.Length && bar.Time >= at[next])
+            var shown = new List<string>();
+            var begins = new List<string>();
+            DateTime previous = default;
+            double last = double.NaN;
+            int next = 0;
+            foreach (var bar in bars)
             {
-                shown.Add($"{TimeZoneInfo.ConvertTimeFromUtc(at[next], eastern):HH:mm} ET {last:0.0000}");
-                next++;
+                while (next < at.Length && bar.Time >= at[next])
+                {
+                    shown.Add($"{TimeZoneInfo.ConvertTimeFromUtc(at[next], eastern):HH:mm} ET {last:0.0000}");
+                    next++;
+                }
+
+                last = replay.Update(bar.Time, previous, bar.H, bar.L, bar.C, bar.V);
+                if (replay.BeginsLine(bar.Time))
+                    begins.Add($"{TimeZoneInfo.ConvertTimeFromUtc(bar.Time, eastern):MM-dd HH:mm}");
+                previous = bar.Time;
             }
 
-            last = day.Update(bar.Time, previous, bar.H, bar.L, bar.C, bar.V);
-            previous = bar.Time;
+            return $"{string.Join(", ", shown)}; lines begin {string.Join(", ", begins)}";
         }
 
-        Console.WriteLine($"{symbol} session VWAP from 4:00 ET, (H+L+C)/3: {string.Join(", ", shown)}");
+        Console.WriteLine($"{symbol} VWAP from 4:00 ET only: {Replay(new SessionVwap(premarket), new[] { Et(11, 11, 0), Et(11, 13, 40), Et(11, 16, 0) })}");
+        Console.WriteLine($"{symbol} VWAP by session: {Replay(new SessionVwap(premarket, open, afterHours), new[] { Et(11, 9, 30), Et(11, 16, 0), Et(11, 18, 0) })}");
     }
 }
 

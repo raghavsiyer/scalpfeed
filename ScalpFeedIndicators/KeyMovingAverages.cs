@@ -8,8 +8,8 @@ namespace ScalpFeedIndicators;
 /// EMA 9, 20 and 200, simple MA 50 and 200, and a session VWAP on the price chart, as one indicator.
 /// Each has its own on/off switch in the indicator's inputs; colour, width and style are in its line
 /// settings. The averages are Quantower's built-in EMA and SMA. The VWAP is worked out here from the
-/// chart's own bars and starts over at a set New York time each day (SessionVwap says why Quantower's
-/// own wasn't used).
+/// chart's own bars and by default starts over at each session, 4:00, 9:30 and 16:00 ET, with a break
+/// in its line at each restart (SessionVwap says why Quantower's own wasn't used).
 /// </summary>
 public sealed class KeyMovingAverages : Indicator
 {
@@ -62,18 +62,25 @@ public sealed class KeyMovingAverages : Indicator
     [InputParameter("Show VWAP", 70)]
     public bool ShowVwap = true;
 
-    [InputParameter("VWAP starts each day at", 71, variants: new object[]
+    // A new name, not "VWAP starts each day at": workspaces saved that as 4:00 ET only, and keeping the name
+    // would bring that back instead of the per-session default.
+    [InputParameter("VWAP starts over", 71, variants: new object[]
     {
-        "4:00 ET (premarket open)", 240,
-        "9:30 ET (regular open)", 570,
-        "Midnight ET", 0,
+        "Each session: 4:00, 9:30 and 16:00 ET", VwapEachSession,
+        "Once a day, at 4:00 ET", VwapFrom4,
+        "Once a day, at 9:30 ET", VwapFrom930,
     })]
-    public int VwapStartMinutes = 240;
+    public int VwapStarts = VwapEachSession;
+
+    private const int VwapEachSession = 0;
+    private const int VwapFrom4 = 1;
+    private const int VwapFrom930 = 2;
 
     // One per moving average line, in the order the lines were added.
     private readonly Indicator[] averages = new Indicator[5];
     private readonly int[] periods = new int[5];
     private SessionVwap vwap;
+    private readonly HashSet<DateTime> vwapStartsLogged = new();
     private string shortName = "MAs";
 
     // Colour trace: which instance, and what the lines held when last logged.
@@ -159,9 +166,16 @@ public sealed class KeyMovingAverages : Indicator
         this.LinesSeries[VwapLine].Visible = this.ShowVwap;
         if (this.ShowVwap)
         {
-            var start = TimeSpan.FromMinutes(this.VwapStartMinutes);
-            this.vwap = new SessionVwap(start);
-            shown.Add($"VWAP from {start:h\\:mm} ET");
+            var premarket = new TimeSpan(4, 0, 0);
+            var open = new TimeSpan(9, 30, 0);
+            var afterHours = new TimeSpan(16, 0, 0);
+            (this.vwap, string label) = this.VwapStarts switch
+            {
+                VwapFrom4 => (new SessionVwap(premarket), "VWAP from 4:00 ET"),
+                VwapFrom930 => (new SessionVwap(open), "VWAP from 9:30 ET"),
+                _ => (new SessionVwap(premarket, open, afterHours), "VWAP by session"),
+            };
+            shown.Add(label);
         }
 
         this.shortName = shown.Count > 0 ? $"MAs ({string.Join(", ", shown)})" : "MAs (none)";
@@ -194,15 +208,50 @@ public sealed class KeyMovingAverages : Indicator
 
         if (this.vwap != null)
         {
+            DateTime bar = this.Time();
+            DateTime previous = this.Count > 1 ? this.Time(1) : default;
             double value = this.vwap.Update(
-                this.Time(),
-                this.Count > 1 ? this.Time(1) : default,
+                bar,
+                previous,
                 this.GetPrice(PriceType.High),
                 this.GetPrice(PriceType.Low),
                 this.GetPrice(PriceType.Close),
                 this.GetPrice(PriceType.Volume));
             if (!double.IsNaN(value))
+            {
                 this.SetValue(value, VwapLine);
+
+                // Each day's VWAP is a line of its own: nothing joins it to the day before, so the restart
+                // shows even when the two days' VWAPs are close.
+                if (this.vwap.BeginsLine(bar))
+                {
+                    this.SetLineBreak(0, VwapLine);
+                    if (previous != default)
+                        this.LogVwapStart(bar, value);
+                }
+            }
+        }
+    }
+
+    /// <summary>Says in Quantower's log where each day's VWAP started over, once per day and chart.</summary>
+    private void LogVwapStart(DateTime barUtc, double value)
+    {
+        if (!this.vwapStartsLogged.Add(barUtc))
+            return;
+
+        try
+        {
+            var eastern = TimeZoneInfo.FindSystemTimeZoneById("Eastern Standard Time");
+            var utc = DateTime.SpecifyKind(barUtc, DateTimeKind.Utc);
+            double before = this.Count > 1 ? this.GetValue(1, VwapLine) : double.NaN;
+            Core.Instance.Loggers.Log(
+                $"Key Moving Averages: {this.Symbol?.Name} VWAP starts over at {TimeZoneInfo.ConvertTimeFromUtc(utc, eastern):MM-dd HH:mm} ET " +
+                $"({utc.ToLocalTime():HH:mm} local): {before:0.####} on the bar before, {value:0.####} now",
+                LoggingLevel.System);
+        }
+        catch
+        {
+            // Logging must never stop the indicator.
         }
     }
 
@@ -220,6 +269,7 @@ public sealed class KeyMovingAverages : Indicator
 
         this.vwap?.Clear();
         this.vwap = null;
+        this.vwapStartsLogged.Clear();
         this.seenColours = null;
         this.Trace("clear", this.LineColours());
     }
