@@ -135,6 +135,10 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
             this.book.Pin(new FeedKey("Quote", FeedHealth.CanarySymbol));
             this.GetState(FeedHealth.CanarySymbol).IsCanary = true;
 
+            // Quantower measures latency with its internet-corrected clock, so the plugin stamps with it too.
+            FeedClock.Use(QuantowerClock);
+            Log.Info($"clock: Quantower's is {FeedClock.AheadOfPcMs:F0} ms ahead of the PC's, {MeasureClockReadNs():F0} ns a read");
+
             this.live = new DxLinkLink("live", this.GetTokenAsync, LiveFields, this);
             this.live.Ready += this.OnLiveReady;
             this.live.Recovered += this.OnLiveRecovered;
@@ -573,7 +577,7 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
 
             // IBKR's quote is the NBBO. tastytrade's is Nasdaq's own, for when IBKR isn't quoting.
             bool hasNbbo = state.IbkrBid > 0 && state.IbkrAsk > 0;
-            var place = state.RecentQuotes.Judge(price, hasNbbo ? state.IbkrBid : bid, hasNbbo ? state.IbkrAsk : ask, bid, ask, DateTime.UtcNow.Ticks);
+            var place = state.RecentQuotes.Judge(price, hasNbbo ? state.IbkrBid : bid, hasNbbo ? state.IbkrAsk : ask, bid, ask, FeedClock.UtcNowTicks);
 
             var last = new Last(state.Id, price, size, new DateTime(ticks, DateTimeKind.Utc))
             {
@@ -1019,9 +1023,24 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
         Log.Info(
             $"stats 60s: quotes={quotes - this.lastQuotes} prints={prints - this.lastPrints} oddLots={oddLots} frames={link.TakeFrameCount()} " +
             $"maxFrameHandleUs={link.TakeMaxHandleMicros()} lastPrintDelayMs={TimeSpan.FromTicks(Volatile.Read(ref this.lastDelayTicks)).TotalMilliseconds:F0} " +
-            $"canaryAgeS={this.health.CanaryAge(Stopwatch.GetTimestamp()).TotalSeconds:F1} level={this.currentToken?.Level}");
+            $"canaryAgeS={this.health.CanaryAge(Stopwatch.GetTimestamp()).TotalSeconds:F1} level={this.currentToken?.Level} " +
+            $"clockAheadMs={FeedClock.AheadOfPcMs:F0}");
         this.lastQuotes = quotes;
         this.lastPrints = prints;
+    }
+
+    private static DateTime QuantowerClock() => Core.Instance.TimeUtils.DateTimeUtcNow;
+
+    /// <summary>The clock is read on every frame and print, so its cost goes in the log once.</summary>
+    private static double MeasureClockReadNs()
+    {
+        const int Reads = 10_000;
+        long sum = 0;
+        long start = Stopwatch.GetTimestamp();
+        for (int i = 0; i < Reads; i++)
+            sum += FeedClock.UtcNowTicks & 1;
+        double ns = (Stopwatch.GetTimestamp() - start) * 1e9 / Stopwatch.Frequency / Reads;
+        return sum < 0 ? 0 : ns;
     }
 
     private void StopFeed()

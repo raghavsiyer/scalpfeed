@@ -333,7 +333,7 @@ internal sealed class DxLinkLink
             } while (!result.EndOfMessage);
 
             long stamp = Stopwatch.GetTimestamp();
-            long arrivalUtcTicks = DateTime.UtcNow.Ticks;
+            long arrivalUtcTicks = FeedClock.UtcNowTicks;
             Volatile.Write(ref this.lastFrameStamp, stamp);
 
             if (result.MessageType == WebSocketMessageType.Close)

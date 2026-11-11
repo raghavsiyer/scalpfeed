@@ -76,6 +76,9 @@ switch (args[0])
     case "venuetops":
         await RunVenueTops();
         break;
+    case "feedclock":
+        await RunFeedClock();
+        break;
     case "tapewatch":
         await RunTapeWatch();
         break;
@@ -349,6 +352,52 @@ async Task RunVenueTops()
     Check(IbkrClient.AllowedRequests.SetEquals(new[] { 71, 59, 1, 2, 10, 11, 97, 98, 20, 25 }), "the whitelist is unchanged");
 
     await client.StopAsync();
+}
+
+// The clock the plugin stamps with: Quantower's corrected one when set, the PC's otherwise or if it fails.
+async Task RunFeedClock()
+{
+    double Ahead() => FeedClock.AheadOfPcMs;
+    try
+    {
+        FeedClock.Use(null);
+        Check(Math.Abs(Ahead()) < 20, $"unset, it's the PC clock ({Ahead():F1} ms)");
+
+        FeedClock.Use(() => DateTime.UtcNow.AddMilliseconds(650));
+        Check(Math.Abs(Ahead() - 650) < 20, $"set, it reads the other clock: Quantower's 650 ms correction of 04:14 ({Ahead():F1} ms)");
+        Check(FeedClock.UtcNow.Kind == DateTimeKind.Utc, "its DateTime is marked UTC");
+
+        FeedClock.Use(() => throw new InvalidOperationException("not ready"));
+        Check(Math.Abs(Ahead()) < 20, "a clock that throws falls back to the PC's");
+
+        FeedClock.Use(() => default);
+        Check(Math.Abs(Ahead()) < 20, "a clock that isn't set yet (year 1) falls back to the PC's");
+        FeedClock.Use(() => DateTime.UtcNow.AddHours(1));
+        Check(Math.Abs(Ahead()) < 20, "so does one an hour out, far beyond any real correction");
+
+        // An IBKR print's stamp comes from this clock, so Quantower sees it as just arrived.
+        FeedClock.Use(() => DateTime.UtcNow.AddMilliseconds(650));
+        using var gateway = new FakeGateway();
+        var sink = new IbkrTestSink();
+        var client = new IbkrClient(new IbkrConfig(true, "127.0.0.1", gateway.Port, 1, false));
+        client.SetSink(sink);
+        client.Start();
+        client.SetTape("STAMP", true);
+        var timer = Stopwatch.StartNew();
+        while (timer.Elapsed < TimeSpan.FromSeconds(5) && gateway.TapeRequestId == 0)
+            await Task.Delay(20);
+        gateway.SendPrint("");
+        while (timer.Elapsed < TimeSpan.FromSeconds(5) && sink.Prints.GetValueOrDefault("STAMP") is not { Count: > 0 })
+            await Task.Delay(10);
+        await client.StopAsync();
+        var stamped = sink.Prints.GetValueOrDefault("STAMP")?.FirstOrDefault();
+        double aheadMs = stamped is { } p ? (p.ArrivalTicks - DateTime.UtcNow.Ticks) / (double)TimeSpan.TicksPerMillisecond : double.NaN;
+        Check(aheadMs is > 550 and < 700, $"an IBKR print is stamped on the set clock ({aheadMs:F0} ms ahead of the PC's)");
+    }
+    finally
+    {
+        FeedClock.Use(null);
+    }
 }
 
 // The rules of the merged tape, with no feed involved.

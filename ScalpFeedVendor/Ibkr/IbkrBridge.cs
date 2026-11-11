@@ -72,7 +72,7 @@ internal sealed class IbkrBridge : IIbkrSink
         if (current == null || barSize == null)
             return [];
 
-        var now = DateTime.UtcNow;
+        var now = FeedClock.UtcNow;
         var end = toUtc > now ? now : toUtc;
         long span = Math.Min((long)(end - fromUtc).TotalSeconds, IbkrBars.MaxSeconds(seconds));
         if (span <= 0)
@@ -125,7 +125,8 @@ internal sealed class IbkrBridge : IIbkrSink
         if (refused > 0)
             Log.Info($"[ibkr] prints off the tape for being too far from the quote: {refused}");
 
-        var utcNow = DateTime.UtcNow;
+        // The tape watch holds arrival times, which are on FeedClock.
+        var utcNow = FeedClock.UtcNow;
         this.CheckTapes(utcNow);
         if (utcNow >= nextMergeStatsUtc)
         {
@@ -177,7 +178,7 @@ internal sealed class IbkrBridge : IIbkrSink
 
         state.IbkrBid = bid;
         state.IbkrAsk = ask;
-        state.RecentQuotes.Add(bid, ask, DateTime.UtcNow.Ticks);
+        state.RecentQuotes.Add(bid, ask, FeedClock.UtcNowTicks);
         if (!state.QuoteOn)
             return;
 
@@ -191,7 +192,7 @@ internal sealed class IbkrBridge : IIbkrSink
             bid > 0 ? bidSize : 0,
             ask > 0 ? ask : double.NaN,
             ask > 0 ? askSize : 0,
-            DateTime.UtcNow));
+            FeedClock.UtcNow));
     }
 
     public void OnIbkrDepth(string symbol, List<IbkrDepthRow> bids, List<IbkrDepthRow> asks)
@@ -247,7 +248,7 @@ internal sealed class IbkrBridge : IIbkrSink
 
         state.IbkrTapeWatch.OnIbkrPrint();
         if (carried)
-            state.Merge.OnIbkrCarriedPrint(price, size, unixSeconds, DateTime.UtcNow.Ticks);
+            state.Merge.OnIbkrCarriedPrint(price, size, unixSeconds, FeedClock.UtcNowTicks);
     }
 
     public void OnIbkrState(IbkrState newState, string detail)
@@ -296,7 +297,7 @@ internal sealed class IbkrBridge : IIbkrSink
 
     private void PushBook(SymbolState state, List<IbkrDepthRow> bids, List<IbkrDepthRow> asks)
     {
-        var now = DateTime.UtcNow;
+        var now = FeedClock.UtcNow;
         var book = new DOMQuote(state.Id, now);
         Fill(book.Bids, bids, QuotePriceType.Bid, this.bidIds, state.Id, now, DepthSizes.Best(bids, true), state.IbkrBid);
         Fill(book.Asks, asks, QuotePriceType.Ask, this.askIds, state.Id, now, DepthSizes.Best(asks, false), state.IbkrAsk);

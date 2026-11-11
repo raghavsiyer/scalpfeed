@@ -771,7 +771,7 @@ internal sealed class IbkrClient
             if (read == 0)
                 return "Gateway closed the socket";
             end += read;
-            this.frameArrivalUtcTicks = DateTime.UtcNow.Ticks;
+            this.frameArrivalUtcTicks = FeedClock.UtcNowTicks;
         }
     }
 
