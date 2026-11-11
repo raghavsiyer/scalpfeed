@@ -73,7 +73,7 @@ internal static class FeedAlarm
             repeatTimer = null;
         }
 
-        Log.Info("Alarm off: quotes are flowing");
+        Log.Info("Alarm off: data is flowing");
         PlayAllClear();
     }
 

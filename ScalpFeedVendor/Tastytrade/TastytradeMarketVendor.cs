@@ -96,7 +96,7 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
     private volatile bool reloadPending;
     private volatile bool reloadAfterNextRecovery;
 
-    private long canaryQuotesAtStale;
+    private long dataSeenAtStale;
     private DateTime linkDownSinceUtc;
     private DateTime liveReadyUtc;
 
@@ -448,15 +448,20 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
 
     #region Data path
 
+    /// <summary>Any quote, print or trade, on any symbol, shows the feed is delivering.</summary>
+    private void NoteData()
+    {
+#if TESTHOOKS
+        if (this.testMuteCanary)
+            return;
+#endif
+        this.health.OnData(Stopwatch.GetTimestamp());
+    }
+
     public void OnQuote(FeedRow row)
     {
         var state = StateOf(row, this);
-#if TESTHOOKS
-        if (state.IsCanary && !this.testMuteCanary)
-#else
-        if (state.IsCanary)
-#endif
-            this.health.OnCanaryQuote(Stopwatch.GetTimestamp());
+        this.NoteData();
 
         if (!state.QuoteOn || state.IbkrQuotes)
             return;
@@ -470,6 +475,7 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
 
     public void OnPrint(FeedRow row)
     {
+        this.NoteData();
 #if TESTHOOKS
         if (this.testMutePrints)
             return;
@@ -520,6 +526,7 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
 
     public void OnTrade(FeedRow row)
     {
+        this.NoteData();
         var state = StateOf(row, this);
         bool volumeRose = row.DayVolume > state.DayVolume;
         if (!double.IsNaN(row.DayVolume))
@@ -909,14 +916,14 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
 
         // A reconnect proves nothing by itself, so only a real quote gives the all-clear.
         // The notice is static because a reconnect can hand over to a new vendor instance.
-        if (this.health.CanaryQuotes > this.canaryQuotesAtStale)
+        if (this.health.DataSeen > this.dataSeenAtStale)
         {
             FeedAlarm.Clear();
             if (staleNoticeOpen)
             {
                 staleNoticeOpen = false;
                 Log.Info("Feed recovered");
-                this.PushMessage(MessageDealTicket.CreateInfoDealTicket(Header, "Feed recovered: quotes are flowing again."));
+                this.PushMessage(MessageDealTicket.CreateInfoDealTicket(Header, "Feed recovered: data is flowing again."));
             }
         }
 
@@ -927,7 +934,7 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
 
             if (utcNow - this.linkDownSinceUtc >= LinkDownAlarmAfter)
             {
-                this.canaryQuotesAtStale = this.health.CanaryQuotes;
+                this.dataSeenAtStale = this.health.DataSeen;
                 RaiseAlarm($"live link down: {link.LastProblem}");
             }
 
@@ -944,14 +951,14 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
         switch (this.health.Evaluate(utcNow, now))
         {
             case HealthChange.WentStale:
-                var age = this.health.CanaryAge(now).TotalSeconds;
-                Log.Info($"Feed stale: no {FeedHealth.CanarySymbol} quote for {age:F0}s");
-                this.canaryQuotesAtStale = this.health.CanaryQuotes;
-                RaiseAlarm($"no {FeedHealth.CanarySymbol} quote for {age:F0}s");
+                var age = this.health.Silence(now).TotalSeconds;
+                Log.Info($"Feed stale: no data at all for {age:F0}s");
+                this.dataSeenAtStale = this.health.DataSeen;
+                RaiseAlarm($"no data for {age:F0}s");
                 if (!staleNoticeOpen)
                 {
                     staleNoticeOpen = true;
-                    this.PushMessage(MessageDealTicket.CreateRefuseDealTicket(Header, $"FEED STALE: no {FeedHealth.CanarySymbol} quote for {age:F0} seconds. Don't trust these prices."));
+                    this.PushMessage(MessageDealTicket.CreateRefuseDealTicket(Header, $"FEED STALE: no tastytrade data at all for {age:F0} seconds. Don't trust these prices."));
                 }
 
                 break;
@@ -1050,7 +1057,7 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
         Log.Info(
             $"stats 60s: quotes={quotes - this.lastQuotes} prints={prints - this.lastPrints} oddLots={oddLots} frames={link.TakeFrameCount()} " +
             $"maxFrameHandleUs={link.TakeMaxHandleMicros()} lastPrintDelayMs={TimeSpan.FromTicks(Volatile.Read(ref this.lastDelayTicks)).TotalMilliseconds:F0} " +
-            $"canaryAgeS={this.health.CanaryAge(Stopwatch.GetTimestamp()).TotalSeconds:F1} level={this.currentToken?.Level} " +
+            $"silenceS={this.health.Silence(Stopwatch.GetTimestamp()).TotalSeconds:F1} level={this.currentToken?.Level} " +
             $"clockAheadMs={FeedClock.AheadOfPcMs:F0}");
         this.lastQuotes = quotes;
         this.lastPrints = prints;

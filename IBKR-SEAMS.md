@@ -29,7 +29,7 @@ The plugin connects to a live Gateway on port 4001 by your decision of 2026-11-0
 | Piece | Where | Behaviour |
 |---|---|---|
 | Bid, ask and depth | `TastytradeMarketVendor.SetInterest` forwards `Quote` and `Level2` to `IbkrBridge`, which pushes through the vendor, so MultiVendor translates IDs as it does for tastytrade's messages | A symbol shows IBKR's quote once IBKR has quoted it |
-| IBKR's canary | `IbkrClient` pins SPY's quote, using `FeedHealth`'s limits | No SPY quote within the limit counts as down |
+| IBKR's stale check | `IbkrClient` counts any quote, depth change or print as data, using `FeedHealth`'s limits; SPY stays pinned for traffic | No data at all within the limit counts as down. Was SPY's quote alone until 2026-11-11, when an unchanged SPY quote after the close set off false alarms and reconnects every minute or two; after hours now allows 60 s |
 | IBKR down or a symbol refused | `IbkrBridge` | Quote goes back to tastytrade's. The depth panel empties, because a frozen book looks real. One warning sound after 2 s, one all-clear on return, none overnight or when markets are shut |
 | Halts and one-sided books | `IbkrBridge.OnIbkrQuote` | IBKR's -1 becomes an empty side rather than leaving the old price up |
 | Quantower's reconnects | `IbkrSession`, static, because Quantower builds a new vendor each time | Gateway connection stays up. Only a difference in subscriptions reaches Gateway, 3 s after the takeover. Closes 10 s after the last vendor leaves |

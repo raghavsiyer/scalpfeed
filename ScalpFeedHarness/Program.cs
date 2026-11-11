@@ -88,6 +88,9 @@ switch (args[0])
     case "trader":
         await RunTrader();
         break;
+    case "health":
+        RunHealth();
+        break;
     case "tapewatch":
         await RunTapeWatch();
         break;
@@ -361,6 +364,28 @@ async Task RunVenueTops()
     Check(IbkrClient.AllowedRequests.SetEquals(new[] { 71, 59, 1, 2, 10, 11, 97, 98, 20, 25 }), "the whitelist is unchanged");
 
     await client.StopAsync();
+}
+
+// The stale-feed check, offline: any data keeps a feed alive, and the limits by session.
+void RunHealth()
+{
+    var et = (int hour, int minute, int day) => new DateTime(2026, 11, day, 0, 0, 0, DateTimeKind.Utc).AddHours(hour + 5).AddMinutes(minute);
+    Check(FeedHealth.SilenceLimit(et(10, 0, 4)) == TimeSpan.FromSeconds(5), "regular hours limit 5s");
+    Check(FeedHealth.SilenceLimit(et(5, 0, 4)) == TimeSpan.FromSeconds(15), "premarket limit 15s");
+    Check(FeedHealth.SilenceLimit(et(17, 0, 4)) == TimeSpan.FromSeconds(60), "after-hours limit 60s, now that any data counts");
+    Check(FeedHealth.SilenceLimit(et(1, 0, 4)) == TimeSpan.FromSeconds(120), "overnight limit 120s");
+    Check(FeedHealth.SilenceLimit(et(12, 0, 7)) == null, "Saturday off");
+
+    // After hours on a Wednesday: 60 s allowed.
+    long freq = Stopwatch.Frequency;
+    long t0 = Stopwatch.GetTimestamp();
+    var health = new FeedHealth();
+    var afterHours = et(17, 6, 11);
+    health.OnData(t0);
+    Check(health.Evaluate(afterHours, t0 + 30 * freq) == HealthChange.None, "30 s with no data at all after hours isn't stale any more (it was at 20 s)");
+    Check(health.Evaluate(afterHours, t0 + 61 * freq) == HealthChange.WentStale, "61 s with nothing at all is");
+    health.OnData(t0 + 62 * freq);
+    Check(health.Evaluate(afterHours, t0 + 62 * freq) == HealthChange.Recovered && health.DataSeen == 2, "and any data clears it");
 }
 
 // Paper trading against a stand-in for Gateway: the order message field for field against ib_insync's,
@@ -2223,7 +2248,7 @@ async Task RunLive(string[] symbols, int seconds)
 
     var sink = new CountingSink();
     var health = new FeedHealth();
-    sink.OnCanary = () => health.OnCanaryQuote(Stopwatch.GetTimestamp());
+    sink.OnCanary = () => health.OnData(Stopwatch.GetTimestamp());
     var book = new SubscriptionBook();
     book.Pin(new FeedKey("Quote", FeedHealth.CanarySymbol));
     foreach (var symbol in symbols)
@@ -2294,7 +2319,7 @@ async Task RunLive(string[] symbols, int seconds)
     Check(sink.Prints > printsAtDrop, "prints resumed after reconnect");
     health.Reset();
     await Task.Delay(1000);
-    var age = health.CanaryAge(Stopwatch.GetTimestamp());
+    var age = health.Silence(Stopwatch.GetTimestamp());
     Console.WriteLine($"canary age {age.TotalSeconds:F1}s, limit now {FeedHealth.SilenceLimit(DateTime.UtcNow)}");
 
     Console.WriteLine($"final: {sink}");
@@ -2306,7 +2331,7 @@ async Task RunLive(string[] symbols, int seconds)
     var et = (int hour, int minute, int day) => new DateTime(2026, 11, day, 0, 0, 0, DateTimeKind.Utc).AddHours(hour + 5).AddMinutes(minute);
     Check(FeedHealth.SilenceLimit(et(10, 0, 4)) == TimeSpan.FromSeconds(5), "regular hours limit 5s");
     Check(FeedHealth.SilenceLimit(et(5, 0, 4)) == TimeSpan.FromSeconds(15), "premarket limit 15s");
-    Check(FeedHealth.SilenceLimit(et(17, 0, 4)) == TimeSpan.FromSeconds(20), "after-hours limit 20s");
+    Check(FeedHealth.SilenceLimit(et(17, 0, 4)) == TimeSpan.FromSeconds(60), "after-hours limit 60s, now that any data counts");
     Check(FeedHealth.SilenceLimit(et(1, 0, 4)) == TimeSpan.FromSeconds(120), "overnight limit 120s");
     Check(FeedHealth.SilenceLimit(et(12, 0, 7)) == null, "Saturday off");
     Check(FeedHealth.SilenceLimit(et(19, 0, 8)) == null, "Sunday before 8 PM ET off");

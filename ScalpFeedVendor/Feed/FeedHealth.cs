@@ -5,47 +5,50 @@ namespace ScalpFeedVendor.Feed;
 internal enum HealthChange { None, WentStale, Recovered, NeedsReconnect }
 
 /// <summary>
-/// Decides whether the feed has stalled. Thin stocks can sit quiet for minutes, so silence
-/// on one symbol proves nothing. Instead a liquid canary symbol is always subscribed, and
-/// the limit depends on the session: SPY quotes constantly in regular hours but can go
-/// quiet for seconds overnight.
+/// Decides whether a feed has stalled: no data of any kind (a quote, print, trade or depth change on any
+/// symbol) for longer than the session allows. SPY stays subscribed so there's always some traffic, but
+/// it isn't watched on its own: after the close on 2026-11-11 SPY's quote sat unchanged for 20 s again
+/// and again while thousands of prints a minute were arriving, and each time both feeds were called
+/// stale, an alarm sounded and IBKR reconnected for nothing.
 /// </summary>
 internal sealed class FeedHealth
 {
+    /// <summary>Always subscribed, so a feed has traffic even when no chart is open.</summary>
     public const string CanarySymbol = "SPY";
 
     private const int EscalationFactor = 3;
     private static readonly TimeZoneInfo Eastern = TimeZoneInfo.FindSystemTimeZoneById("Eastern Standard Time");
 
-    private long lastCanaryStamp = Stopwatch.GetTimestamp();
-    private long canaryQuotes;
+    private long lastDataStamp = Stopwatch.GetTimestamp();
+    private long dataSeen;
     private bool stale;
     private bool escalated;
 
     /// <summary>Replaces the session-based limit. Test builds only.</summary>
     public TimeSpan? LimitOverride { get; set; }
 
-    public TimeSpan CanaryAge(long nowStamp) =>
-        TimeSpan.FromSeconds((nowStamp - Volatile.Read(ref this.lastCanaryStamp)) / (double)Stopwatch.Frequency);
+    /// <summary>How long since the feed last delivered anything.</summary>
+    public TimeSpan Silence(long nowStamp) =>
+        TimeSpan.FromSeconds((nowStamp - Volatile.Read(ref this.lastDataStamp)) / (double)Stopwatch.Frequency);
 
-    /// <summary>Real quotes seen, which unlike the age isn't changed by a reconnect's reset.</summary>
-    public long CanaryQuotes => Volatile.Read(ref this.canaryQuotes);
+    /// <summary>Data seen, which unlike the silence isn't changed by a reconnect's reset.</summary>
+    public long DataSeen => Volatile.Read(ref this.dataSeen);
 
-    /// <summary>Called on the receive thread for every canary quote.</summary>
-    public void OnCanaryQuote(long stamp)
+    /// <summary>Called on the receive thread for every quote, print, trade or depth change, on any symbol.</summary>
+    public void OnData(long stamp)
     {
-        Volatile.Write(ref this.lastCanaryStamp, stamp);
-        Volatile.Write(ref this.canaryQuotes, this.canaryQuotes + 1);
+        Volatile.Write(ref this.lastDataStamp, stamp);
+        Volatile.Write(ref this.dataSeen, this.dataSeen + 1);
     }
 
     public void Reset()
     {
-        Volatile.Write(ref this.lastCanaryStamp, Stopwatch.GetTimestamp());
+        Volatile.Write(ref this.lastDataStamp, Stopwatch.GetTimestamp());
         this.stale = false;
         this.escalated = false;
     }
 
-    /// <summary>The longest canary silence that's normal right now; null when markets are shut.</summary>
+    /// <summary>The longest silence that's normal right now; null when markets are shut.</summary>
     public static TimeSpan? SilenceLimit(DateTime utcNow)
     {
         var et = TimeZoneInfo.ConvertTimeFromUtc(utcNow, Eastern);
@@ -62,7 +65,7 @@ internal sealed class FeedHealth
         if (time >= TimeSpan.FromHours(4) && time < new TimeSpan(9, 30, 0))
             return TimeSpan.FromSeconds(15);
         if (time >= TimeSpan.FromHours(16) && time < TimeSpan.FromHours(20))
-            return TimeSpan.FromSeconds(20);
+            return TimeSpan.FromSeconds(60);
         return TimeSpan.FromSeconds(120);
     }
 
@@ -70,7 +73,7 @@ internal sealed class FeedHealth
     public HealthChange Evaluate(DateTime utcNow, long nowStamp)
     {
         var limit = this.LimitOverride ?? SilenceLimit(utcNow);
-        var age = this.CanaryAge(nowStamp);
+        var age = this.Silence(nowStamp);
 
         if (limit == null || age <= limit)
         {

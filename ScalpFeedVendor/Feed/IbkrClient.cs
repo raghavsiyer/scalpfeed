@@ -593,7 +593,7 @@ internal sealed class IbkrClient
         this.streamsByKey[key] = stream;
 
         if (key.EventType == QuoteFeed)
-            await this.SendAsync(CancellationToken.None, [1, 11, stream.Id, .. Contract(key.Symbol), false, AuctionTicks, false, false, ""]).ConfigureAwait(false);
+            await this.SendAsync(CancellationToken.None, [1, 11, stream.Id, .. Contract(key.Symbol), false, key.Symbol == FeedHealth.CanarySymbol ? "" : AuctionTicks, false, false, ""]).ConfigureAwait(false);
         else if (IsVenueFeed(key.EventType))
             await this.SendAsync(CancellationToken.None, [1, 11, stream.Id, .. Contract(key.Symbol, key.EventType[VenueFeedPrefix.Length..]), false, "", false, false, ""]).ConfigureAwait(false);
         else if (key.EventType == DepthFeed)
@@ -985,6 +985,8 @@ internal sealed class IbkrClient
             return;
 #endif
 
+        this.OnData();
+
         bool carried = this.config.Tape == TapeMode.Merged && PrintFilter.IsCarriedByTastytrade(venue);
         Volatile.Read(ref this.sink)?.OnIbkrTapeActive(stream.Key.Symbol, price, size, unixSeconds, carried);
 
@@ -1039,6 +1041,7 @@ internal sealed class IbkrClient
         }
 
         this.MarkDirty(stream, 0);
+        this.OnData();
         if (stream.Key.EventType != QuoteFeed)
         {
             this.venueQuoteUpdates++;
@@ -1046,8 +1049,6 @@ internal sealed class IbkrClient
         }
 
         this.quoteUpdates++;
-        if (stream.Key.Symbol == FeedHealth.CanarySymbol)
-            this.OnCanary();
     }
 
     private void OnTickSize(ref FieldReader f)
@@ -1071,8 +1072,7 @@ internal sealed class IbkrClient
             return;
 
         this.MarkDirty(stream, 0);
-        if (stream.Key.EventType == QuoteFeed && stream.Key.Symbol == FeedHealth.CanarySymbol)
-            this.OnCanary();
+        this.OnData();
     }
 
     /// <summary>
@@ -1100,13 +1100,14 @@ internal sealed class IbkrClient
             Volatile.Read(ref this.sink)?.OnIbkrHalted(stream.Key.Symbol, (int)value);
     }
 
-    private void OnCanary()
+    /// <summary>Any quote, depth change or print, on any symbol, shows the connection is delivering.</summary>
+    private void OnData()
     {
-        this.health.OnCanaryQuote(Stopwatch.GetTimestamp());
+        this.health.OnData(Stopwatch.GetTimestamp());
         if (this.state != IbkrState.Live)
         {
             this.liveSinceUtc = DateTime.UtcNow;
-            this.SetState(IbkrState.Live, "quotes are flowing");
+            this.SetState(IbkrState.Live, "data is flowing");
         }
     }
 
@@ -1133,6 +1134,7 @@ internal sealed class IbkrClient
         stream.HasBook = true;
         this.depthUpdates++;
         this.MarkDirty(stream, Stopwatch.GetTimestamp());
+        this.OnData();
         if (ReferenceEquals(this.depthAwaited, stream))
             this.OnDepthAnswered(stream);
     }
@@ -1247,10 +1249,10 @@ internal sealed class IbkrClient
             if (this.state == IbkrState.Live)
             {
                 if (this.health.Evaluate(DateTime.UtcNow, Stopwatch.GetTimestamp()) == HealthChange.WentStale)
-                    this.SetState(IbkrState.Down, $"no {FeedHealth.CanarySymbol} quote for {this.health.CanaryAge(Stopwatch.GetTimestamp()).TotalSeconds:F0}s");
+                    this.SetState(IbkrState.Down, $"no data at all for {this.health.Silence(Stopwatch.GetTimestamp()).TotalSeconds:F0}s");
             }
             else if (this.state == IbkrState.Down && this.net != null && this.liveSinceUtc != default
-                && this.health.CanaryAge(Stopwatch.GetTimestamp()) > TimeSpan.FromSeconds(30)
+                && this.health.Silence(Stopwatch.GetTimestamp()) > TimeSpan.FromSeconds(30)
                 && FeedHealth.SilenceLimit(DateTime.UtcNow) is { } limit && limit < TimeSpan.FromSeconds(30))
             {
                 // Connected but silent for a long stretch of an active session.
