@@ -44,6 +44,20 @@ Still to add:
 |---|---|
 | Execution | `RegisterTradingVendor` in `ScalpFeedVendor.Connect`, with its own message whitelist |
 
+## LULD bands (looked into 2026-11-11)
+
+You asked whether BookTrader's LULD bands could be taken from IBKR and shown in the depth, or computed instead.
+
+- **IBKR's API doesn't carry them.** Its tick-type table (current docs, ids up to 110, the newest being odd-lot quotes, generic 787) has no band prices. The nearest is `Halted` (tick 49, sent by default): 1 for a regulatory halt, 2 for a volatility pause, which is how a LULD pause shows. BookTrader's bands come from TWS's own data. Asking for a made-up generic tick no longer returns the list of legal ones: the request is silently dropped, with no ticks and no error.
+- **tastytrade's feed doesn't either.** dxFeed's `Profile` has `highLimitPrice` and `lowLimitPrice`, but at 10:45 ET today both were NaN on SPY and SCKT, as on 11-05.
+- **The rules, from luldplan.com (permanent plan, 2019):** reference price = arithmetic mean of eligible reported transactions (those that update the last sale) over the prior five minutes; the first of the day is the primary market's opening price, or its previous close if it opens on a quote; it changes at most every 30 s and only when the new mean is at least 1% away; no eligible trades keeps the old one. Band = reference +/- reference x percentage, rounded to the penny. The percentage goes by the previous close and tier: Tier 1 (S&P 500, Russell 1000, some ETPs) 5% over $3; Tier 2 10% over $3; both 20% from $0.75 to $3; under $0.75 the lesser of $0.15 or 75%. Doubled in the last 25 minutes for Tier 1 and for Tier 2 under $3. Only 9:30-16:00 ET, so never in premarket.
+- **Computing them isn't faster.** The SIPs compute from the same trades as they happen; the plugin would see them on IBKR's tape about 0.3 s later. Bands move at most every 30 s and only on 1% moves, so the lag barely matters, and correctness is the risk instead:
+  - the 1% rule makes the band depend on its history, so a symbol picked up mid-session (or a restart) can be off by up to about 1% of the price until the plugin has its trades since the open. Rebuilding them needs IBKR's historical ticks (message 96, not on the whitelist).
+  - the tier needs a list kept up to date; small caps are nearly all Tier 2.
+  - eligibility goes by sale condition, and some IBKR prices are rounded to the cent.
+  - reopening after a pause resets the reference to the reopening price.
+- **Showing them:** Quantower's API has no field for price limits (its docs' only match is `Core.TradingStatus`, which is about its own trading lock). In the depth they'd have to be marked rows, which look like orders and count in totals; on the chart they'd need a separate indicator.
+
 ## Must be true before real orders go through it
 
 1. **A tastytrade failure can't touch execution.** Today a tastytrade link that's down makes `Ping` report failure, and Quantower answers with a full disconnect and reconnect.
