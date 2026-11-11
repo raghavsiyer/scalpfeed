@@ -2,10 +2,11 @@
 #   SMART quote: the NBBO, plus IBKR's strings naming the venues at the best bid and ask (ticks 32 and 33).
 #   Directed quotes: reqMktData with the exchange set to ARCA, NYSE, BEX (Nasdaq BX) and PEARL (a control
 #   venue that the smart book does carry).
-#   ARCA's own book: reqMktDepth with exchange ARCA, not smart.
-# Market data only (71, 59, 1, 2, 10, 11), and the account message is never printed. One depth slot is held for
-# the length of the run, so keep it short.
-#   python -I venue_quotes.py <port> <client> <seconds> <symbol> [symbol ...]
+#   A venue's own book: reqMktDepth with that exchange, not smart. ARCA unless --books=VENUE[,VENUE] says
+#   otherwise; each book is asked for on the first symbol only.
+# Market data only (71, 59, 1, 2, 10, 11), and the account message is never printed. Each book holds a depth
+# slot for the length of the run, so keep it short.
+#   python -I venue_quotes.py <port> <client> <seconds> [--books=ARCA,PEARL] <symbol> [symbol ...]
 import socket
 import struct
 import sys
@@ -14,7 +15,13 @@ from collections import Counter, defaultdict
 
 ALLOWED = {71, 59, 1, 2, 10, 11}
 port, client, seconds = int(sys.argv[1]), int(sys.argv[2]), float(sys.argv[3])
-symbols = sys.argv[4:]
+BOOKS = ["ARCA"]
+symbols = []
+for arg in sys.argv[4:]:
+    if arg.startswith("--books="):
+        BOOKS = [v for v in arg[len("--books="):].split(",") if v]
+    else:
+        symbols.append(arg)
 # Exchange letters in ticks 32/33 are the SIP's participant codes.
 LETTERS = {"A": "AMEX", "B": "BX", "C": "NSX", "H": "PEARL", "I": "ISE", "J": "EDGA", "K": "EDGX", "L": "LTSE",
            "M": "CHX", "N": "NYSE", "P": "ARCA", "Q": "NASDAQ", "T": "NASDAQ", "S": "TXSE", "U": "MEMX", "V": "IEX",
@@ -71,10 +78,12 @@ for symbol in symbols:
         send(1, 11, next_id, *contract(symbol, venue), False, "", False, False, "")
         next_id += 1
 depth_ids = []
-for symbol in symbols[:1]:
-    requests[next_id] = (symbol, "ARCA book")
-    send(10, 5, next_id, *contract(symbol, "ARCA"), 10, False, "")
+book_venue = {}  # id -> the exchange whose book it is
+for venue in BOOKS:
+    requests[next_id] = (symbols[0], f"{venue} book")
+    send(10, 5, next_id, *contract(symbols[0], venue), 10, False, "")
     depth_ids.append(next_id)
+    book_venue[next_id] = venue
     next_id += 1
 
 quotes = defaultdict(dict)  # id -> latest bid/ask/sizes
@@ -115,7 +124,7 @@ try:
         elif kind in ("12", "13"):
             rid = int(f[2])
             if kind == "12":
-                position, operation, side, price, size, venue = int(f[3]), int(f[4]), int(f[5]), float(f[6]), f[7], "ARCA"
+                position, operation, side, price, size, venue = int(f[3]), int(f[4]), int(f[5]), float(f[6]), f[7], book_venue.get(rid, "?")
             else:
                 position, venue, operation, side, price, size = int(f[3]), f[4], int(f[5]), int(f[6]), float(f[7]), f[8]
             rows = book[rid][side]
