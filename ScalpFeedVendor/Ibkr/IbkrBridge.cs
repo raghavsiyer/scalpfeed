@@ -45,6 +45,12 @@ internal sealed class IbkrBridge : IIbkrSink
     /// <summary>The depth row showing the reopening auction's indicative price during a halt or pause.</summary>
     public const string ResVenue = "Res";
 
+    /// <summary>
+    /// What the Limit and Res rows read in the depth: a fixed size far above any real row, so they read as
+    /// markers and a size highlight set just under it colours only them. Quantower has no per-row colour.
+    /// </summary>
+    public const double MarkerRowSize = 999_999;
+
     // IBKR's receive thread only: the book with a LULD band's row put in, then the Res row.
     private readonly List<IbkrDepthRow> bandRow = new(1);
     private readonly List<IbkrDepthRow> bidsWithBand = new();
@@ -232,7 +238,6 @@ internal sealed class IbkrBridge : IIbkrSink
         if (!this.statesByIbkr.TryGetValue(symbol, out var state) || state.IbkrHalted <= 0)
             return false;
 
-        bool showing = state.DepthOn && state.ResPrice > 0;
         switch (tick)
         {
             case IbkrClient.AuctionPriceTick:
@@ -243,9 +248,8 @@ internal sealed class IbkrBridge : IIbkrSink
                 Log.Info($"[res] {symbol} reopening auction at {price}, {state.ResPaired:#,0} paired, imbalance {state.ResImbalance:+#,0;-#,0;0}");
                 return state.DepthOn;
             case IbkrClient.AuctionVolumeTick:
-                bool pairedChanged = value != state.ResPaired;
                 state.ResPaired = value;
-                return showing && pairedChanged;
+                return false;
             case IbkrClient.AuctionImbalanceTick:
                 state.ResImbalance = value;
                 return false;
@@ -367,12 +371,11 @@ internal sealed class IbkrBridge : IIbkrSink
         }
 
         // During a halt or pause, the price the listing market would reopen at now, on both sides so it
-        // stays put as the imbalance swings, sized by the shares it would pair.
+        // stays put as the imbalance swings. Paired shares and imbalance are in the log.
         if (hasBook && state.IbkrHalted > 0 && state.ResPrice > 0)
         {
-            double paired = state.ResPaired > 0 ? state.ResPaired : LuldBand.MarkerShares;
-            bids = this.WithMarkerRow(bids, state.ResPrice, paired, ResVenue, true, this.bidsWithRes);
-            asks = this.WithMarkerRow(asks, state.ResPrice, paired, ResVenue, false, this.asksWithRes);
+            bids = this.WithMarkerRow(bids, state.ResPrice, LuldBand.MarkerShares, ResVenue, true, this.bidsWithRes);
+            asks = this.WithMarkerRow(asks, state.ResPrice, LuldBand.MarkerShares, ResVenue, false, this.asksWithRes);
         }
 
         Fill(book.Bids, bids, QuotePriceType.Bid, this.bidIds, state.Id, now, bestBid, state.IbkrBid);
@@ -410,7 +413,10 @@ internal sealed class IbkrBridge : IIbkrSink
 
             bool marker = LuldBand.IsLabel(row.Venue) || row.Venue == ResVenue;
             if (marker || DepthSizes.Shows(row.Size, row.Price, bestInBook, quoted))
-                target.Add(new Level2Quote(side, symbolId, ids[target.Count], row.Price, DepthSizes.ToHundreds(row.Size), now) { Broker = row.Venue });
+            {
+                double size = marker ? MarkerRowSize : DepthSizes.ToHundreds(row.Size);
+                target.Add(new Level2Quote(side, symbolId, ids[target.Count], row.Price, size, now) { Broker = row.Venue });
+            }
         }
     }
 }

@@ -24,7 +24,7 @@ internal sealed class LuldBand
     // Each row's label in the depth's venue column: [lower, upper], then the same with the rough mark.
     private static readonly string[] Labels = ["Limit Down", "Limit Up", "Limit Down ~", "Limit Up ~"];
 
-    /// <summary>The size a band's row carries in the depth: shown as 1, the smallest a row can read.</summary>
+    /// <summary>The size a band's row carries into the book; the depth shows it as IbkrBridge.MarkerRowSize.</summary>
     public const double MarkerShares = 100;
 
     private static readonly TimeZoneInfo Eastern = TimeZoneInfo.FindSystemTimeZoneById("Eastern Standard Time");
