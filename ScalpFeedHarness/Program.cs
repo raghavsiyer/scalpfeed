@@ -87,12 +87,16 @@ switch (args[0])
         break;
     case "pricebands":
         var usual = PriceBands.ForDisplay([new TickBand(1.0, 0.0001), new TickBand(double.PositiveInfinity, 0.01)]);
-        Check(usual.Count == 2 && usual[0] == (0.0, 1.0, 0.0001, 3) && usual[1] == (1.0, double.PositiveInfinity, 0.01, 2), "3 decimals under a dollar, 2 from a dollar up, tick sizes untouched");
+        Check(usual.Count == 3 && usual[0] == (0.0, 0.10, 0.0001, 4) && usual[1] == (0.10, 1.0, 0.0001, 3) && usual[2] == (1.0, double.PositiveInfinity, 0.01, 2),
+            $"4 decimals under 10 cents, 3 to a dollar, 2 from a dollar up, tick sizes untouched ({string.Join(" ", usual)})");
         Check(PriceBands.ForDisplay([]).SequenceEqual(usual), "a lookup with no tick sizes gets the same bands");
         var across = PriceBands.ForDisplay([new TickBand(double.PositiveInfinity, 0.01)]);
-        Check(across.Count == 2 && across[0] == (0.0, 1.0, 0.01, 3) && across[1] == (1.0, double.PositiveInfinity, 0.01, 2), "one band across the dollar line splits, keeping its tick size");
-        var three = PriceBands.ForDisplay([new TickBand(0.5, 0.0001), new TickBand(1.0, 0.001), new TickBand(10.0, 0.01), new TickBand(double.PositiveInfinity, 0.05)]);
-        Check(three.Select(b => b.Decimals).SequenceEqual(new[] { 3, 3, 2, 2 }) && three.Select(b => b.TickSize).SequenceEqual(new[] { 0.0001, 0.001, 0.01, 0.05 }), "several bands each keep their tick size");
+        Check(across.Count == 3 && across[0] == (0.0, 0.10, 0.01, 4) && across[1] == (0.10, 1.0, 0.01, 3) && across[2] == (1.0, double.PositiveInfinity, 0.01, 2), "one band across both lines splits at each, keeping its tick size");
+        var several = PriceBands.ForDisplay([new TickBand(0.05, 0.0001), new TickBand(0.5, 0.0005), new TickBand(1.0, 0.001), new TickBand(10.0, 0.01), new TickBand(double.PositiveInfinity, 0.05)]);
+        Check(several.Select(b => b.Decimals).SequenceEqual(new[] { 4, 4, 3, 3, 2, 2 }) && several.Select(b => b.TickSize).SequenceEqual(new[] { 0.0001, 0.0005, 0.0005, 0.001, 0.01, 0.05 }),
+            $"several bands each keep their tick size, and the one across 10 cents splits ({string.Join(" ", several)})");
+        Check(several.Zip(several.Skip(1)).All(p => p.First.High == p.Second.Low) && several[0].Low == 0, "the bands run on from 0 with no gaps or overlaps");
+        Check(PriceBands.ForDisplay([new TickBand(0.10, 0.0001), new TickBand(double.PositiveInfinity, 0.01)]).Select(b => b.Decimals).SequenceEqual(new[] { 4, 3, 2 }), "a band ending exactly at 10 cents isn't split into an empty piece");
         Check(DepthSizes.ToHundreds(2870) == 28 && DepthSizes.ToHundreds(100) == 1 && DepthSizes.ToHundreds(199) == 1, "depth sizes truncate to hundreds");
         Check(Enumerable.Range(1, 100000).All(n => DepthSizes.ToHundreds(n * 100) == n), "every whole hundred comes out exact");
         Check(!DepthSizes.Shows(100, 2.55, 2.57, 2.57) && !DepthSizes.Shows(99, 2.55, 2.57, 2.57), "behind the best price, 100 shares or fewer don't show");

@@ -33,16 +33,18 @@ internal static class DepthSizes
 }
 
 /// <summary>
-/// The price bands Quantower gets for a symbol: 3 decimals under a dollar and 2 from a dollar up, by
-/// your choice of 2026-11-06. That's only how prices are written. Tick sizes stay as tastytrade gives
-/// them, because they're what price steps and chart bucketing go by, and prints and bars still carry
-/// their full prices, so 2.7188 shows as 2.72 but is still 2.7188 to everything that uses it.
+/// The price bands Quantower gets for a symbol: 4 decimals under 10 cents (your choice of 2026-11-11),
+/// 3 from there to a dollar, and 2 from a dollar up (2026-11-06). That's only how prices are written.
+/// Tick sizes stay as tastytrade gives them, because they're what price steps and chart bucketing go
+/// by, and prints and bars still carry their full prices, so 2.7188 shows as 2.72 but is still 2.7188
+/// to everything that uses it.
 /// </summary>
 internal static class PriceBands
 {
     private const double DollarLine = 1.0;
-    private const int DecimalsUnderDollar = 3;
-    private const int DecimalsFromDollar = 2;
+
+    // Where the number of decimals changes: prices below each line, up from the one before, get that many.
+    private static readonly (double Below, int Decimals)[] DisplayLines = [(0.10, 4), (DollarLine, 3), (double.PositiveInfinity, 2)];
 
     public static List<(double Low, double High, double TickSize, int Decimals)> ForDisplay(IReadOnlyList<TickBand> bands)
     {
@@ -50,19 +52,22 @@ internal static class PriceBands
         if (bands.Count == 0)
             bands = [new TickBand(DollarLine, 0.0001), new TickBand(double.PositiveInfinity, 0.01)];
 
-        var result = new List<(double, double, double, int)>(bands.Count + 1);
+        var result = new List<(double, double, double, int)>(bands.Count + DisplayLines.Length);
         double low = 0;
         foreach (var band in bands)
         {
-            // A band across the dollar line has to split, since its two sides are written differently.
-            if (low < DollarLine && band.Below > DollarLine)
+            // A band across a line has to split, since its two sides are written differently.
+            double from = low;
+            foreach (var (below, decimals) in DisplayLines)
             {
-                result.Add((low, DollarLine, band.Size, DecimalsUnderDollar));
-                result.Add((DollarLine, band.Below, band.Size, DecimalsFromDollar));
-            }
-            else
-            {
-                result.Add((low, band.Below, band.Size, band.Below <= DollarLine ? DecimalsUnderDollar : DecimalsFromDollar));
+                if (from >= band.Below)
+                    break;
+                if (below <= from)
+                    continue;
+
+                double to = Math.Min(below, band.Below);
+                result.Add((from, to, band.Size, decimals));
+                from = to;
             }
 
             low = band.Below;
