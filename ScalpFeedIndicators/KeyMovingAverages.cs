@@ -173,7 +173,7 @@ public sealed class KeyMovingAverages : Indicator
             {
                 VwapFrom4 => (new SessionVwap(premarket), "VWAP from 4:00 ET"),
                 VwapFrom930 => (new SessionVwap(open), "VWAP from 9:30 ET"),
-                _ => (new SessionVwap(premarket, open, afterHours), "VWAP by session"),
+                _ => (new SessionVwap(premarket, open, afterHours), "VWAP"),
             };
             shown.Add(label);
         }
@@ -185,6 +185,8 @@ public sealed class KeyMovingAverages : Indicator
 
     protected override void OnUpdate(UpdateArgs args)
     {
+        this.MatchSymbolDecimals();
+
         // A colour that changes without going through Settings.
         if (this.seenColours != null)
         {
@@ -230,6 +232,27 @@ public sealed class KeyMovingAverages : Indicator
                         this.LogVwapStart(bar, value);
                 }
             }
+        }
+    }
+
+    /// <summary>
+    /// Shows the lines' values with as many decimals as the ticker's price has now: the symbol's own band
+    /// for its latest close (from the connection, 4 under 10 cents, 3 under a dollar, 2 from a dollar up).
+    /// Quantower's default for an indicator is one precision for the symbol whatever its price, which put
+    /// extra decimals on a $4 stock. Only the display changes; the lines keep their full values.
+    /// </summary>
+    private void MatchSymbolDecimals()
+    {
+        try
+        {
+            double price = this.GetPrice(PriceType.Close);
+            var band = price > 0 ? this.Symbol?.FindVariableTick(price) : null;
+            if (band != null && band.Precision >= 0 && band.Precision != this.Digits)
+                this.Digits = band.Precision;
+        }
+        catch
+        {
+            // Quantower's own formatting stays in place if the symbol can't say.
         }
     }
 
