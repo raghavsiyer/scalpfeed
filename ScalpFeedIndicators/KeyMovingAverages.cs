@@ -70,6 +70,8 @@ public sealed class KeyMovingAverages : Indicator
 
     // Quantower's VWAP for each chart bar, keyed by the bar's start time. Its updates come on another thread.
     private readonly ConcurrentDictionary<DateTime, double> vwapByBar = new();
+    private readonly ConcurrentDictionary<int, DateTime> rangeStarts = new();
+    private (DateTime Time, double Value, int Range) lastVwap;
     private HistoricalData vwapHistory;
     private int vwapHits;
     private int vwapMisses;
@@ -216,6 +218,7 @@ public sealed class KeyMovingAverages : Indicator
 
             for (int i = 0; i < this.vwapHistory.Count; i++)
                 this.Remember(this.vwapHistory[i, SeekOriginHistory.Begin]);
+            this.LogVwapRanges(chart.Symbol.Name);
 
             this.vwapHistory.NewHistoryItem += this.OnVwapItem;
             this.vwapHistory.HistoryItemUpdated += this.OnVwapItem;
@@ -241,6 +244,7 @@ public sealed class KeyMovingAverages : Indicator
         }
 
         this.vwapByBar.Clear();
+        this.rangeStarts.Clear();
         this.vwapHits = 0;
         this.vwapMisses = 0;
         this.vwapReported = false;
@@ -250,7 +254,24 @@ public sealed class KeyMovingAverages : Indicator
 
     private void Remember(IHistoryItem item)
     {
-        if (item is IVwapHistoryItem vwap && vwap.Value > 0 && !double.IsNaN(vwap.Value))
-            this.vwapByBar[vwap.TimeLeft] = vwap.Value;
+        if (item is not IVwapHistoryItem vwap || !(vwap.Value > 0))
+            return;
+
+        this.vwapByBar[vwap.TimeLeft] = vwap.Value;
+        this.rangeStarts.TryAdd(vwap.RangeIndex, vwap.TimeLeft);
+        this.lastVwap = (vwap.TimeLeft, vwap.Value, vwap.RangeIndex);
+    }
+
+    /// <summary>Where each VWAP range began, in New York time, and the latest value: shows whether it resets each day.</summary>
+    private void LogVwapRanges(string symbol)
+    {
+        var eastern = TimeZoneInfo.FindSystemTimeZoneById("Eastern Standard Time");
+        string Et(DateTime utc) => TimeZoneInfo.ConvertTimeFromUtc(DateTime.SpecifyKind(utc, DateTimeKind.Utc), eastern).ToString("MM-dd HH:mm");
+        var starts = this.rangeStarts.OrderBy(r => r.Value).Select(r => $"{r.Key}@{Et(r.Value)}").ToList();
+        var (time, value, range) = this.lastVwap;
+        Core.Instance.Loggers.Log(
+            $"Key Moving Averages: {symbol} VWAP {this.vwapByBar.Count} bars, ranges starting (ET) {string.Join(", ", starts.TakeLast(5))}; " +
+            $"latest {value:0.####} at {Et(time)} ET in range {range} (time zone {Core.Instance.TimeUtils.SelectedTimeZone})",
+            LoggingLevel.System);
     }
 }
