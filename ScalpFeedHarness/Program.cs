@@ -11,6 +11,7 @@ using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using ScalpFeedIndicators;
 using ScalpFeedVendor.Feed;
 
 Log.FilePath = Path.Combine(Log.AppDir, "harness.log");
@@ -90,6 +91,9 @@ switch (args[0])
         break;
     case "health":
         RunHealth();
+        break;
+    case "sessionvwap":
+        RunSessionVwap(args.Length > 1 ? args[1] : null);
         break;
     case "tapewatch":
         await RunTapeWatch();
@@ -364,6 +368,59 @@ async Task RunVenueTops()
     Check(IbkrClient.AllowedRequests.SetEquals(new[] { 71, 59, 1, 2, 10, 11, 97, 98, 20, 25 }), "the whitelist is unchanged");
 
     await client.StopAsync();
+}
+
+// The indicator's session VWAP: made-up bars around the reset, then, given IBKR's 1-minute bars saved by
+// analysis\ibkr_history.py, today's values at 11:00, 13:40 and 16:00 ET to compare with the ones worked
+// out separately in Python (NXXT from 4:00 ET with (H+L+C)/3: 1.0399, 1.4008, 1.4833).
+void RunSessionVwap(string barsFile)
+{
+    var eastern = TimeZoneInfo.FindSystemTimeZoneById("Eastern Standard Time");
+    DateTime Et(int day, int h, int m) => TimeZoneInfo.ConvertTimeToUtc(new DateTime(2026, 11, day, h, m, 0), eastern);
+
+    var vwap = new SessionVwap(new TimeSpan(4, 0, 0));
+    double v1 = vwap.Update(Et(10, 19, 0), default, 0.20, 0.18, 0.19, 1_000_000);
+    double v2 = vwap.Update(Et(11, 3, 59), Et(10, 19, 0), 0.25, 0.23, 0.24, 1_000_000);
+    Check(Math.Abs(v2 - (0.19 + 0.24) / 2) < 1e-9, $"after-hours and overnight bars before 4:00 ET belong to the day before ({v2})");
+    double v3 = vwap.Update(Et(11, 4, 0), Et(11, 3, 59), 1.10, 0.90, 1.00, 500_000);
+    Check(Math.Abs(v3 - 1.00) < 1e-9, $"the 4:00 ET bar starts over ({v3})");
+    double v4 = vwap.Update(Et(11, 4, 1), Et(11, 4, 0), 2.10, 1.90, 2.00, 500_000);
+    Check(Math.Abs(v4 - 1.50) < 1e-9, "and later bars weigh in by volume");
+    double v4Again = vwap.Update(Et(11, 4, 1), Et(11, 4, 0), 2.10, 1.90, 2.00, 1_500_000);
+    Check(Math.Abs(v4Again - 1.75) < 1e-9, "a bar that's still forming replaces its own earlier contribution, not adds to it");
+    Check(double.IsNaN(new SessionVwap(new TimeSpan(9, 30, 0)).Update(Et(11, 9, 30), default, 1, 1, 1, 0)), "no volume, no VWAP yet");
+    var regular = new SessionVwap(new TimeSpan(9, 30, 0));
+    Check(regular.SessionOf(Et(11, 9, 29)) != regular.SessionOf(Et(11, 9, 30)), "with a 9:30 start, 9:29 belongs to the day before");
+
+    if (barsFile == null)
+        return;
+
+    foreach (var symbol in File.ReadLines(barsFile).Select(l => l.Split('\t')[0]).Distinct())
+    {
+        var day = new SessionVwap(new TimeSpan(4, 0, 0));
+        var bars = File.ReadLines(barsFile).Select(l => l.Split('\t')).Where(f => f[0] == symbol)
+            .Select(f => (Time: DateTime.UnixEpoch.AddSeconds(long.Parse(f[2], CultureInfo.InvariantCulture)), H: double.Parse(f[4], CultureInfo.InvariantCulture),
+                L: double.Parse(f[5], CultureInfo.InvariantCulture), C: double.Parse(f[6], CultureInfo.InvariantCulture), V: double.Parse(f[7], CultureInfo.InvariantCulture)))
+            .OrderBy(b => b.Time).ToList();
+        var at = new[] { Et(11, 11, 0), Et(11, 13, 40), Et(11, 16, 0) };
+        var shown = new List<string>();
+        DateTime previous = default;
+        double last = double.NaN;
+        int next = 0;
+        foreach (var bar in bars)
+        {
+            while (next < at.Length && bar.Time >= at[next])
+            {
+                shown.Add($"{TimeZoneInfo.ConvertTimeFromUtc(at[next], eastern):HH:mm} ET {last:0.0000}");
+                next++;
+            }
+
+            last = day.Update(bar.Time, previous, bar.H, bar.L, bar.C, bar.V);
+            previous = bar.Time;
+        }
+
+        Console.WriteLine($"{symbol} session VWAP from 4:00 ET, (H+L+C)/3: {string.Join(", ", shown)}");
+    }
 }
 
 // The stale-feed check, offline: any data keeps a feed alive, and the limits by session.

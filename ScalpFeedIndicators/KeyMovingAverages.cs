@@ -1,17 +1,14 @@
-using System.Collections.Concurrent;
 using System.Drawing;
 using TradingPlatform.BusinessLayer;
-using TradingPlatform.BusinessLayer.Abstractions;
-using TradingPlatform.BusinessLayer.History.Aggregations;
 
 namespace ScalpFeedIndicators;
 
 /// <summary>
-/// EMA 9, 20 and 200, simple MA 50 and 200, and VWAP on the price chart, as one indicator. Each has its
-/// own on/off switch in the indicator's inputs; colour, width and style are in its line settings.
-/// The averages are Quantower's built-in EMA and SMA, and the VWAP is Quantower's own VWAP calculation
-/// (the one behind the chart's VWAP tool, as in its VwapExamples sample), so all of them match
-/// Quantower's own tools exactly.
+/// EMA 9, 20 and 200, simple MA 50 and 200, and a session VWAP on the price chart, as one indicator.
+/// Each has its own on/off switch in the indicator's inputs; colour, width and style are in its line
+/// settings. The averages are Quantower's built-in EMA and SMA. The VWAP is worked out here from the
+/// chart's own bars and starts over at a set New York time each day (SessionVwap says why Quantower's
+/// own wasn't used).
 /// </summary>
 public sealed class KeyMovingAverages : Indicator
 {
@@ -64,24 +61,24 @@ public sealed class KeyMovingAverages : Indicator
     [InputParameter("Show VWAP", 70)]
     public bool ShowVwap = true;
 
+    [InputParameter("VWAP starts each day at", 71, variants: new object[]
+    {
+        "4:00 ET (premarket open)", 240,
+        "9:30 ET (regular open)", 570,
+        "Midnight ET", 0,
+    })]
+    public int VwapStartMinutes = 240;
+
     // One per moving average line, in the order the lines were added.
     private readonly Indicator[] averages = new Indicator[5];
     private readonly int[] periods = new int[5];
-
-    // Quantower's VWAP for each chart bar, keyed by the bar's start time. Its updates come on another thread.
-    private readonly ConcurrentDictionary<DateTime, double> vwapByBar = new();
-    private readonly ConcurrentDictionary<int, DateTime> rangeStarts = new();
-    private (DateTime Time, double Value, int Range) lastVwap;
-    private HistoricalData vwapHistory;
-    private int vwapHits;
-    private int vwapMisses;
-    private bool vwapReported;
+    private SessionVwap vwap;
     private string shortName = "MAs";
 
     public KeyMovingAverages()
     {
         this.Name = "Key Moving Averages";
-        this.Description = "EMA 9, 20 and 200, simple MA 50 and 200, and VWAP, each on or off, with its own colour, width and style";
+        this.Description = "EMA 9, 20 and 200, simple MA 50 and 200, and a session VWAP, each on or off, with its own colour, width and style";
 
         this.AddLineSeries("EMA 9", Color.Gold, 1, LineStyle.Solid);
         this.AddLineSeries("EMA 20", Color.DeepSkyBlue, 1, LineStyle.Solid);
@@ -126,8 +123,12 @@ public sealed class KeyMovingAverages : Indicator
         }
 
         this.LinesSeries[VwapLine].Visible = this.ShowVwap;
-        if (this.ShowVwap && this.StartVwap())
-            shown.Add("VWAP");
+        if (this.ShowVwap)
+        {
+            var start = TimeSpan.FromMinutes(this.VwapStartMinutes);
+            this.vwap = new SessionVwap(start);
+            shown.Add($"VWAP from {start:h\\:mm} ET");
+        }
 
         this.shortName = shown.Count > 0 ? $"MAs ({string.Join(", ", shown)})" : "MAs (none)";
     }
@@ -141,26 +142,17 @@ public sealed class KeyMovingAverages : Indicator
                 this.SetValue(this.averages[i].GetValue(), i);
         }
 
-        if (this.vwapHistory == null)
-            return;
-
-        bool found = this.vwapByBar.TryGetValue(this.Time(), out double vwap);
-        if (found)
-            this.SetValue(vwap, VwapLine);
-
-        // Once the history is drawn, say in Quantower's log how many bars found their VWAP, so a
-        // chart where the two don't line up shows as that rather than as a quietly missing line.
-        if (args.Reason == UpdateReason.HistoricalBar)
+        if (this.vwap != null)
         {
-            if (found)
-                this.vwapHits++;
-            else
-                this.vwapMisses++;
-        }
-        else if (!this.vwapReported)
-        {
-            this.vwapReported = true;
-            Core.Instance.Loggers.Log($"Key Moving Averages: VWAP on {this.vwapHits} of {this.vwapHits + this.vwapMisses} bars of {this.Symbol?.Name}", LoggingLevel.System);
+            double value = this.vwap.Update(
+                this.Time(),
+                this.Count > 1 ? this.Time(1) : default,
+                this.GetPrice(PriceType.High),
+                this.GetPrice(PriceType.Low),
+                this.GetPrice(PriceType.Close),
+                this.GetPrice(PriceType.Volume));
+            if (!double.IsNaN(value))
+                this.SetValue(value, VwapLine);
         }
     }
 
@@ -176,102 +168,7 @@ public sealed class KeyMovingAverages : Indicator
             this.averages[i] = null;
         }
 
-        this.StopVwap();
-    }
-
-    /// <summary>
-    /// Asks Quantower for its daily VWAP on this chart's own bars, as the chart's VWAP tool does with its
-    /// default settings: typical price (H+L+C)/3 times each bar's volume, starting over each day in the
-    /// terminal's time zone. It loads with the chart's history and then keeps updating live.
-    /// </summary>
-    private bool StartVwap()
-    {
-        var chart = this.HistoricalData;
-        if (chart?.Symbol == null || chart.Aggregation == null)
-            return false;
-
-        try
-        {
-            var parameters = new HistoryAggregationVwapParameters
-            {
-                Aggregation = chart.Aggregation,
-                DataType = VwapDataType.CurrentTF,
-                Period = Period.DAY1,
-                PriceType = VwapPriceType.HLC3,
-                StdCalculationType = VwapStdCalculationType.StandardDeviation,
-                TimeZone = Core.Instance.TimeUtils.SelectedTimeZone,
-            };
-
-            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
-            this.vwapHistory = chart.Symbol.GetHistory(new HistoryRequestParameters
-            {
-                Aggregation = new HistoryAggregationVwap(parameters),
-                Symbol = chart.Symbol,
-                FromTime = chart.FromTime,
-                ToTime = default,
-                CancellationToken = cts.Token,
-                SessionsContainer = DefaultSessionsContainer.Instance,
-            });
-
-            if (this.vwapHistory == null)
-                return false;
-
-            for (int i = 0; i < this.vwapHistory.Count; i++)
-                this.Remember(this.vwapHistory[i, SeekOriginHistory.Begin]);
-            this.LogVwapRanges(chart.Symbol.Name);
-
-            this.vwapHistory.NewHistoryItem += this.OnVwapItem;
-            this.vwapHistory.HistoryItemUpdated += this.OnVwapItem;
-            return true;
-        }
-        catch (Exception ex) when (ex is not OutOfMemoryException)
-        {
-            // A chart type VWAP can't follow (Renko, say) just goes without the line.
-            Core.Instance.Loggers.Log($"Key Moving Averages: no VWAP on this chart: {ex.Message}", LoggingLevel.Error);
-            this.StopVwap();
-            return false;
-        }
-    }
-
-    private void StopVwap()
-    {
-        if (this.vwapHistory != null)
-        {
-            this.vwapHistory.NewHistoryItem -= this.OnVwapItem;
-            this.vwapHistory.HistoryItemUpdated -= this.OnVwapItem;
-            this.vwapHistory.Dispose();
-            this.vwapHistory = null;
-        }
-
-        this.vwapByBar.Clear();
-        this.rangeStarts.Clear();
-        this.vwapHits = 0;
-        this.vwapMisses = 0;
-        this.vwapReported = false;
-    }
-
-    private void OnVwapItem(object sender, HistoryEventArgs e) => this.Remember(e.HistoryItem);
-
-    private void Remember(IHistoryItem item)
-    {
-        if (item is not IVwapHistoryItem vwap || !(vwap.Value > 0))
-            return;
-
-        this.vwapByBar[vwap.TimeLeft] = vwap.Value;
-        this.rangeStarts.TryAdd(vwap.RangeIndex, vwap.TimeLeft);
-        this.lastVwap = (vwap.TimeLeft, vwap.Value, vwap.RangeIndex);
-    }
-
-    /// <summary>Where each VWAP range began, in New York time, and the latest value: shows whether it resets each day.</summary>
-    private void LogVwapRanges(string symbol)
-    {
-        var eastern = TimeZoneInfo.FindSystemTimeZoneById("Eastern Standard Time");
-        string Et(DateTime utc) => TimeZoneInfo.ConvertTimeFromUtc(DateTime.SpecifyKind(utc, DateTimeKind.Utc), eastern).ToString("MM-dd HH:mm");
-        var starts = this.rangeStarts.OrderBy(r => r.Value).Select(r => $"{r.Key}@{Et(r.Value)}").ToList();
-        var (time, value, range) = this.lastVwap;
-        Core.Instance.Loggers.Log(
-            $"Key Moving Averages: {symbol} VWAP {this.vwapByBar.Count} bars, ranges starting (ET) {string.Join(", ", starts.TakeLast(5))}; " +
-            $"latest {value:0.####} at {Et(time)} ET in range {range} (time zone {Core.Instance.TimeUtils.SelectedTimeZone})",
-            LoggingLevel.System);
+        this.vwap?.Clear();
+        this.vwap = null;
     }
 }
