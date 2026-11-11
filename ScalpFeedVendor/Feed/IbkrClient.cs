@@ -789,7 +789,7 @@ internal sealed class IbkrClient
 
         this.dirtyQuotes.Clear();
         this.lastQuoteFlushStamp = stamp;
-        this.NoteFlushTime(stamp);
+        this.NoteFlushTime(stamp, "ibkr quotes");
     }
 
     private void FlushSettledDepth(long now)
@@ -816,7 +816,7 @@ internal sealed class IbkrClient
         }
 
         this.dirtyDepth.RemoveRange(0, due);
-        this.NoteFlushTime(now);
+        this.NoteFlushTime(now, "ibkr books");
     }
 
     /// <summary>Fills bookBids and bookAsks with the smart book plus each venue's own quote.</summary>
@@ -837,11 +837,12 @@ internal sealed class IbkrClient
         VenueTops.Merge(depth.Asks, this.topAsks, false, this.bookAsks);
     }
 
-    private void NoteFlushTime(long stamp)
+    private void NoteFlushTime(long stamp, string what)
     {
         long micros = (Stopwatch.GetTimestamp() - stamp) * 1_000_000 / Stopwatch.Frequency;
         if (micros > this.maxFlushMicros)
             this.maxFlushMicros = micros;
+        StallWatch.Note(what, stamp);
     }
 
     private void MarkDirty(Stream stream, long now)

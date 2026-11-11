@@ -138,6 +138,15 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
             // Quantower measures latency with its internet-corrected clock, so the plugin stamps with it too.
             FeedClock.Use(QuantowerClock);
             Log.Info($"clock: Quantower's is {FeedClock.AheadOfPcMs:F0} ms ahead of the PC's, {MeasureClockReadNs():F0} ns a read");
+            if (File.Exists(Path.Combine(Log.AppDir, StallWatch.TriggerFile)) && !StallWatch.On)
+            {
+                StallWatch.Start();
+                _ = Task.Run(() =>
+                {
+                    var (median, max) = StallWatch.MeasureSleep1();
+                    Log.Info($"stalls: diagnostics on; Sleep(1) inside Quantower takes {median:F2} ms (max {max:F2})");
+                });
+            }
 
             this.live = new DxLinkLink("live", this.GetTokenAsync, LiveFields, this);
             this.live.Ready += this.OnLiveReady;
@@ -160,7 +169,7 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
 
             // Gateway being closed mustn't fail the connection: tape and charts still work,
             // and the quote stays on tastytrade until IBKR answers.
-            this.ibkr = new IbkrBridge(this.PushMessage, this.OnIbkrPrint);
+            this.ibkr = new IbkrBridge(this.TimedPush, this.OnIbkrPrint);
             this.ibkr.Start();
 
             return ConnectionResult.CreateSuccess();
@@ -454,7 +463,7 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
         // Quote timestamps can be absent on this feed, so fall back to arrival time.
         long timeMs = Math.Max(row.BidTime, row.AskTime);
         long ticks = timeMs > 0 ? ToUtcTicks(timeMs) : row.ArrivalUtcTicks - Volatile.Read(ref this.quoteTimeShiftTicks);
-        this.PushMessage(new Quote(state.Id, row.Bid, row.BidSize, row.Ask, row.AskSize, new DateTime(ticks, DateTimeKind.Utc)));
+        this.TimedPush(new Quote(state.Id, row.Bid, row.BidSize, row.Ask, row.AskSize, new DateTime(ticks, DateTimeKind.Utc)));
         this.quotesPushed++;
     }
 
@@ -594,10 +603,24 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
                 last.Seller = outside;
             }
 
-            this.PushMessage(last);
+            this.TimedPush(last);
         }
 
         Interlocked.Increment(ref this.printsPushed);
+    }
+
+    /// <summary>A hand-off into Quantower, timed while StallWatch is on.</summary>
+    private void TimedPush(Message message)
+    {
+        if (!StallWatch.On)
+        {
+            this.PushMessage(message);
+            return;
+        }
+
+        long start = Stopwatch.GetTimestamp();
+        this.PushMessage(message);
+        StallWatch.Note(message switch { Last => "push print", Quote => "push quote", DOMQuote => "push book", _ => "push other" }, start);
     }
 
     /// <summary>
@@ -1027,6 +1050,8 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
             $"clockAheadMs={FeedClock.AheadOfPcMs:F0}");
         this.lastQuotes = quotes;
         this.lastPrints = prints;
+        if (StallWatch.TakeSummary() is { } stalls)
+            Log.Info(stalls);
     }
 
     private static DateTime QuantowerClock() => Core.Instance.TimeUtils.DateTimeUtcNow;

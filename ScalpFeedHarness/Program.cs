@@ -79,6 +79,9 @@ switch (args[0])
     case "feedclock":
         await RunFeedClock();
         break;
+    case "stallwatch":
+        await RunStallWatch();
+        break;
     case "tapewatch":
         await RunTapeWatch();
         break;
@@ -352,6 +355,48 @@ async Task RunVenueTops()
     Check(IbkrClient.AllowedRequests.SetEquals(new[] { 71, 59, 1, 2, 10, 11, 97, 98, 20, 25 }), "the whitelist is unchanged");
 
     await client.StopAsync();
+}
+
+// The slow-update diagnostics: off by default, and slow work matched against garbage collection pauses.
+async Task RunStallWatch()
+{
+    long msTicks = Stopwatch.Frequency / 1000;
+    StallWatch.Note("before start", Stopwatch.GetTimestamp() - (50 * msTicks));
+    Check(!StallWatch.On && StallWatch.TakeSummary() == null, "off until started, so the hot path only checks a flag");
+
+    StallWatch.Start();
+    StallWatch.TakeSummary();
+    StallWatch.Note("quick", Stopwatch.GetTimestamp() - msTicks);
+    StallWatch.Note("in pause", Stopwatch.GetTimestamp() - (16 * msTicks));
+    long utc = DateTime.UtcNow.Ticks;
+    StallWatch.AddPause(utc - TimeSpan.FromMilliseconds(18).Ticks, utc - TimeSpan.FromMilliseconds(1).Ticks, 0, TimeSpan.FromMilliseconds(15).Ticks);
+    await Task.Delay(200);
+    StallWatch.Note("outside", Stopwatch.GetTimestamp() - (12 * msTicks));
+    Console.WriteLine("  waiting out the 5 s settle");
+    await Task.Delay(5300);
+    var summary = StallWatch.TakeSummary();
+    Console.WriteLine($"  {summary}");
+    Check(summary.Contains("slow(>=5ms) 2 ") && !summary.Contains("quick") && !summary.Contains("before_start"), "only work over 5 ms counts, and only once started");
+    Check(summary.Contains("during_gc_pause=1") && summary.Contains("outside=[outside 12."), "slow work during a pause and outside one are told apart");
+
+    // The live listener: a forced collection shows up as a pause from the runtime's own events.
+    StallWatch.TakeSummary();
+    GC.Collect(2, GCCollectionMode.Forced, blocking: true);
+    var heard = Stopwatch.StartNew();
+    string after = null;
+    long pausesHeard = 0;
+    while (heard.Elapsed < TimeSpan.FromSeconds(4) && pausesHeard == 0)
+    {
+        await Task.Delay(250);
+        after = StallWatch.TakeSummary();
+        var m = System.Text.RegularExpressions.Regex.Match(after, @"pausesHeard=(\d+)");
+        pausesHeard += m.Success ? long.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture) : 0;
+    }
+
+    Console.WriteLine($"  {after}");
+    Check(pausesHeard >= 1, $"a real collection's pause is heard from the runtime's events ({pausesHeard}, {heard.ElapsedMilliseconds} ms after)");
+    var (median, max) = StallWatch.MeasureSleep1();
+    Console.WriteLine($"  Sleep(1) in this process: median {median:F2} ms, max {max:F2} ms");
 }
 
 // The clock the plugin stamps with: Quantower's corrected one when set, the PC's otherwise or if it fails.

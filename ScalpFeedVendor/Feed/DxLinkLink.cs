@@ -347,6 +347,7 @@ internal sealed class DxLinkLink
                     long micros = (Stopwatch.GetTimestamp() - stamp) * 1_000_000 / Stopwatch.Frequency;
                     if (micros > Volatile.Read(ref this.maxHandleMicros))
                         Volatile.Write(ref this.maxHandleMicros, micros);
+                    StallWatch.Note("tasty frame", stamp);
                     Interlocked.Increment(ref this.frameCount);
                     continue;
                 }
