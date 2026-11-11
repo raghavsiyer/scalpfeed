@@ -37,6 +37,11 @@ internal sealed class SymbolState
 
     // Belong to IBKR's receive thread: what was last said in the log about this symbol's LULD.
     public int IbkrHalted = -1;
+
+    // The reopening auction's indicative price, paired shares and imbalance, from IBKR during a halt or pause only.
+    public double ResPrice = double.NaN;
+    public double ResPaired = double.NaN;
+    public double ResImbalance = double.NaN;
     public double LuldLoggedLower = double.NaN;
     public double LuldLoggedUpper = double.NaN;
 

@@ -42,10 +42,15 @@ internal sealed class IbkrBridge : IIbkrSink
     private readonly string[] bidIds;
     private readonly string[] askIds;
 
-    // IBKR's receive thread only: the book with a LULD band's row put in.
+    /// <summary>The depth row showing the reopening auction's indicative price during a halt or pause.</summary>
+    public const string ResVenue = "Res";
+
+    // IBKR's receive thread only: the book with a LULD band's row put in, then the Res row.
     private readonly List<IbkrDepthRow> bandRow = new(1);
     private readonly List<IbkrDepthRow> bidsWithBand = new();
     private readonly List<IbkrDepthRow> asksWithBand = new();
+    private readonly List<IbkrDepthRow> bidsWithRes = new();
+    private readonly List<IbkrDepthRow> asksWithRes = new();
 
     private IbkrClient client;
     private DateTime notLiveSinceUtc;
@@ -214,8 +219,39 @@ internal sealed class IbkrBridge : IIbkrSink
         bool wasKnown = state.IbkrHalted >= 0;
         state.IbkrHalted = halted;
         state.Luld.OnHalt(halted > 0);
+
+        // Auction numbers from before a halt are the opening or closing cross's, and after it they're stale.
+        state.ResPrice = state.ResPaired = state.ResImbalance = double.NaN;
         if (wasKnown || halted > 0)
             Log.Info($"[luld] {symbol} {(halted == 2 ? "volatility pause" : halted > 0 ? "halted" : "trading again; the reopening print sets the band")}");
+    }
+
+    public bool OnIbkrAuction(string symbol, int tick, double value)
+    {
+        // Only a halt's reopening auction makes a Res row; the opening and closing crosses don't.
+        if (!this.statesByIbkr.TryGetValue(symbol, out var state) || state.IbkrHalted <= 0)
+            return false;
+
+        bool showing = state.DepthOn && state.ResPrice > 0;
+        switch (tick)
+        {
+            case IbkrClient.AuctionPriceTick:
+                double price = Math.Round(value, 4);
+                if (!(price > 0) || price == state.ResPrice)
+                    return false;
+                state.ResPrice = price;
+                Log.Info($"[res] {symbol} reopening auction at {price}, {state.ResPaired:#,0} paired, imbalance {state.ResImbalance:+#,0;-#,0;0}");
+                return state.DepthOn;
+            case IbkrClient.AuctionVolumeTick:
+                bool pairedChanged = value != state.ResPaired;
+                state.ResPaired = value;
+                return showing && pairedChanged;
+            case IbkrClient.AuctionImbalanceTick:
+                state.ResImbalance = value;
+                return false;
+            default:
+                return false;
+        }
     }
 
     public void OnIbkrPrint(string symbol, double price, double size, long unixSeconds, string venue, long arrivalUtcTicks, bool roundLot, bool reopening)
@@ -318,15 +354,25 @@ internal sealed class IbkrBridge : IIbkrSink
         var book = new DOMQuote(state.Id, now);
         double bestBid = DepthSizes.Best(bids, true);
         double bestAsk = DepthSizes.Best(asks, false);
+        bool hasBook = bids.Count + asks.Count > 0;
 
         // The computed LULD bands go in as one marked row a side, the lower among the bids and the upper
-        // among the asks. Never into an empty book, where they'd pass for the market.
-        if (bids.Count + asks.Count > 0 && state.Luld.TryGetBands(now.Ticks, state.PrevClose, state.IsTier1, out var band))
+        // among the asks. Never into an empty book, where they'd pass for the market, and nor does Res.
+        if (hasBook && state.Luld.TryGetBands(now.Ticks, state.PrevClose, state.IsTier1, out var band))
         {
             if (band.Lower > 0)
-                bids = this.WithBandRow(bids, band.Lower, LuldBand.Label(false, band.Exact), true, this.bidsWithBand);
-            asks = this.WithBandRow(asks, band.Upper, LuldBand.Label(true, band.Exact), false, this.asksWithBand);
+                bids = this.WithMarkerRow(bids, band.Lower, LuldBand.MarkerShares, LuldBand.Label(false, band.Exact), true, this.bidsWithBand);
+            asks = this.WithMarkerRow(asks, band.Upper, LuldBand.MarkerShares, LuldBand.Label(true, band.Exact), false, this.asksWithBand);
             LogBand(state, band);
+        }
+
+        // During a halt or pause, the price the listing market would reopen at now, on both sides so it
+        // stays put as the imbalance swings, sized by the shares it would pair.
+        if (hasBook && state.IbkrHalted > 0 && state.ResPrice > 0)
+        {
+            double paired = state.ResPaired > 0 ? state.ResPaired : LuldBand.MarkerShares;
+            bids = this.WithMarkerRow(bids, state.ResPrice, paired, ResVenue, true, this.bidsWithRes);
+            asks = this.WithMarkerRow(asks, state.ResPrice, paired, ResVenue, false, this.asksWithRes);
         }
 
         Fill(book.Bids, bids, QuotePriceType.Bid, this.bidIds, state.Id, now, bestBid, state.IbkrBid);
@@ -334,10 +380,10 @@ internal sealed class IbkrBridge : IIbkrSink
         this.push(book);
     }
 
-    private List<IbkrDepthRow> WithBandRow(List<IbkrDepthRow> rows, double price, string venue, bool bids, List<IbkrDepthRow> into)
+    private List<IbkrDepthRow> WithMarkerRow(List<IbkrDepthRow> rows, double price, double shares, string venue, bool bids, List<IbkrDepthRow> into)
     {
         this.bandRow.Clear();
-        this.bandRow.Add(new IbkrDepthRow(price, LuldBand.MarkerShares, venue));
+        this.bandRow.Add(new IbkrDepthRow(price, shares, venue));
         VenueTops.Merge(rows, this.bandRow, bids, into);
         return into;
     }
@@ -362,8 +408,8 @@ internal sealed class IbkrBridge : IIbkrSink
             if (target.Count == ids.Length)
                 break;
 
-            bool band = LuldBand.IsLabel(row.Venue);
-            if (band || DepthSizes.Shows(row.Size, row.Price, bestInBook, quoted))
+            bool marker = LuldBand.IsLabel(row.Venue) || row.Venue == ResVenue;
+            if (marker || DepthSizes.Shows(row.Size, row.Price, bestInBook, quoted))
                 target.Add(new Level2Quote(side, symbolId, ids[target.Count], row.Price, DepthSizes.ToHundreds(row.Size), now) { Broker = row.Venue });
         }
     }

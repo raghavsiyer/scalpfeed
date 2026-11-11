@@ -64,6 +64,13 @@ internal interface IIbkrSink
     void OnIbkrHalted(string symbol, int halted);
 
     /// <summary>
+    /// One of the listing market's auction numbers, from the symbol's quote: <see cref="IbkrClient.AuctionPriceTick"/>,
+    /// <see cref="IbkrClient.AuctionVolumeTick"/> (paired shares) or <see cref="IbkrClient.AuctionImbalanceTick"/>
+    /// (shares left over, positive to buy). Returns whether the symbol's book should go out again.
+    /// </summary>
+    bool OnIbkrAuction(string symbol, int tick, double value);
+
+    /// <summary>
     /// Any print at all on this symbol's tape, including ones that stay off the screen. Carried means
     /// it's on tastytrade's tape as well, so in merged mode it won't come to OnIbkrPrint.
     /// </summary>
@@ -88,6 +95,12 @@ internal sealed class IbkrClient
     public const string DepthFeed = "Depth";
     public const string TapeFeed = "Tape";
     public const string VenueFeedPrefix = "Venue:";
+
+    // Generic tick 225 on the SMART quote: the listing market's auction numbers.
+    private const string AuctionTicks = "225";
+    public const int AuctionVolumeTick = 34;
+    public const int AuctionPriceTick = 35;
+    public const int AuctionImbalanceTick = 36;
 
     private static readonly string[] VenueFeeds = VenueTops.Venues.Select(v => VenueFeedPrefix + v).ToArray();
 
@@ -179,6 +192,7 @@ internal sealed class IbkrClient
     // Written on the receive thread, read by the timer.
     private long quoteUpdates;
     private long venueQuoteUpdates;
+    private long auctionUpdates;
     private long depthUpdates;
     private long depthDeliveries;
     private long maxFlushMicros;
@@ -575,7 +589,7 @@ internal sealed class IbkrClient
         this.streamsByKey[key] = stream;
 
         if (key.EventType == QuoteFeed)
-            await this.SendAsync(CancellationToken.None, [1, 11, stream.Id, .. Contract(key.Symbol), false, "", false, false, ""]).ConfigureAwait(false);
+            await this.SendAsync(CancellationToken.None, [1, 11, stream.Id, .. Contract(key.Symbol), false, AuctionTicks, false, false, ""]).ConfigureAwait(false);
         else if (IsVenueFeed(key.EventType))
             await this.SendAsync(CancellationToken.None, [1, 11, stream.Id, .. Contract(key.Symbol, key.EventType[VenueFeedPrefix.Length..]), false, "", false, false, ""]).ConfigureAwait(false);
         else if (key.EventType == DepthFeed)
@@ -852,11 +866,8 @@ internal sealed class IbkrClient
     {
         if (IsVenueFeed(stream.Key.EventType))
         {
-            // A venue's quote is part of its symbol's book, so the book goes out again. Not before the
-            // book has a row, though: alone, these rows would pass for the whole market.
-            if (this.streamsByKey.TryGetValue(new FeedKey(DepthFeed, stream.Key.Symbol), out var depth)
-                && depth.HasBook && !depth.Failed && !depth.WaitingForSlot)
-                this.MarkDirty(depth, Stopwatch.GetTimestamp());
+            // A venue's quote is part of its symbol's book, so the book goes out again.
+            this.MarkBookDirty(stream.Key.Symbol);
             return;
         }
 
@@ -873,6 +884,14 @@ internal sealed class IbkrClient
             stream.DueStamp = now + DepthSettleTicks;
             this.dirtyDepth.Add(stream);
         }
+    }
+
+    /// <summary>Sends the symbol's book again. Not before it has a row: alone, added rows would pass for the whole market.</summary>
+    private void MarkBookDirty(string symbol)
+    {
+        if (this.streamsByKey.TryGetValue(new FeedKey(DepthFeed, symbol), out var depth)
+            && depth.HasBook && !depth.Failed && !depth.WaitingForSlot)
+            this.MarkDirty(depth, Stopwatch.GetTimestamp());
     }
 
     private void HandleFrame(ReadOnlySpan<byte> frame)
@@ -992,6 +1011,12 @@ internal sealed class IbkrClient
         int tick = f.Int();
         double price = f.Double();
         double size = f.Double();
+        if (tick == AuctionPriceTick)
+        {
+            this.OnAuction(stream, tick, price);
+            return;
+        }
+
         if (tick == 1)
         {
             stream.Bid = price;
@@ -1028,6 +1053,12 @@ internal sealed class IbkrClient
 
         int tick = f.Int();
         double size = f.Double();
+        if (tick is AuctionVolumeTick or AuctionImbalanceTick)
+        {
+            this.OnAuction(stream, tick, size);
+            return;
+        }
+
         if (tick == 0)
             stream.BidSize = size;
         else if (tick == 3)
@@ -1038,6 +1069,20 @@ internal sealed class IbkrClient
         this.MarkDirty(stream, 0);
         if (stream.Key.EventType == QuoteFeed && stream.Key.Symbol == FeedHealth.CanarySymbol)
             this.OnCanary();
+    }
+
+    /// <summary>
+    /// The listing market's auction numbers (generic tick 225), about once a second while an auction is
+    /// forming: the opening and closing crosses and, the part we use, the reopening after a halt or pause.
+    /// </summary>
+    private void OnAuction(Stream stream, int tick, double value)
+    {
+        if (stream.Key.EventType != QuoteFeed || double.IsNaN(value))
+            return;
+
+        this.auctionUpdates++;
+        if (Volatile.Read(ref this.sink)?.OnIbkrAuction(stream.Key.Symbol, tick, value) == true)
+            this.MarkBookDirty(stream.Key.Symbol);
     }
 
     private void OnTickGeneric(ref FieldReader f)
@@ -1215,13 +1260,14 @@ internal sealed class IbkrClient
                 this.nextStatsUtc = now.AddMinutes(1);
                 long quotes = Interlocked.Exchange(ref this.quoteUpdates, 0);
                 long venueQuotes = Interlocked.Exchange(ref this.venueQuoteUpdates, 0);
+                long auctions = Interlocked.Exchange(ref this.auctionUpdates, 0);
                 long depth = Interlocked.Exchange(ref this.depthUpdates, 0);
                 long books = Interlocked.Exchange(ref this.depthDeliveries, 0);
                 long flush = Interlocked.Exchange(ref this.maxFlushMicros, 0);
                 long added = Interlocked.Exchange(ref this.printsAdded, 0);
                 long carried = Interlocked.Exchange(ref this.printsCarried, 0);
                 long offMarket = Interlocked.Exchange(ref this.printsOffMarket, 0);
-                Log.Info($"[ibkr] stats 60s: state={this.state} quoteUpdates={quotes} venueQuoteUpdates={venueQuotes} depthRowChanges={depth} booksDelivered={books} printsAdded={added} printsCarried={carried} printsOffMarket={offMarket} maxFlushUs={flush} streams={this.streams.Count}");
+                Log.Info($"[ibkr] stats 60s: state={this.state} quoteUpdates={quotes} venueQuoteUpdates={venueQuotes} auctionUpdates={auctions} depthRowChanges={depth} booksDelivered={books} printsAdded={added} printsCarried={carried} printsOffMarket={offMarket} maxFlushUs={flush} streams={this.streams.Count}");
             }
         }
         catch (Exception ex)

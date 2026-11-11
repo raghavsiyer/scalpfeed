@@ -476,7 +476,14 @@ async Task RunLuld()
     gateway.SendPrint("F I");
     gateway.SendPrint("F");
     gateway.SendPrint("5");
+    gateway.SendAuction("HALT", 35, 2.24000001);
+    gateway.SendAuction("HALT", 34, 121932);
+    gateway.SendAuction("HALT", 36, -657);
     await Task.Delay(300);
+    var smartQuote = gateway.MarketDataRequests.First(r => r.Symbol == "HALT" && r.Exchange == "SMART");
+    Check(gateway.GenericTicks.GetValueOrDefault(smartQuote.Id) == "225", "the SMART quote asks for the auction numbers (generic tick 225)");
+    Check(sink.Auctions.Contains(("HALT", 35, 2.24000001)) && sink.Auctions.Contains(("HALT", 34, 121932)) && sink.Auctions.Contains(("HALT", 36, -657)),
+        $"the auction's price, paired shares and imbalance reach the bridge ({string.Join(", ", sink.Auctions)})");
     Check(sink.Halts.Contains(("HALT", 2)), "IBKR's Halted tick reaches the bridge, 2 for a volatility pause");
     Check(sink.OddLots.GetValueOrDefault("ODD") == 1 && sink.Prints.GetValueOrDefault("ODD")?.Count == 3, "odd lots still reach the tape, marked so the band skips them");
     Check(sink.Reopenings.GetValueOrDefault("ODD") == 1, "IBKR's condition 5 reaches the bridge marked as a reopening print");
@@ -2254,6 +2261,14 @@ internal sealed class IbkrTestSink : IIbkrSink
 
     public void OnIbkrHalted(string symbol, int halted) => this.Halts.Enqueue((symbol, halted));
 
+    public readonly ConcurrentQueue<(string Symbol, int Tick, double Value)> Auctions = new();
+
+    public bool OnIbkrAuction(string symbol, int tick, double value)
+    {
+        this.Auctions.Enqueue((symbol, tick, value));
+        return true;
+    }
+
     public readonly System.Collections.Concurrent.ConcurrentDictionary<string, int> OddLots = new();
 
     public readonly System.Collections.Concurrent.ConcurrentDictionary<string, int> Reopenings = new();
@@ -2331,6 +2346,17 @@ internal sealed class FakeGateway : IDisposable
     public ConcurrentQueue<(int Id, string Symbol, string Exchange)> MarketDataRequests { get; } = new();
 
     public ConcurrentQueue<int> MarketDataCancels { get; } = new();
+
+    /// <summary>Each market data request's generic tick list, by request id.</summary>
+    public ConcurrentDictionary<int, string> GenericTicks { get; } = new();
+
+    /// <summary>An auction number on the symbol's SMART quote: tick 35 as a tickPrice, 34 and 36 as tickSizes.</summary>
+    public void SendAuction(string symbol, int tick, double value)
+    {
+        int id = this.MarketDataRequests.Last(r => r.Symbol == symbol && r.Exchange == "SMART").Id;
+        string text = value.ToString(CultureInfo.InvariantCulture);
+        this.Send(tick == 35 ? $"1\06\0{id}\035\0{text}\00\00\0" : $"2\06\0{id}\0{tick}\0{text}\0");
+    }
 
     /// <summary>IBKR's Halted tick (49) on the symbol's SMART quote, as a tickGeneric message.</summary>
     public void SendHalted(string symbol, int value)
@@ -2416,6 +2442,7 @@ internal sealed class FakeGateway : IDisposable
                             this.Send("15\01\0DU000000\0");
                             break;
                         case "1":
+                            this.GenericTicks[int.Parse(f[2], CultureInfo.InvariantCulture)] = f[16];
                             this.OnMarketDataRequest(int.Parse(f[2], CultureInfo.InvariantCulture), f[4], f[10]);
                             break;
                         case "2":
