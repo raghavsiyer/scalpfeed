@@ -153,6 +153,16 @@ By time, CIIT's book best matched the NBBO 100% of a 60 s run. LABT's didn't: fo
 - This probably explains the LABT gap above, but venues weren't recorded then, so that's a guess.
 - **Installed and confirmed on screen** at 06:19 local, OMH: ARCA rows show in the depth. The plugin's first minute had 100 venue quote updates and no refusals.
 
+### Latency readings and the PC clock (2026-11-11)
+
+You saw new latency spikes in Quantower. They come from the PC clock, not from the feeds:
+
+- **Quantower keeps its own clock.** Its log (`C:\Quantower\Logs\Serilog\<date>.slog`) records "Time was synchronized. Current offset (ms): 650" at 04:14 local, 658 at 04:23 and 239 at 05:26. Quantower's latency reading uses that corrected time.
+- **The PC clock was 0.24-0.66 s slow** all morning. `w32tm /stripchart` against time.windows.com and time.cloudflare.com gave +0.23 to +0.27 s at 05:55, and Windows reported itself not synchronized (leap indicator 3). It wanders: 171 ms fast on 11-05, and 1.5 s fast on 11-09 until Windows stepped it back by 1,501 ms at 06:19:30. That step, not the restart 30 s before it, is what ended Monday's flat 1,573 ms `lastPrintDelayMs`.
+- **The plugin stamps IBKR prints, IBKR quotes and books with the PC clock** (`DateTime.UtcNow` on arrival), so to Quantower they look as old as the PC clock is slow, about 240 ms now and 650 ms at start. tastytrade prints carry exchange times and read their real delay. In the merged tape the reading jumps between the two. When the PC clock runs fast, the same stamps look early and the reading hides it. Prints stamped early can also land in the previous bar at a bar's start until the chart reloads.
+- **The feeds themselves are unchanged.** tastytrade's newest-print delay was a steady -184 to -190 ms by the PC clock from 05:29 to 05:58, so about 50 ms real once the 240 ms is added back, the same as 11-05's corrected 57-62 ms.
+- **Handling spikes did grow, but stay small** (`analysis\latency_trend.py`): the worst tastytrade frame and the worst IBKR flush in a minute were usually under 1-4 ms on 11-05 and 11-06, and are 10-16 ms in most minutes since 11-09 (p90 10.6 ms and 15.5 ms today, max 17.3 ms every day). The ceiling sits at one Windows timer tick (15.6 ms), so a thread is being made to wait for a tick. It started before the venue rows (11-09 premarket p90 11.6 ms), and books delivered rose from 154 to 267 a minute with them. Not yet explained; far below what shows as a latency spike.
+
 ### The blinking latency and the tape's micro-pauses
 
 You saw Quantower's latency measure blink 100-200 ms with the tape seeming to pause, and noted it sits steadily at 100-200 ms on an IBKR-only tape.
