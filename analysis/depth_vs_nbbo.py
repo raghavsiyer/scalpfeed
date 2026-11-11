@@ -123,7 +123,8 @@ def sample():
                 sizes_at_top[name]["100 or fewer" if r[1] <= 100 else "over 100"] += 1
     if abs(best_bid - quote["bid"]) > 1e-9 or abs(best_ask - quote["ask"]) > 1e-9:
         if len(differ) < 8:
-            differ.append((round(time.time() % 3600, 1), best_bid, quote["bid"], best_ask, quote["ask"]))
+            # A clock time, so it can't be read as a price (a bare seconds count once was).
+            differ.append((time.strftime("%H:%M:%S", time.localtime(now)) + f".{int(now % 1 * 10)}", best_bid, quote["bid"], best_ask, quote["ask"]))
 
 
 try:
@@ -181,4 +182,4 @@ for side, rows in (("bid", books[1]), ("ask", books[0])):
         shares[r[2] or "(blank)"] += r[1]
     print(f"  book at the end, {side}: {len(rows)} rows, by venue {dict(named.most_common())}, shares {dict((k, int(v)) for k, v in shares.most_common())}")
     print(f"    first rows: {[(r[0], int(r[1]), r[2] or '(blank)') for r in rows[:6]]}")
-print(f"  when they differed, first few (book bid, NBBO bid, book ask, NBBO ask): {differ}")
+print(f"  when they differed, first few (time, book bid, NBBO bid, book ask, NBBO ask): {differ}")
