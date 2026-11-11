@@ -342,6 +342,18 @@ Still open: `IbkrBridge.Start` runs only after tastytrade is ready, so a tastytr
 - **No other IBKR tick-by-tick type helps.** `Last` has `AllLast`'s timing. RT Volume is about 190 ms sooner, but it combines prints (731 rows against 3,129 on RCT), and only 184 of 1,385 prints matched singly, so that number is a biased sample. Generic tick 375 (RT trade volume) was 88.9% on VSA.
 - **Merged mode is the one that changes it:** tastytrade's roughly 56% at its own speed, and the rest about 0.4 s later, for about 98% of the volume. Not yet run in Quantower with these symbols.
 
+**Again on Ethernet, 2026-11-11 07:45-07:48 local (10:45 ET), paper Gateway**, after both feeds' connections moved off Wi-Fi (confirmed by their local address). Same scripts, SCKT and SPY for 180 s.
+
+| | Behind tastytrade on shared prints: median / p90 / p99 | IBKR delivery every (median / p90) | Rows per delivery |
+|---|---|---|---|
+| SCKT, 3,029 of 3,090 shared prints matched | 237 / 484 / 663 ms | 510 / 599 ms | 12.2 |
+| SPY, 1,082 of 2,722 matched | 174 / 465 / 603 ms | 515 / 602 ms | 9.5 |
+
+- **IBKR's tape delay is its batching.** Prints come about every 0.5 s, so a print waits about half that for its batch, which is SCKT's 237 ms median. With tastytrade's own delay of about 45 ms (its print-to-arrival median was -1,038 ms against a PC clock 1.08 s slow), IBKR's prints reach this PC about 0.28 s after the trade at the median and 0.53 s at p90.
+- **Ethernet itself saves little:** TCP handshakes from this PC took 56 ms to IBKR's server and 67 ms to tastytrade's over Ethernet, against 59 and 70 ms over Wi-Fi, and were steadier. That's about 1.5 ms each way. The drop from 11-06's 377-485 ms median comes from a shorter batch interval (510 ms against 569-711), with different symbols and a different hour, not from the network.
+- **SPY's matching is weaker:** many identical prints, so only 40% matched and the p10 of -964 ms shows wrong pairs. SCKT's numbers are the ones to use.
+- **In SCKT's merged tape,** tastytrade carried 68% of the shares. The rest (ARCA 19%, EDGA 6%, MEMX and others) came from IBKR about a quarter second later at the median.
+
 ### Candle volume
 
 tastytrade's 1-minute candle volume is exactly its own valid prints, in all 42 minutes tested on CIIT, RCT and VSA (05:22-05:35 ET, `analysis\candle_volume.py`), so the candles leave out what its tape leaves out, and odd lots too.
