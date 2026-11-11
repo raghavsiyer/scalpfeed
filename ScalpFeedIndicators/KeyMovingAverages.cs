@@ -1,5 +1,6 @@
 using System.Drawing;
 using TradingPlatform.BusinessLayer;
+using TradingPlatform.BusinessLayer.Utils;
 
 namespace ScalpFeedIndicators;
 
@@ -75,6 +76,12 @@ public sealed class KeyMovingAverages : Indicator
     private SessionVwap vwap;
     private string shortName = "MAs";
 
+    // Colour trace: which instance, and what the lines held when last logged.
+    private static int instances;
+    private readonly int instance = Interlocked.Increment(ref instances);
+    private Color[] seenColours;
+    private string lastSaved;
+
     public KeyMovingAverages()
     {
         this.Name = "Key Moving Averages";
@@ -93,8 +100,35 @@ public sealed class KeyMovingAverages : Indicator
     /// <summary>The chart legend's name: which lines are on, with their periods.</summary>
     public override string ShortName => this.shortName;
 
+    /// <summary>
+    /// Unchanged behaviour; logs the line colours going in and out, to find where a colour change is lost.
+    /// Quantower reads this for the settings window and for each workspace save, and sets it on OK and on load.
+    /// </summary>
+    public override IList<SettingItem> Settings
+    {
+        get
+        {
+            var value = base.Settings;
+            string colours = ColoursIn(value);
+            if (colours != this.lastSaved)
+            {
+                this.lastSaved = colours;
+                this.Trace("read", colours);
+            }
+            return value;
+        }
+        set
+        {
+            this.Trace("applying", ColoursIn(value));
+            base.Settings = value;
+            this.Trace("applied", this.LineColours());
+        }
+    }
+
     protected override void OnInit()
     {
+        this.Trace("init", this.LineColours());
+
         var lines = new (bool On, int Period, string Kind)[]
         {
             (this.ShowEma9, this.Ema9Period, Ema),
@@ -131,10 +165,26 @@ public sealed class KeyMovingAverages : Indicator
         }
 
         this.shortName = shown.Count > 0 ? $"MAs ({string.Join(", ", shown)})" : "MAs (none)";
+        this.Trace("init done", this.LineColours());
+        this.seenColours = this.LinesSeries.Select(l => l.Color).ToArray();
     }
 
     protected override void OnUpdate(UpdateArgs args)
     {
+        // A colour that changes without going through Settings.
+        if (this.seenColours != null)
+        {
+            for (int i = 0; i < this.seenColours.Length; i++)
+            {
+                if (this.LinesSeries[i].Color != this.seenColours[i])
+                {
+                    this.seenColours = this.LinesSeries.Select(l => l.Color).ToArray();
+                    this.Trace("changed while drawing", this.LineColours());
+                    break;
+                }
+            }
+        }
+
         for (int i = 0; i < this.averages.Length; i++)
         {
             // Until a full period of bars exists the average isn't meaningful, so nothing is drawn.
@@ -170,5 +220,39 @@ public sealed class KeyMovingAverages : Indicator
 
         this.vwap?.Clear();
         this.vwap = null;
+        this.seenColours = null;
+        this.Trace("clear", this.LineColours());
+    }
+
+    private string LineColours() => string.Join(" ", this.LinesSeries.Select(l => ColourName(l.Color)));
+
+    /// <summary>The colour each Line_N group carries, or - where the group or its line is missing.</summary>
+    private static string ColoursIn(IList<SettingItem> settings)
+    {
+        if (settings == null)
+            return "(none)";
+
+        var names = new List<string>();
+        for (int i = 0; i < 6; i++)
+        {
+            var group = settings.OfType<SettingItemGroup>().FirstOrDefault(g => g.Name == $"Line_{i}");
+            var line = (group?.Value as IEnumerable<SettingItem>)?.FirstOrDefault(s => s.Name == "Line");
+            names.Add(line?.Value is LineOptions options ? ColourName(options.Color) : "-");
+        }
+        return string.Join(" ", names);
+    }
+
+    private static string ColourName(Color c) => c.IsNamedColor ? c.Name : $"#{c.R:X2}{c.G:X2}{c.B:X2}";
+
+    private void Trace(string step, string colours)
+    {
+        try
+        {
+            Core.Instance.Loggers.Log($"Key Moving Averages #{this.instance} colours, {step}: {colours}", LoggingLevel.System);
+        }
+        catch
+        {
+            // The trace must never stop the indicator.
+        }
     }
 }
