@@ -158,6 +158,7 @@ internal sealed class IbkrClient
     private readonly ConcurrentDictionary<int, Stream> streams = new();
     private readonly ConcurrentDictionary<FeedKey, Stream> streamsByKey = new();
     private readonly ConcurrentQueue<FeedKey> replays = new();
+    private readonly ConcurrentQueue<string> bookRefreshes = new();
     private readonly ConcurrentDictionary<string, DateTime> slotRetryUntilUtc = new();
     private readonly ConcurrentDictionary<FeedKey, bool> slotRefusalsLogged = new();
     private readonly List<Stream> dirtyQuotes = new();
@@ -446,6 +447,7 @@ internal sealed class IbkrClient
         this.dirtyQuotes.Clear();
         this.dirtyDepth.Clear();
         this.replays.Clear();
+        this.bookRefreshes.Clear();
         this.slotRetryUntilUtc.Clear();
         this.slotRefusalsLogged.Clear();
         lock (this.depthGate)
@@ -764,6 +766,9 @@ internal sealed class IbkrClient
                     this.MarkDirty(replayed, now);
             }
 
+            while (this.bookRefreshes.TryDequeue(out var refresh))
+                this.MarkBookDirty(refresh);
+
             // Nothing more is waiting, so the burst is over and the sink can have the quotes.
             if (this.dirtyQuotes.Count > 0 && (!stream.DataAvailable || now - this.lastQuoteFlushStamp > MaxBurstTicks))
                 this.FlushQuotes(now);
@@ -889,6 +894,12 @@ internal sealed class IbkrClient
             this.dirtyDepth.Add(stream);
         }
     }
+
+    /// <summary>
+    /// From any thread: the symbol's book goes out again from the receive thread, the next time data arrives,
+    /// for rows that change with time rather than with the market (the Res row's countdown).
+    /// </summary>
+    public void RefreshBook(string symbol) => this.bookRefreshes.Enqueue(symbol);
 
     /// <summary>Sends the symbol's book again. Not before it has a row: alone, added rows would pass for the whole market.</summary>
     private void MarkBookDirty(string symbol)

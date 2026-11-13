@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using ScalpFeedVendor.Feed;
 using ScalpFeedVendor.Tastytrade;
 using TradingPlatform.BusinessLayer;
@@ -46,9 +47,9 @@ internal sealed class IbkrBridge : IIbkrSink
     public const string ResVenue = "Res";
 
     /// <summary>
-    /// What the Res row reads in the depth: a fixed size far above any real row, so it reads as a marker and
-    /// a size highlight set just under it colours only it. Quantower has no per-row colour. The Limit rows
-    /// read 1 instead, by your choice of 2026-11-13.
+    /// What the Res row reads when the reopening time isn't known (a halt, or a pause already on when the
+    /// symbol was opened): a fixed size far above any real row. In a pause whose start was seen it reads the
+    /// seconds until the reopening instead (PauseClock), by your choice of 2026-11-13. The Limit rows read 1.
     /// </summary>
     public const double MarkerRowSize = 999_999;
 
@@ -145,6 +146,7 @@ internal sealed class IbkrBridge : IIbkrSink
         // The tape watch holds arrival times, which are on FeedClock.
         var utcNow = FeedClock.UtcNow;
         this.CheckTapes(utcNow);
+        this.RefreshCountdowns(current);
         if (utcNow >= nextMergeStatsUtc)
         {
             nextMergeStatsUtc = utcNow.AddMinutes(1);
@@ -224,6 +226,7 @@ internal sealed class IbkrBridge : IIbkrSink
             return;
 
         bool wasKnown = state.IbkrHalted >= 0;
+        PauseClock.Shared.OnHalted(symbol, state.IbkrHalted, halted, Stopwatch.GetTimestamp());
         state.IbkrHalted = halted;
         state.Luld.OnHalt(halted > 0);
 
@@ -340,6 +343,20 @@ internal sealed class IbkrBridge : IIbkrSink
             this.PushBook(state, NoRows, NoRows);
     }
 
+    /// <summary>
+    /// A paused symbol's book goes out again each second, so its Res row's countdown moves even when nothing
+    /// else in the book does. The client sends it from its own thread, the next time any data arrives.
+    /// </summary>
+    private void RefreshCountdowns(IbkrClient current)
+    {
+        long now = Stopwatch.GetTimestamp();
+        foreach (var (symbol, state) in this.statesByIbkr)
+        {
+            if (state.DepthOn && state.IbkrHalted > 0 && state.ResPrice > 0 && PauseClock.Shared.SecondsLeft(symbol, now) != null)
+                current.RefreshBook(symbol);
+        }
+    }
+
     private void CheckTapes(DateTime utcNow)
     {
         foreach (var (symbol, state) in this.statesByIbkr)
@@ -372,11 +389,13 @@ internal sealed class IbkrBridge : IIbkrSink
         }
 
         // During a halt or pause, the price the listing market would reopen at now, on both sides so it
-        // stays put as the imbalance swings. Paired shares and imbalance are in the log.
+        // stays put as the imbalance swings, sized by the seconds until the reopening where that's known.
+        // Paired shares and imbalance are in the log.
         if (hasBook && state.IbkrHalted > 0 && state.ResPrice > 0)
         {
-            bids = this.WithMarkerRow(bids, state.ResPrice, LuldBand.MarkerShares, ResVenue, true, this.bidsWithRes);
-            asks = this.WithMarkerRow(asks, state.ResPrice, LuldBand.MarkerShares, ResVenue, false, this.asksWithRes);
+            double size = PauseClock.Shared.SecondsLeft(IbkrClient.ToIbkrSymbol(state.Streamer), Stopwatch.GetTimestamp()) ?? MarkerRowSize;
+            bids = this.WithMarkerRow(bids, state.ResPrice, size, ResVenue, true, this.bidsWithRes);
+            asks = this.WithMarkerRow(asks, state.ResPrice, size, ResVenue, false, this.asksWithRes);
         }
 
         Fill(book.Bids, bids, QuotePriceType.Bid, this.bidIds, state.Id, now, bestBid, state.IbkrBid);
@@ -415,8 +434,8 @@ internal sealed class IbkrBridge : IIbkrSink
             bool res = row.Venue == ResVenue;
             if (res || LuldBand.IsLabel(row.Venue) || DepthSizes.Shows(row.Size, row.Price, bestInBook, quoted))
             {
-                // A Limit row's 100 shares read 1, the smallest a row can.
-                double size = res ? MarkerRowSize : DepthSizes.ToHundreds(row.Size);
+                // The Res row's size is already what it should read. A Limit row's 100 shares read 1.
+                double size = res ? row.Size : DepthSizes.ToHundreds(row.Size);
                 target.Add(new Level2Quote(side, symbolId, ids[target.Count], row.Price, size, now) { Broker = row.Venue });
             }
         }

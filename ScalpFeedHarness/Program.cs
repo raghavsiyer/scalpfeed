@@ -770,6 +770,27 @@ async Task RunLuld()
     Check(sink.OddLots.GetValueOrDefault("ODD") == 1 && sink.Prints.GetValueOrDefault("ODD")?.Count == 3, "odd lots still reach the tape, marked so the band skips them");
     Check(sink.Reopenings.GetValueOrDefault("ODD") == 1, "IBKR's condition 5 reaches the bridge marked as a reopening print");
     await client.StopAsync();
+
+    // The Res row's countdown: seconds to the next 5-minute mark from a pause seen to start.
+    long Sec(double s) => (long)(s * Stopwatch.Frequency);
+    Check(PauseClock.Left(0) == 300 && PauseClock.Left(0.4) == 300 && PauseClock.Left(1) == 299, "a pause starts at 300 seconds");
+    Check(PauseClock.Left(299.2) == 1 && PauseClock.Left(300) == 300 && PauseClock.Left(301) == 299, "it counts to 1, then an extension starts again at 300");
+    Check(PauseClock.Left(-2) == 300, "a stamp a moment before the start reads as the start");
+    var pauses = new PauseClock();
+    long t0 = Sec(1_000_000);
+    pauses.OnHalted("SEEN", 0, 2, t0);
+    Check(pauses.SecondsLeft("SEEN", t0 + Sec(60.5)) == 240, "a pause seen to start counts down from its start");
+    pauses.OnHalted("SEEN", -1, 2, t0 + Sec(70));
+    Check(pauses.SecondsLeft("SEEN", t0 + Sec(70)) == 230, "a reconnect that meets the pause as new keeps its start");
+    pauses.OnHalted("SEEN", 2, 0, t0 + Sec(300.1));
+    Check(pauses.SecondsLeft("SEEN", t0 + Sec(301)) == null, "trading again ends it");
+    pauses.OnHalted("OPENED", -1, 2, t0);
+    Check(pauses.SecondsLeft("OPENED", t0 + Sec(10)) == null, "a pause already on when the symbol was opened has no known start");
+    pauses.OnHalted("NEWS", 0, 1, t0);
+    Check(pauses.SecondsLeft("NEWS", t0 + Sec(10)) == null, "a halt has no set reopening time");
+    pauses.OnHalted("MISSED", 0, 2, t0);
+    pauses.OnHalted("MISSED", -1, 2, t0 + Sec(7200));
+    Check(pauses.SecondsLeft("MISSED", t0 + Sec(7200)) == null, "a start over an hour old, met again with nothing between, is from a reopening the plugin missed");
 }
 
 // The slow-update diagnostics: off by default, and slow work matched against garbage collection pauses.
