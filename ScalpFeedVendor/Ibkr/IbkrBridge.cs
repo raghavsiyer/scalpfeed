@@ -46,8 +46,9 @@ internal sealed class IbkrBridge : IIbkrSink
     public const string ResVenue = "Res";
 
     /// <summary>
-    /// What the Limit and Res rows read in the depth: a fixed size far above any real row, so they read as
-    /// markers and a size highlight set just under it colours only them. Quantower has no per-row colour.
+    /// What the Res row reads in the depth: a fixed size far above any real row, so it reads as a marker and
+    /// a size highlight set just under it colours only it. Quantower has no per-row colour. The Limit rows
+    /// read 1 instead, by your choice of 2026-11-13.
     /// </summary>
     public const double MarkerRowSize = 999_999;
 
@@ -411,10 +412,11 @@ internal sealed class IbkrBridge : IIbkrSink
             if (target.Count == ids.Length)
                 break;
 
-            bool marker = LuldBand.IsLabel(row.Venue) || row.Venue == ResVenue;
-            if (marker || DepthSizes.Shows(row.Size, row.Price, bestInBook, quoted))
+            bool res = row.Venue == ResVenue;
+            if (res || LuldBand.IsLabel(row.Venue) || DepthSizes.Shows(row.Size, row.Price, bestInBook, quoted))
             {
-                double size = marker ? MarkerRowSize : DepthSizes.ToHundreds(row.Size);
+                // A Limit row's 100 shares read 1, the smallest a row can.
+                double size = res ? MarkerRowSize : DepthSizes.ToHundreds(row.Size);
                 target.Add(new Level2Quote(side, symbolId, ids[target.Count], row.Price, size, now) { Broker = row.Venue });
             }
         }
