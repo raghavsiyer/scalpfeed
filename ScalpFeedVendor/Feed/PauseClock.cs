@@ -49,6 +49,12 @@ internal sealed class PauseClock
     public int? SecondsLeft(string symbol, long stamp) =>
         this.starts.TryGetValue(symbol, out long start) ? Left((double)(stamp - start) / Stopwatch.Frequency) : null;
 
+    /// <summary>
+    /// What the Res row reads: the seconds left times 1000, so 300,000 counting down to 1,000 (your choice of
+    /// 2026-11-13), or the given size when the reopening time isn't known.
+    /// </summary>
+    public static double RowSize(int? secondsLeft, double unknown) => secondsLeft is int s ? s * 1000.0 : unknown;
+
     /// <summary>Seconds to the next 5-minute mark after elapsed seconds: 300 at the start, 1 in a pause's last second.</summary>
     public static int Left(double elapsedSeconds)
     {

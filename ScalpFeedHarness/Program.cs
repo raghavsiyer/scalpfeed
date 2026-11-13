@@ -776,6 +776,8 @@ async Task RunLuld()
     Check(PauseClock.Left(0) == 300 && PauseClock.Left(0.4) == 300 && PauseClock.Left(1) == 299, "a pause starts at 300 seconds");
     Check(PauseClock.Left(299.2) == 1 && PauseClock.Left(300) == 300 && PauseClock.Left(301) == 299, "it counts to 1, then an extension starts again at 300");
     Check(PauseClock.Left(-2) == 300, "a stamp a moment before the start reads as the start");
+    Check(PauseClock.RowSize(300, 999_999) == 300_000 && PauseClock.RowSize(1, 999_999) == 1_000, "the Res row reads the seconds times 1000, 300,000 down to 1,000");
+    Check(PauseClock.RowSize(null, 999_999) == 999_999, "and the fixed size when the reopening time isn't known");
     var pauses = new PauseClock();
     long t0 = Sec(1_000_000);
     pauses.OnHalted("SEEN", 0, 2, t0);

@@ -49,7 +49,7 @@ internal sealed class IbkrBridge : IIbkrSink
     /// <summary>
     /// What the Res row reads when the reopening time isn't known (a halt, or a pause already on when the
     /// symbol was opened): a fixed size far above any real row. In a pause whose start was seen it reads the
-    /// seconds until the reopening instead (PauseClock), by your choice of 2026-11-13. The Limit rows read 1.
+    /// seconds until the reopening times 1000 instead (PauseClock), by your choice of 2026-11-13. The Limit rows read 1.
     /// </summary>
     public const double MarkerRowSize = 999_999;
 
@@ -393,7 +393,7 @@ internal sealed class IbkrBridge : IIbkrSink
         // Paired shares and imbalance are in the log.
         if (hasBook && state.IbkrHalted > 0 && state.ResPrice > 0)
         {
-            double size = PauseClock.Shared.SecondsLeft(IbkrClient.ToIbkrSymbol(state.Streamer), Stopwatch.GetTimestamp()) ?? MarkerRowSize;
+            double size = PauseClock.RowSize(PauseClock.Shared.SecondsLeft(IbkrClient.ToIbkrSymbol(state.Streamer), Stopwatch.GetTimestamp()), MarkerRowSize);
             bids = this.WithMarkerRow(bids, state.ResPrice, size, ResVenue, true, this.bidsWithRes);
             asks = this.WithMarkerRow(asks, state.ResPrice, size, ResVenue, false, this.asksWithRes);
         }
