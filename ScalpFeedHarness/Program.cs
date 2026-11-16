@@ -278,7 +278,7 @@ async Task RunScan(int port, string liveCode)
         Check(sink.Scans.Last().SequenceEqual(new[] { "GDHG" }) && gateway.ScanRequests.Count == 3, "an old scan's answer is ignored");
         gateway.SendError(Id(third), 200, "No security definition has been found for the request");
         var fourth = await NextRequest(4, 5);
-        Check(Id(fourth) > Id(third), "a scan IBKR refuses doesn't stop the next");
+        Check(Id(fourth) > Id(third) && gateway.ScanCancels.Contains(Id(third)), "a scan IBKR refuses is cancelled, and doesn't stop the next");
         await client.StopAsync();
     }
 

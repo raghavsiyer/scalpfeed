@@ -1419,7 +1419,11 @@ internal sealed class IbkrClient
             // and says why once per kind; the next goes when its interval is up.
             if (code != ScannerCancelled && this.codesLogged.Add(code))
                 Log.Info($"[scan] {code}: {Clip(message)}");
-            Interlocked.CompareExchange(ref this.scanId, 0, id);
+
+            // A refused scan can stay open at IBKR, and ten open ones block every new one (322 at 14:17 on
+            // 11-16, after a competing TWS login made each scan fail with 165), so it's cancelled as well.
+            if (Interlocked.CompareExchange(ref this.scanId, 0, id) == id)
+                _ = this.CancelScanAsync(id);
             return;
         }
 
