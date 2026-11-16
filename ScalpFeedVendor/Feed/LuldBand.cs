@@ -120,6 +120,28 @@ internal sealed class LuldBand
         }
     }
 
+    /// <summary>
+    /// IBKR's Halted tick isn't being watched any more, so a halt the band is waiting out could end unseen. The
+    /// band starts over from the next print, as when picked up mid-session; if the halt is still on, IBKR says so
+    /// again when it streams the symbol again. Nothing changes when the band isn't waiting out a halt.
+    /// </summary>
+    public void ForgetHalt()
+    {
+        lock (this.gate)
+        {
+            if (!this.halted)
+                return;
+
+            this.halted = false;
+            this.flagStillUp = false;
+            this.awaitingReopen = false;
+            this.exact = false;
+            this.reference = double.NaN;
+            this.window.Clear();
+            this.sum = 0;
+        }
+    }
+
     /// <summary>IBKR's Halted tick: no bands during a pause, and the reopening print starts them again.</summary>
     public void OnHalt(bool isHalted)
     {

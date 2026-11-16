@@ -68,6 +68,12 @@ internal interface IIbkrSink
     void OnIbkrHalted(string symbol, int halted);
 
     /// <summary>
+    /// The symbol's quote stream was cancelled, so its Halted tick and auction numbers aren't watched any more.
+    /// A new stream sends the Halted tick only when it isn't 0, so nothing would say a pause had ended meanwhile.
+    /// </summary>
+    void OnIbkrQuoteStopped(string symbol);
+
+    /// <summary>
     /// One of the listing market's auction numbers, from the symbol's quote: <see cref="IbkrClient.AuctionPriceTick"/>,
     /// <see cref="IbkrClient.AuctionVolumeTick"/> (paired shares) or <see cref="IbkrClient.AuctionImbalanceTick"/>
     /// (shares left over, positive to buy). Returns whether the symbol's book should go out again.
@@ -159,6 +165,7 @@ internal sealed class IbkrClient
     private readonly ConcurrentDictionary<FeedKey, Stream> streamsByKey = new();
     private readonly ConcurrentQueue<FeedKey> replays = new();
     private readonly ConcurrentQueue<string> bookRefreshes = new();
+    private readonly ConcurrentQueue<string> quoteStops = new();
     private readonly ConcurrentDictionary<string, DateTime> slotRetryUntilUtc = new();
     private readonly ConcurrentDictionary<FeedKey, bool> slotRefusalsLogged = new();
     private readonly List<Stream> dirtyQuotes = new();
@@ -670,6 +677,11 @@ internal sealed class IbkrClient
             return false;
 
         this.streams.TryRemove(stream.Id, out _);
+
+        // Its ticks stop here. The receive thread tells the sink before it handles anything read after this.
+        if (key.EventType == QuoteFeed)
+            this.quoteStops.Enqueue(key.Symbol);
+
         if (stream.Failed || stream.WaitingForSlot || stream.DepthQueued)
             return false;
 
@@ -735,6 +747,10 @@ internal sealed class IbkrClient
 
         while (true)
         {
+            // First, so a new stream's first Halted tick comes after the old stream's stop, never before.
+            while (this.quoteStops.TryDequeue(out var stopped))
+                Volatile.Read(ref this.sink)?.OnIbkrQuoteStopped(stopped);
+
             while (end - start >= 4)
             {
                 int length = BinaryPrimitives.ReadInt32BigEndian(buffer.AsSpan(start));

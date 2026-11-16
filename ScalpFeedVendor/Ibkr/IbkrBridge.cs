@@ -236,6 +236,33 @@ internal sealed class IbkrBridge : IIbkrSink
             Log.Info($"[luld] {symbol} {(halted == 2 ? "volatility pause" : halted > 0 ? "halted" : "trading again; the reopening print sets the band")}");
     }
 
+    public void OnIbkrQuoteStopped(string symbol)
+    {
+        if (this.statesByIbkr.TryGetValue(symbol, out var state))
+            ForgetHalt(symbol, state, keepPauseStart: false);
+    }
+
+    /// <summary>
+    /// What IBKR's quote stream said about a halt holds only while it streams. A new stream sends the Halted tick
+    /// only when it isn't 0, so a pause that ended unwatched stayed on, Res row and all, while the symbol traded:
+    /// GDHG on 2026-11-16, its DOM moved to another symbol mid-pause and back after the reopening. And a symbol
+    /// left at 0 then met mid-pause counted down from when it was met, not from when the pause began.
+    /// </summary>
+    private static void ForgetHalt(string symbol, SymbolState state, bool keepPauseStart)
+    {
+        if (!keepPauseStart)
+            PauseClock.Shared.Forget(symbol);
+
+        int was = state.IbkrHalted;
+        state.IbkrHalted = -1;
+        if (was <= 0)
+            return;
+
+        state.ResPrice = state.ResPaired = state.ResImbalance = double.NaN;
+        state.Luld.ForgetHalt();
+        Log.Info($"[luld] {symbol} not streaming from IBKR mid-{(was == 2 ? "pause" : "halt")}, so it's forgotten until IBKR says it again");
+    }
+
     public bool OnIbkrAuction(string symbol, int tick, double value)
     {
         // Only a halt's reopening auction makes a Res row; the opening and closing crosses don't.
@@ -317,12 +344,15 @@ internal sealed class IbkrBridge : IIbkrSink
         if (newState == IbkrState.Live)
             return;
 
-        foreach (var state in this.statesByIbkr.Values)
+        foreach (var (symbol, state) in this.statesByIbkr)
         {
             state.IbkrQuotes = false;
             state.IbkrTape = false;
             state.IbkrBid = double.NaN;
             state.IbkrAsk = double.NaN;
+
+            // A reconnect is usually seconds, so a pause's start is kept for when IBKR says it again.
+            ForgetHalt(symbol, state, keepPauseStart: true);
             if (state.DepthOn)
                 this.PushBook(state, NoRows, NoRows);
         }

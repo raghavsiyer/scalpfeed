@@ -691,6 +691,17 @@ async Task RunLuld()
     luld.OnTrade(13.20, Et(9, 51, 2), true);
     Check(Show(luld, Et(9, 51, 3), 9.50) == "11.88/14.52 ref 13.2", "the reopening print is the new reference");
 
+    // IBKR stopped streaming mid-pause, so the reopening may come and go unseen.
+    var unwatched = new LuldBand();
+    unwatched.OnTrade(4.00, Et(10, 0, 0), true);
+    unwatched.OnHalt(true);
+    unwatched.ForgetHalt();
+    Check(Show(unwatched, Et(10, 9, 0), 4.00) == "none", "a forgotten halt leaves no band");
+    unwatched.OnTrade(5.00, Et(10, 9, 1), true);
+    Check(Show(unwatched, Et(10, 9, 2), 4.00) == "4.5/5.5 ref 5 ~", "the next print starts it again, marked rough");
+    unwatched.ForgetHalt();
+    Check(Show(unwatched, Et(10, 9, 3), 4.00) == "4.5/5.5 ref 5 ~", "forgetting with no halt on changes nothing");
+
     // NXXT 2026-11-11: the auction's prints came about 0.2 s before the halt flag cleared, then a
     // 3.1812 print off the auction became the reference instead of the auction's 3.45.
     var early = new LuldBand();
@@ -769,6 +780,17 @@ async Task RunLuld()
     Check(sink.Halts.Contains(("HALT", 2)), "IBKR's Halted tick reaches the bridge, 2 for a volatility pause");
     Check(sink.OddLots.GetValueOrDefault("ODD") == 1 && sink.Prints.GetValueOrDefault("ODD")?.Count == 3, "odd lots still reach the tape, marked so the band skips them");
     Check(sink.Reopenings.GetValueOrDefault("ODD") == 1, "IBKR's condition 5 reaches the bridge marked as a reopening print");
+
+    // A DOM moved off a paused symbol: its quote is cancelled, and a new one won't say the pause ended.
+    client.SetQuote("HALT", false);
+    while (timer.Elapsed < TimeSpan.FromSeconds(10) && !gateway.MarketDataCancels.Contains(smartQuote.Id))
+        await Task.Delay(20);
+    gateway.SendPrint("F");
+    await Task.Delay(300);
+    Check(sink.QuoteStops.Contains("HALT"), "a cancelled quote tells the bridge its halt isn't watched any more");
+    client.SetTape("ODD", false);
+    await Task.Delay(300);
+    Check(!sink.QuoteStops.Contains("ODD"), "a cancelled tape doesn't");
     await client.StopAsync();
 
     // The Res row's countdown: seconds to the next 5-minute mark from a pause seen to start.
@@ -793,6 +815,10 @@ async Task RunLuld()
     pauses.OnHalted("MISSED", 0, 2, t0);
     pauses.OnHalted("MISSED", -1, 2, t0 + Sec(7200));
     Check(pauses.SecondsLeft("MISSED", t0 + Sec(7200)) == null, "a start over an hour old, met again with nothing between, is from a reopening the plugin missed");
+    pauses.OnHalted("SWITCHED", 0, 2, t0);
+    pauses.Forget("SWITCHED");
+    pauses.OnHalted("SWITCHED", -1, 2, t0 + Sec(900));
+    Check(pauses.SecondsLeft("SWITCHED", t0 + Sec(900)) == null, "a cancelled stream forgets the start: the pause met later may be another one");
 }
 
 // The slow-update diagnostics: off by default, and slow work matched against garbage collection pauses.
@@ -2565,6 +2591,10 @@ internal sealed class IbkrTestSink : IIbkrSink
     public readonly System.Collections.Concurrent.ConcurrentQueue<(string Symbol, int Halted)> Halts = new();
 
     public void OnIbkrHalted(string symbol, int halted) => this.Halts.Enqueue((symbol, halted));
+
+    public readonly System.Collections.Concurrent.ConcurrentQueue<string> QuoteStops = new();
+
+    public void OnIbkrQuoteStopped(string symbol) => this.QuoteStops.Enqueue(symbol);
 
     public readonly ConcurrentQueue<(string Symbol, int Tick, double Value)> Auctions = new();
 

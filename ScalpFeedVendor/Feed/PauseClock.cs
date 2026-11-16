@@ -10,10 +10,11 @@ namespace ScalpFeedVendor.Feed;
 /// NXXT reopened 300.2, 599.9 (one extension) and 299.9 s after IBKR's Halted tick said 2, and WHLR 300.1 s.
 /// The start is IBKR's tick arriving, so it can be a fraction of a second late.
 ///
-/// A start is only known when the symbol was seen trading first. One already paused when first seen (opened
-/// mid-pause) has none, and nor has a regulatory halt (Halted 1), which has no set reopening time. Starts are
-/// kept here rather than per vendor, so Quantower's reconnects, which build new symbol states that first see
-/// the pause as new, don't lose them.
+/// A start is only known when the symbol was seen trading first on the same IBKR stream. One already paused when
+/// first seen (opened mid-pause) has none, and nor has a regulatory halt (Halted 1), which has no set reopening
+/// time. A cancelled stream forgets its start, since the reopening could pass unwatched. Starts are kept here
+/// rather than per vendor, so Quantower's reconnects, which build new symbol states that first see the pause
+/// as new, don't lose them, and nor do IBKR reconnects, which are usually seconds.
 /// </summary>
 internal sealed class PauseClock
 {
@@ -44,6 +45,9 @@ internal sealed class PauseClock
 
         this.starts.TryRemove(symbol, out _);
     }
+
+    /// <summary>IBKR stopped streaming the symbol, so its reopening could pass unseen and the start mean nothing.</summary>
+    public void Forget(string symbol) => this.starts.TryRemove(symbol, out _);
 
     /// <summary>Seconds until the reopening is due, 300 down to 1, or null when the pause's start isn't known.</summary>
     public int? SecondsLeft(string symbol, long stamp) =>
