@@ -194,10 +194,41 @@ switch (args[0])
     case "float":
         await RunFloat();
         break;
+    case "rvol":
+        await RunRvol(args[1..]);
+        break;
 }
 
 Console.WriteLine(failures == 0 ? "\nALL CHECKS PASSED" : $"\n{failures} CHECK(S) FAILED");
 return failures == 0 ? 0 : 1;
+
+// RVOL's arithmetic, then, for any symbols given, today's figure from tastytrade's daily candles (read-only).
+async Task RunRvol(string[] symbols)
+{
+    var today = new DateTime(2026, 11, 16);
+    var sessions = Enumerable.Range(1, 60).Select(i => (today.AddDays(-i), (double)i)).ToList();
+    sessions.Add((today, 1_000_000));
+    Check(RelativeVolumeMath.Average(sessions, today) == 25.5, "the average is of the 50 sessions before today, today's left out");
+    Check(double.IsNaN(RelativeVolumeMath.Average(sessions.Take(4), today)) && RelativeVolumeMath.Average(sessions.Take(5), today) == 3, "with under 5 sessions there's none; with 5 it's their average");
+    Check(RelativeVolumeMath.Ratio(51, 25.5) == 2 && double.IsNaN(RelativeVolumeMath.Ratio(10, 0)) && double.IsNaN(RelativeVolumeMath.Ratio(double.NaN, 5)), "RVOL is today over the average, and nothing without either");
+    Check(RelativeVolumeMath.TodayEt(new DateTime(2026, 11, 17, 3, 0, 0, DateTimeKind.Utc)) == today && RelativeVolumeMath.TodayEt(new DateTime(2026, 11, 17, 6, 0, 0, DateTimeKind.Utc)) == today.AddDays(1), "today is the Eastern date");
+
+    if (symbols.Length == 0)
+        return;
+
+    using var client = api();
+    var history = new HistoryClient(async (force, ct) => await client.GetQuoteTokenAsync(ct));
+    var now = DateTime.UtcNow;
+    var todayEt = RelativeVolumeMath.TodayEt(now);
+    foreach (var symbol in symbols)
+    {
+        var bars = await history.LoadAsync(symbol + "{=1d}", now.AddDays(-100), now, CancellationToken.None);
+        var days = bars.Select(b => (DateTimeOffset.FromUnixTimeMilliseconds(b.TimeMs).UtcDateTime, b.Volume)).ToList();
+        double avg = RelativeVolumeMath.Average(days, todayEt);
+        double todayVolume = days.LastOrDefault().Item1.Date == todayEt ? days[^1].Volume : double.NaN;
+        Console.WriteLine($"RESULT {symbol,-5} today {todayVolume:#,0}  50-day average {avg:#,0} over {days.Count(d => d.Item1.Date < todayEt)} sessions  RVOL {RelativeVolumeMath.Ratio(todayVolume, avg):0.00}");
+    }
+}
 
 // The float from stockanalysis.com through Firecrawl, against canned answers: nothing is sent anywhere.
 async Task RunFloat()
