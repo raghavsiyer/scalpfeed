@@ -51,7 +51,7 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
     {
         ["Quote"] = ["eventType", "eventSymbol", "bidTime", "askTime", "bidPrice", "bidSize", "askPrice", "askSize"],
         ["TimeAndSale"] = ["eventType", "eventSymbol", "eventFlags", "index", "time", "exchangeCode", "price", "size", "bidPrice", "askPrice", "aggressorSide", "extendedTradingHours", "validTick", "type", "exchangeSaleConditions"],
-        ["Trade"] = ["eventType", "eventSymbol", "time", "price", "size", "dayVolume", "extendedTradingHours"],
+        ["Trade"] = ["eventType", "eventSymbol", "time", "price", "size", "dayVolume", "dayTurnover", "extendedTradingHours"],
         ["Summary"] = ["eventType", "eventSymbol", "dayOpenPrice", "dayHighPrice", "dayLowPrice", "dayClosePrice", "prevDayClosePrice", "prevDayVolume"]
     };
 
@@ -71,6 +71,9 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
     private DateTime nextAveragesUtc;
 
     private const string TopGainersList = "IBKR Top Gainers";
+
+    /// <summary>The Quote asset volume column shows the day's dollar volume in hundreds: $15.0M reads 150,126.</summary>
+    private const double DollarVolumeUnit = 100;
     private readonly object topGainersGate = new();
     private IReadOnlyList<string> topGainersSent;
     private IReadOnlyList<string> topGainersNext;
@@ -683,6 +686,8 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
         bool volumeRose = row.DayVolume > state.DayVolume;
         if (!double.IsNaN(row.DayVolume))
             state.DayVolume = row.DayVolume;
+        if (!double.IsNaN(row.DayTurnover))
+            state.DayTurnover = row.DayTurnover;
 
         // Volume rising with no TimeAndSale at all means prints exist but aren't reaching us.
         if (volumeRose && state.LastOn && !this.printsSeen)
@@ -845,20 +850,21 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
             }
         }
 
-        // Quantower's Free version runs no indicators in a Watchlist, so the float and RVOL go in columns that
-        // stocks leave empty: the float, in shares, as open interest, and RVOL as both the quote asset volume
-        // and the previous settlement, until it's seen which of the two the Watchlist shows as a plain number.
-        // Blank when the float is unknown or doubtful (FloatFacts), or there's no average yet (VolumeAverages).
+        // Quantower's Free version runs no indicators in a Watchlist, so these go in columns that stocks leave
+        // empty: the float, in shares, as open interest; RVOL as the previous settlement, where it reads as a plain
+        // number; and the day's dollar volume, in hundreds of dollars (your choice, 2026-11-16), as the quote asset
+        // volume. Blank when the float is unknown or doubtful (FloatFacts), or there's no average yet (VolumeAverages).
         if (this.floats?.Get(state.Id) is { Known: true, Doubtful: false } facts)
             bar.OpenInterest = facts.Float;
 
         double rvol = RelativeVolumeMath.Ratio(state.DayVolume, this.averages?.Get(state.Streamer) ?? double.NaN);
         if (!double.IsNaN(rvol))
         {
-            rvol = Math.Round(rvol, 2);
-            bar.QuoteAssetVolume = rvol;
-            bar.PrevSettlementPrice = rvol;
+            bar.PrevSettlementPrice = Math.Round(rvol, 2);
         }
+
+        if (state.DayTurnover > 0)
+            bar.QuoteAssetVolume = Math.Round(state.DayTurnover / DollarVolumeUnit);
 
         this.PushMessage(bar);
     }

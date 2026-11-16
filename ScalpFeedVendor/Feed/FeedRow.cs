@@ -51,6 +51,9 @@ internal sealed class FeedRow
     public double BidSize;
     public double AskSize;
     public double DayVolume;
+
+    /// <summary>Trade's dayTurnover: the day's whole-market dollar volume, summed with dayVolume.</summary>
+    public double DayTurnover;
     public double Open;
     public double High;
     public double Low;
@@ -87,6 +90,7 @@ internal sealed class FeedRow
         this.BidSize = double.NaN;
         this.AskSize = double.NaN;
         this.DayVolume = double.NaN;
+        this.DayTurnover = double.NaN;
         this.Open = double.NaN;
         this.High = double.NaN;
         this.Low = double.NaN;

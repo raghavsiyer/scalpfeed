@@ -1651,6 +1651,8 @@ void RunParse(string path)
     Check(sink.Quotes == expectedQuotes, $"quotes parsed {sink.Quotes} = expected {expectedQuotes}");
     Check(sink.Prints == expectedPrints, $"prints parsed {sink.Prints} = expected {expectedPrints}");
     Check(sink.Trades == expectedTrades, $"trades parsed {sink.Trades} = expected {expectedTrades}");
+    if (widths.TryGetValue("Trade", out _) && sink.Trades > 0)
+        Console.WriteLine($"RESULT last trade: day volume {sink.LastDayVolume:#,0}, dollar volume {sink.LastDayTurnover:#,0}");
     Check(sink.Candles == expectedCandles, $"candles parsed {sink.Candles} = expected {expectedCandles}");
     Check(sink.Summaries == expectedSummaries, $"summaries parsed {sink.Summaries} = expected {expectedSummaries}");
     Check(sink.LastQuote.Bid > 0 && sink.LastQuote.Ask >= sink.LastQuote.Bid, $"last quote sane: {sink.LastQuote}");
@@ -3315,7 +3317,15 @@ internal sealed class CountingSink : IFeedSink
         this.LastPrint = (row.Symbol.Name, row.Price, row.Size, row.Time, row.Exchange);
     }
 
-    public void OnTrade(FeedRow row) => this.Trades++;
+    public double LastDayVolume = double.NaN;
+    public double LastDayTurnover = double.NaN;
+
+    public void OnTrade(FeedRow row)
+    {
+        this.Trades++;
+        this.LastDayVolume = row.DayVolume;
+        this.LastDayTurnover = row.DayTurnover;
+    }
 
     public void OnSummary(FeedRow row) => this.Summaries++;
 

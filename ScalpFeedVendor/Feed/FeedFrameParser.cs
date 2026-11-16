@@ -14,7 +14,7 @@ internal sealed class FeedFrameParser
     private enum Column : byte
     {
         Skip, Symbol, Flags, Index, Time, BidTime, AskTime, Count, Price, Size, Bid, Ask, BidSize, AskSize,
-        DayVolume, Open, High, Low, Close, Volume, PrevClose, PrevVolume, Exchange, Aggressor, Sale, ExtendedHours, ValidTick, Conditions
+        DayVolume, DayTurnover, Open, High, Low, Close, Volume, PrevClose, PrevVolume, Exchange, Aggressor, Sale, ExtendedHours, ValidTick, Conditions
     }
 
     private static readonly Dictionary<string, Column> CommonColumns = new()
@@ -33,6 +33,7 @@ internal sealed class FeedFrameParser
         ["bidSize"] = Column.BidSize,
         ["askSize"] = Column.AskSize,
         ["dayVolume"] = Column.DayVolume,
+        ["dayTurnover"] = Column.DayTurnover,
         ["dayOpenPrice"] = Column.Open,
         ["dayHighPrice"] = Column.High,
         ["dayLowPrice"] = Column.Low,
@@ -275,6 +276,9 @@ internal sealed class FeedFrameParser
                 break;
             case Column.DayVolume:
                 r.DayVolume = ReadDouble(ref reader);
+                break;
+            case Column.DayTurnover:
+                r.DayTurnover = ReadDouble(ref reader);
                 break;
             case Column.Open:
                 r.Open = ReadDouble(ref reader);

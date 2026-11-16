@@ -64,6 +64,7 @@ internal sealed class SymbolState
     public double LastPrice = double.NaN;
     public double LastSize = double.NaN;
     public double DayVolume = double.NaN;
+    public double DayTurnover = double.NaN;
     public double Open = double.NaN;
     public double High = double.NaN;
     public double Low = double.NaN;
