@@ -686,6 +686,7 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
         state.High = row.High;
         state.Low = row.Low;
         state.PrevClose = row.PrevClose;
+        state.DayClose = row.Close;
         state.NextDayBarTicks = 0;
         this.MaybePushDayBar(state, row.ArrivalUtcTicks);
     }
@@ -813,11 +814,13 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
             if (!double.IsNaN(state.LastSize))
                 bar.LastSize = state.LastSize;
 
-            // Measured from the previous close, so premarket moves show up as they happen.
-            if (state.PrevClose > 0)
+            // Measured from the previous close, so premarket moves show up as they happen, and after the close
+            // from the session's own close, as the after-hours gainers list ranks them (DayChange).
+            double from = DayChange.Base(new DateTime(nowTicks, DateTimeKind.Utc), state.PrevClose, state.DayClose);
+            if (from > 0)
             {
-                bar.Change = state.LastPrice - state.PrevClose;
-                bar.ChangePercentage = bar.Change / state.PrevClose * 100;
+                bar.Change = state.LastPrice - from;
+                bar.ChangePercentage = bar.Change / from * 100;
             }
         }
 

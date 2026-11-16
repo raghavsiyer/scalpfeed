@@ -68,4 +68,7 @@ internal sealed class SymbolState
     public double High = double.NaN;
     public double Low = double.NaN;
     public double PrevClose = double.NaN;
+
+    // dxFeed's Summary dayClosePrice: the session's close once it's in, which after hours the change is measured from.
+    public double DayClose = double.NaN;
 }

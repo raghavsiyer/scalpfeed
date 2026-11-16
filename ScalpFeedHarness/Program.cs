@@ -197,6 +197,9 @@ switch (args[0])
     case "rvol":
         await RunRvol(args[1..]);
         break;
+    case "daychange":
+        RunDayChange();
+        break;
     case "scan":
         await RunScan(args.Length > 1 ? int.Parse(args[1], CultureInfo.InvariantCulture) : 0, args.Length > 2 ? args[2] : null);
         break;
@@ -294,6 +297,23 @@ async Task RunScan(int port, string liveCode)
     Console.WriteLine($"RESULT {live.Scans.Count} lists in {wait.Elapsed.TotalSeconds:F1} s");
     Check(live.Scans.Count >= 2, "the real Gateway answers scan after scan");
     await real.StopAsync();
+}
+
+// What the day's change is measured from: the previous close, or after the close the session's own.
+void RunDayChange()
+{
+    var eastern = TimeZoneInfo.FindSystemTimeZoneById("Eastern Standard Time");
+    DateTime Et(int day, int h, int m) => TimeZoneInfo.ConvertTimeToUtc(new DateTime(2026, 11, day, h, m, 0, DateTimeKind.Unspecified), eastern);
+    double Change(DateTime utc, double last, double prev, double close) => Math.Round((last / DayChange.Base(utc, prev, close) - 1) * 100);
+
+    // FCUV on Monday 2026-11-16: Friday's close 7.08, Monday's 4.72, after hours about 5.86.
+    Check(Change(Et(16, 16, 50), 5.86, 7.08, 4.72) == 24, $"after the close it's from today's close: FCUV +24%, not -17% ({Change(Et(16, 16, 50), 5.86, 7.08, 4.72)})");
+    Check(Change(Et(16, 15, 59), 4.80, 7.08, 4.72) == -32, "in the session it's from the previous close");
+    Check(Change(Et(16, 7, 0), 5.00, 7.08, double.NaN) == -29, "and premarket, with no close for the day yet");
+    Check(Change(Et(17, 2, 0), 5.86, 7.08, 4.72) == 24 && Change(Et(17, 2, 0), 5.86, 4.72, double.NaN) == 24, "overnight it's the evening's close, before or after the Summary rolls to the next day");
+    Check(Change(Et(17, 4, 0), 6.00, 4.72, double.NaN) == 27, "from 4:00 premarket it's from the previous close again");
+    Check(Change(Et(21, 11, 0), 5.00, 4.50, 4.00) == 25 && Change(Et(22, 23, 0), 5.00, 4.50, 4.00) == 25, "all weekend it's from Friday's close");
+    Check(DayChange.Base(Et(16, 17, 0), 7.08, double.NaN) == 7.08, "after the close with no close known yet, it's still the previous close");
 }
 
 // RVOL's arithmetic, then, for any symbols given, today's figure from tastytrade's daily candles (read-only).
