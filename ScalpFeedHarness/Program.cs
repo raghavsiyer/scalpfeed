@@ -197,10 +197,60 @@ switch (args[0])
     case "rvol":
         await RunRvol(args[1..]);
         break;
+    case "scan":
+        await RunScan(args.Length > 1 ? int.Parse(args[1], CultureInfo.InvariantCulture) : 0);
+        break;
 }
 
 Console.WriteLine(failures == 0 ? "\nALL CHECKS PASSED" : $"\n{failures} CHECK(S) FAILED");
 return failures == 0 ? 0 : 1;
+
+// IBKR's top gainers scanner against the stand-in, then, given a port, on the real Gateway (read-only).
+async Task RunScan(int port)
+{
+    Check(IbkrScan.From(JsonNode.Parse("false")) == null && IbkrScan.From(null) == new IbkrScan(), "topGainers in ibkr.json: false turns it off, and it's on by default");
+    var custom = IbkrScan.From(JsonNode.Parse("""{"priceAbove":1,"priceBelow":20,"volumeAbove":100000}"""));
+    Check(custom == new IbkrScan(PriceAbove: 1, PriceBelow: 20, VolumeAbove: 100000), "its filters can be set");
+
+    using (var gateway = new FakeGateway())
+    {
+        var sink = new IbkrTestSink();
+        var client = new IbkrClient(new IbkrConfig(true, "127.0.0.1", gateway.Port, 1, false, TopGainers: custom));
+        client.SetSink(sink);
+        client.Start();
+        var timer = Stopwatch.StartNew();
+        while (timer.Elapsed < TimeSpan.FromSeconds(10) && gateway.ScanRequests.IsEmpty)
+            await Task.Delay(20);
+        var f = gateway.ScanRequests.FirstOrDefault() ?? [];
+        Check(f.Length == 26 && f[0] == "22" && f[1] == IbkrClient.ScanRequestId.ToString(CultureInfo.InvariantCulture) && f[2] == "50" && f[3] == "STK"
+              && f[4] == "STK.US.MAJOR" && f[5] == "TOP_PERC_GAIN" && f[6] == "1" && f[7] == "20" && f[8] == "100000" && f[19] == "0",
+            $"the scanner is asked for once live, with its filters ({string.Join("|", f)})");
+
+        gateway.SendScan(IbkrClient.ScanRequestId, ("GDHG", "STK"), ("BRK B", "STK"), ("XYZ", "WAR"), ("GMM", "STK"));
+        gateway.SendScan(12345, ("NOPE", "STK"));
+        while (timer.Elapsed < TimeSpan.FromSeconds(10) && sink.Scans.IsEmpty)
+            await Task.Delay(20);
+        await Task.Delay(200);
+        Check(sink.Scans.Count == 1 && sink.Scans.First().SequenceEqual(new[] { "GDHG", "BRK B", "GMM" }), $"its rows reach the bridge in rank order, stocks only ({string.Join(" ", sink.Scans.FirstOrDefault() ?? [])})");
+        await client.StopAsync();
+    }
+
+    if (port == 0)
+        return;
+
+    var live = new IbkrTestSink();
+    var real = new IbkrClient(new IbkrConfig(true, "127.0.0.1", port, 87, IbkrConfig.Load().AllowLiveAccount, TopGainers: new IbkrScan()));
+    real.SetSink(live);
+    real.Start();
+    var wait = Stopwatch.StartNew();
+    while (wait.Elapsed < TimeSpan.FromSeconds(75) && live.Scans.Count < 2)
+        await Task.Delay(100);
+    foreach (var scan in live.Scans)
+        Console.WriteLine($"RESULT {scan.Count} rows: {string.Join(" ", scan)}");
+    Console.WriteLine($"RESULT {live.Scans.Count} lists in {wait.Elapsed.TotalSeconds:F0} s");
+    Check(!live.Scans.IsEmpty && live.Scans.First().Count > 0, "the real Gateway answers with a list");
+    await real.StopAsync();
+}
 
 // RVOL's arithmetic, then, for any symbols given, today's figure from tastytrade's daily candles (read-only).
 async Task RunRvol(string[] symbols)
@@ -502,7 +552,7 @@ async Task RunVenueTops()
     await Task.Delay(100);
     Check(gateway.MarketDataCancels.Count(venueIds.Contains) == 2, $"the venue quotes are cancelled with the depth, all but the refused one ({gateway.MarketDataCancels.Count(venueIds.Contains)})");
     Check(client.State == IbkrState.Live, "the canary is untouched");
-    Check(IbkrClient.AllowedRequests.SetEquals(new[] { 71, 59, 1, 2, 10, 11, 97, 98, 20, 25 }), "the whitelist is unchanged");
+    Check(IbkrClient.AllowedRequests.SetEquals(new[] { 71, 59, 1, 2, 10, 11, 97, 98, 20, 25, 22 }), "the whitelist is unchanged: market data, history and the scanner, no orders");
 
     await client.StopAsync();
 }
@@ -2741,6 +2791,10 @@ internal sealed class IbkrTestSink : IIbkrSink
 
     public void OnIbkrQuoteStopped(string symbol) => this.QuoteStops.Enqueue(symbol);
 
+    public readonly System.Collections.Concurrent.ConcurrentQueue<IReadOnlyList<string>> Scans = new();
+
+    public void OnIbkrScan(IReadOnlyList<string> symbols) => this.Scans.Enqueue(symbols);
+
     public readonly ConcurrentQueue<(string Symbol, int Tick, double Value)> Auctions = new();
 
     public bool OnIbkrAuction(string symbol, int tick, double value)
@@ -2950,6 +3004,9 @@ internal sealed class FakeGateway : IDisposable
                             lock (this.gate)
                                 this.HistoryCancels.Add(int.Parse(f[2], CultureInfo.InvariantCulture));
                             break;
+                        case "22":
+                            this.ScanRequests.Enqueue(f);
+                            break;
                     }
                 }
             }
@@ -2957,6 +3014,18 @@ internal sealed class FakeGateway : IDisposable
             {
             }
         }
+    }
+
+    /// <summary>Each reqScannerSubscription's fields, as sent.</summary>
+    public ConcurrentQueue<string[]> ScanRequests { get; } = new();
+
+    /// <summary>A scannerData answer: each row a symbol and its type, ranked in the order given.</summary>
+    public void SendScan(int id, params (string Symbol, string Type)[] rows)
+    {
+        var text = new StringBuilder($"20\03\0{id}\0{rows.Length}\0");
+        for (int i = 0; i < rows.Length; i++)
+            text.Append($"{i}\0{1000 + i}\0{rows[i].Symbol}\0{rows[i].Type}\0\0\0\0SMART\0USD\0{rows[i].Symbol}\0NMS\0{rows[i].Symbol}\0\0\0\0\0");
+        this.Send(text.ToString());
     }
 
     private void OnMarketDataRequest(int id, string symbol, string exchange)

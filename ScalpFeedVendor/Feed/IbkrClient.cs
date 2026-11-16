@@ -13,7 +13,44 @@ namespace ScalpFeedVendor.Feed;
 /// <summary>Where the tape comes from: IBKR alone, tastytrade plus IBKR's other venues, or tastytrade alone.</summary>
 internal enum TapeMode { Ibkr, Merged, Tastytrade }
 
-internal sealed record IbkrConfig(bool Enabled, string Host, int Port, int ClientId, bool AllowLiveAccount, int DepthRows = 50, TapeMode Tape = TapeMode.Ibkr, int TradingClientIdSetting = 0)
+/// <summary>
+/// An IBKR market scanner the client keeps running while connected (your request, 2026-11-16): by default the top
+/// 50 percentage gainers on the US listing exchanges (STK.US.MAJOR leaves out OTC). Filters left NaN or 0 are off.
+/// </summary>
+internal sealed record IbkrScan(string Code = "TOP_PERC_GAIN", string Location = "STK.US.MAJOR", int Rows = 50, double PriceAbove = double.NaN, double PriceBelow = double.NaN, int VolumeAbove = 0)
+{
+    /// <summary>From ibkr.json's topGainers: false turns it off, an object changes what it asks for.</summary>
+    public static IbkrScan From(JsonNode json)
+    {
+        if (json is JsonValue v && v.TryGetValue(out bool on))
+            return on ? new IbkrScan() : null;
+        if (json is not JsonObject o)
+            return new IbkrScan();
+
+        var d = new IbkrScan();
+        return new IbkrScan(
+            (string)o["scanCode"] ?? d.Code,
+            (string)o["location"] ?? d.Location,
+            o["rows"]?.GetValue<int>() ?? d.Rows,
+            o["priceAbove"]?.GetValue<double>() ?? d.PriceAbove,
+            o["priceBelow"]?.GetValue<double>() ?? d.PriceBelow,
+            o["volumeAbove"]?.GetValue<int>() ?? d.VolumeAbove);
+    }
+
+    /// <summary>reqScannerSubscription for server versions 143 and up, which take filter options and no version field.</summary>
+    public object[] Request(int id) =>
+    [
+        22, id, this.Rows, "STK", this.Location, this.Code,
+        Optional(this.PriceAbove), Optional(this.PriceBelow), this.VolumeAbove > 0 ? this.VolumeAbove : "",
+        "", "", "", "", "", "", "", "", "", "", // market cap, ratings, maturity and coupon bounds
+        false, "", "", "", // exclude convertibles, option volume, setting pairs, stock type
+        "", "", // filter options, subscription options
+    ];
+
+    private static object Optional(double value) => double.IsNaN(value) ? "" : value;
+}
+
+internal sealed record IbkrConfig(bool Enabled, string Host, int Port, int ClientId, bool AllowLiveAccount, int DepthRows = 50, TapeMode Tape = TapeMode.Ibkr, int TradingClientIdSetting = 0, IbkrScan TopGainers = null)
 {
     public static string FilePath => Path.Combine(Log.AppDir, "ibkr.json");
 
@@ -23,7 +60,7 @@ internal sealed record IbkrConfig(bool Enabled, string Host, int Port, int Clien
     /// <summary>Reads ibkr.json, which is optional. The defaults suit a paper IB Gateway.</summary>
     public static IbkrConfig Load()
     {
-        var config = new IbkrConfig(true, "127.0.0.1", 4002, 78, false);
+        var config = new IbkrConfig(true, "127.0.0.1", 4002, 78, false, TopGainers: new IbkrScan());
         try
         {
             if (!File.Exists(FilePath))
@@ -38,7 +75,8 @@ internal sealed record IbkrConfig(bool Enabled, string Host, int Port, int Clien
                 json["allowLiveAccount"]?.GetValue<bool>() ?? config.AllowLiveAccount,
                 json["depthRows"]?.GetValue<int>() ?? config.DepthRows,
                 Enum.TryParse<TapeMode>((string)json["tape"], true, out var tape) ? tape : config.Tape,
-                json["tradingClientId"]?.GetValue<int>() ?? config.TradingClientIdSetting);
+                json["tradingClientId"]?.GetValue<int>() ?? config.TradingClientIdSetting,
+                IbkrScan.From(json["topGainers"]));
         }
         catch (Exception ex) when (ex is JsonException or InvalidOperationException or IOException)
         {
@@ -72,6 +110,9 @@ internal interface IIbkrSink
     /// A new stream sends the Halted tick only when it isn't 0, so nothing would say a pause had ended meanwhile.
     /// </summary>
     void OnIbkrQuoteStopped(string symbol);
+
+    /// <summary>The scanner's latest list, best first, in IBKR's symbols. It comes again whenever IBKR updates it.</summary>
+    void OnIbkrScan(IReadOnlyList<string> symbols);
 
     /// <summary>
     /// One of the listing market's auction numbers, from the symbol's quote: <see cref="IbkrClient.AuctionPriceTick"/>,
@@ -116,9 +157,12 @@ internal sealed class IbkrClient
 
     /// <summary>
     /// startApi, reqMarketDataType, reqMktData, cancelMktData, reqMktDepth, cancelMktDepth,
-    /// reqTickByTickData, cancelTickByTickData, reqHistoricalData, cancelHistoricalData.
+    /// reqTickByTickData, cancelTickByTickData, reqHistoricalData, cancelHistoricalData, reqScannerSubscription.
     /// </summary>
-    public static readonly IReadOnlySet<int> AllowedRequests = new HashSet<int> { 71, 59, 1, 2, 10, 11, 97, 98, 20, 25 };
+    public static readonly IReadOnlySet<int> AllowedRequests = new HashSet<int> { 71, 59, 1, 2, 10, 11, 97, 98, 20, 25, 22 };
+
+    /// <summary>The scanner's request id, far above the streams' and history's, which count up from 1.</summary>
+    public const int ScanRequestId = 2_000_000_000;
 
     private const string ClientVersions = "v100..176";
     private const int FlushDelayMs = 20;
@@ -228,6 +272,8 @@ internal sealed class IbkrClient
 
     /// <summary>Tastytrade symbols write share classes as BRK/B; IBKR writes BRK B.</summary>
     public static string ToIbkrSymbol(string symbol) => symbol.Replace('/', ' ');
+
+    public static string FromIbkrSymbol(string symbol) => symbol.Replace(' ', '/');
 
     public void SetSink(IIbkrSink newSink) => Volatile.Write(ref this.sink, newSink);
 
@@ -533,6 +579,13 @@ internal sealed class IbkrClient
             this.subscribed = true;
             foreach (var key in everything)
                 await this.RequestAsync(key).ConfigureAwait(false);
+
+            // Each connection starts it again: a scanner ends with the socket.
+            if (this.config.TopGainers is { } scan)
+            {
+                await this.SendAsync(CancellationToken.None, scan.Request(ScanRequestId)).ConfigureAwait(false);
+                Log.Info($"[scan] asked IBKR for {scan.Code} on {scan.Location}, {scan.Rows} rows");
+            }
         }
         catch (Exception ex) when (ex is IOException or ObjectDisposedException or InvalidOperationException)
         {
@@ -964,7 +1017,36 @@ internal sealed class IbkrClient
             case 17:
                 this.OnHistoricalData(ref f);
                 break;
+            case 20:
+                f.Skip();
+                this.OnScannerData(ref f);
+                break;
         }
+    }
+
+    private void OnScannerData(ref FieldReader f)
+    {
+        if (f.Int() != ScanRequestId)
+            return;
+
+        int count = f.Int();
+        var symbols = new List<string>(Math.Max(count, 0));
+        for (int i = 0; i < count; i++)
+        {
+            f.Skip(); // Rank: the rows come in order.
+            f.Skip(); // Contract id.
+            string symbol = f.Text();
+            bool stock = f.Text() == "STK";
+
+            // Expiry, strike, right, exchange, currency, local symbol, market, trading class, distance,
+            // benchmark, projection and legs.
+            for (int k = 0; k < 12; k++)
+                f.Skip();
+            if (stock)
+                symbols.Add(symbol);
+        }
+
+        Volatile.Read(ref this.sink)?.OnIbkrScan(symbols);
     }
 
     private void OnHistoricalData(ref FieldReader f)

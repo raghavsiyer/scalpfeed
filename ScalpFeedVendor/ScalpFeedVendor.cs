@@ -16,7 +16,7 @@ namespace ScalpFeedVendor;
 /// </summary>
 public sealed class ScalpFeedVendor : MultiVendor
 {
-    private const string VendorName = "ScalpFeed";
+    public const string VendorName = "ScalpFeed";
     private const string TastytradeKey = "tasty";
 
     private TastytradeMarketVendor marketData;

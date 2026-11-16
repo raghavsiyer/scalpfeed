@@ -65,10 +65,13 @@ internal sealed class IbkrBridge : IIbkrSink
     private IbkrClient client;
     private DateTime notLiveSinceUtc;
 
-    public IbkrBridge(Action<Message> push, PrintHandler emitPrint)
+    private readonly Action<IReadOnlyList<string>> topGainers;
+
+    public IbkrBridge(Action<Message> push, PrintHandler emitPrint, Action<IReadOnlyList<string>> topGainers = null)
     {
         this.push = push;
         this.emitPrint = emitPrint;
+        this.topGainers = topGainers;
         this.bidIds = Enumerable.Range(0, 200).Select(i => "b" + i).ToArray();
         this.askIds = Enumerable.Range(0, 200).Select(i => "a" + i).ToArray();
     }
@@ -238,6 +241,10 @@ internal sealed class IbkrBridge : IIbkrSink
         if (wasKnown || halted > 0)
             Log.Info($"[luld] {symbol} {(halted == 2 ? "volatility pause" : halted > 0 ? "halted" : "trading again; the reopening print sets the band")}");
     }
+
+    /// <summary>The scanner's list, in tastytrade's symbols.</summary>
+    public void OnIbkrScan(IReadOnlyList<string> symbols) =>
+        this.topGainers?.Invoke(symbols.Select(IbkrClient.FromIbkrSymbol).ToList());
 
     public void OnIbkrQuoteStopped(string symbol)
     {

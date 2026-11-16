@@ -67,6 +67,12 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
     private HistoryClient history;
     private IbkrBridge ibkr;
     private FloatSource floats;
+
+    private const string TopGainersList = "IBKR Top Gainers";
+    private readonly object topGainersGate = new();
+    private IReadOnlyList<string> topGainersSent;
+    private IReadOnlyList<string> topGainersNext;
+    private bool topGainersLogged;
     private System.Threading.Timer flushTimer;
     private System.Threading.Timer housekeepingTimer;
     private CancellationTokenSource lifetime;
@@ -172,7 +178,7 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
 
             // Gateway being closed mustn't fail the connection: tape and charts still work,
             // and the quote stays on tastytrade until IBKR answers.
-            this.ibkr = new IbkrBridge(this.TimedPush, this.OnIbkrPrint);
+            this.ibkr = new IbkrBridge(this.TimedPush, this.OnIbkrPrint, this.OnTopGainers);
             this.ibkr.Start();
             this.floats = new FloatSource(this.OnFloatArrived);
 
@@ -376,6 +382,76 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
         SortIndex = sortIndex,
         Value = value,
     };
+
+    /// <summary>
+    /// IBKR's top gainers, kept as a symbol list you open in a Watchlist. Looking the symbols up can call back into
+    /// this connection (a symbol it hasn't made yet), so it runs off IBKR's thread, one list at a time, and a list
+    /// the same as the last is left alone.
+    /// </summary>
+    private void OnTopGainers(IReadOnlyList<string> symbols)
+    {
+        lock (this.topGainersGate)
+        {
+            if (this.topGainersSent != null && symbols.SequenceEqual(this.topGainersSent))
+                return;
+
+            bool idle = this.topGainersNext == null;
+            this.topGainersNext = symbols;
+            if (idle)
+                _ = Task.Run(this.PublishTopGainers);
+        }
+    }
+
+    private void PublishTopGainers()
+    {
+        while (true)
+        {
+            IReadOnlyList<string> names;
+            lock (this.topGainersGate)
+            {
+                names = this.topGainersNext;
+                if (names == null)
+                    return;
+            }
+
+            try
+            {
+                string connectionId = Core.Instance.Connections.Connected.FirstOrDefault(c => c.VendorName == ScalpFeedVendor.VendorName)?.Id;
+                var symbols = new List<Symbol>();
+                foreach (var name in names)
+                {
+                    // Stocks only: leveraged ETFs (SOXS, UVIX, MSTZ on 11-16) crowd a gainers list.
+                    var symbol = Core.Instance.GetSymbol(new GetSymbolRequestParameters { SymbolId = name }, connectionId);
+                    if (symbol != null && symbol.SymbolType != SymbolType.ETF)
+                        symbols.Add(symbol);
+                }
+
+                if (Core.Instance.SymbolList.Any(l => l.Name == TopGainersList))
+                    Core.Instance.ReplaceSymbolList(TopGainersList, symbols);
+                else
+                    Core.Instance.AddSymbolList(TopGainersList, symbols);
+
+                // It changes every 30 seconds or so, so only the first of each connection goes in the log.
+                if (!this.topGainersLogged)
+                    Log.Info($"[scan] {TopGainersList}: {symbols.Count} stocks of {names.Count} rows, {string.Join(" ", symbols.Take(10).Select(s => s.Name))} ...");
+                this.topGainersLogged = true;
+            }
+            catch (Exception ex)
+            {
+                Log.Info($"[scan] couldn't update {TopGainersList}: {ex.GetBaseException().Message}");
+            }
+
+            lock (this.topGainersGate)
+            {
+                this.topGainersSent = names;
+                if (ReferenceEquals(this.topGainersNext, names))
+                {
+                    this.topGainersNext = null;
+                    return;
+                }
+            }
+        }
+    }
 
     /// <summary>
     /// Sends the symbol again with its float, from the float fetcher's thread. Whether Quantower takes in a symbol
