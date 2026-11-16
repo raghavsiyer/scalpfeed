@@ -18,7 +18,8 @@ internal enum TapeMode { Ibkr, Merged, Tastytrade }
 /// 50 percentage gainers on the US listing exchanges (STK.US.MAJOR leaves out OTC). Filters left NaN or 0 are off.
 /// From 16:00 to 4:00 ET it's the after-hours gainers instead, since Top % Gainers keeps the regular session's list
 /// after the close (GMM and GDHG at 16:22 ET on 11-16, while the after-hours scan had BKHAR, PARA and DVLT).
-/// IBKR has no premarket scan.
+/// IBKR has no premarket scan, and doesn't need one: momo-algo measured on 2026-08-05 that in premarket Top %
+/// Gainers ranks premarket trades against the prior close, while the after-hours scan returns nothing after 4:00.
 /// </summary>
 internal sealed record IbkrScan(string Code = "TOP_PERC_GAIN", string AfterHoursCode = "TOP_AFTER_HOURS_PERC_GAIN", string Location = "STK.US.MAJOR", int Rows = 50, double PriceAbove = double.NaN, double PriceBelow = double.NaN, int VolumeAbove = 0)
 {
