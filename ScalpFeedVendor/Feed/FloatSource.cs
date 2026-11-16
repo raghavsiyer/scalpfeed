@@ -8,7 +8,7 @@ namespace ScalpFeedVendor.Feed;
 
 /// <summary>
 /// Fetches each symbol's float from stockanalysis.com through Firecrawl (your choice, 2026-11-16), at most once a
-/// day per symbol, one request at a time, in the background, and keeps it in float-cache.json. tastytrade has no
+/// day per symbol, when it's first quoted (a Watchlist row, chart or DOM), one request at a time, in the background, and keeps it in float-cache.json. tastytrade has no
 /// float, and its share counts are stale. Each fetch costs 5 Firecrawl credits; a symbol the site doesn't have
 /// costs nothing and isn't asked about again that day. The key is yours, in firecrawl.json, and stays out of the log.
 /// </summary>

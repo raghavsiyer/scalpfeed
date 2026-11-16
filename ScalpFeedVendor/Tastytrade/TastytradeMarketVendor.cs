@@ -320,7 +320,6 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
         this.streamerById[info.Symbol] = info.StreamerSymbol;
         this.equityBySymbol[info.Symbol] = info;
         this.GetState(info.StreamerSymbol).Id = info.Symbol;
-        this.floats?.Want(info.Symbol);
 
         return new MessageSymbol(info.Symbol)
         {
