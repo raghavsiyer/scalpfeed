@@ -172,7 +172,7 @@ var fieldSets = new Dictionary<string, string[]>
     ["TradeETH"] = ["eventType", "eventSymbol", "eventTime", "time", "timeNanoPart", "sequence", "exchangeCode", "price", "change", "size", "dayVolume", "dayTurnover", "tickDirection", "extendedTradingHours"],
     ["TimeAndSale"] = ["eventType", "eventSymbol", "eventTime", "eventFlags", "index", "time", "timeNanoPart", "sequence", "exchangeCode", "price", "size", "bidPrice", "askPrice", "exchangeSaleConditions", "tradeThroughExempt", "aggressorSide", "spreadLeg", "extendedTradingHours", "validTick", "type"],
     ["Summary"] = ["eventType", "eventSymbol", "eventTime", "dayId", "dayOpenPrice", "dayHighPrice", "dayLowPrice", "dayClosePrice", "dayClosePriceType", "prevDayId", "prevDayClosePrice", "prevDayClosePriceType", "prevDayVolume", "openInterest"],
-    ["Profile"] = ["eventType", "eventSymbol", "eventTime", "description", "shortSaleRestriction", "tradingStatus", "statusReason", "haltStartTime", "haltEndTime", "highLimitPrice", "lowLimitPrice", "high52WeekPrice", "low52WeekPrice"],
+    ["Profile"] = ["eventType", "eventSymbol", "eventTime", "description", "shortSaleRestriction", "tradingStatus", "statusReason", "haltStartTime", "haltEndTime", "highLimitPrice", "lowLimitPrice", "high52WeekPrice", "low52WeekPrice", "shares", "freeFloat"],
     ["Candle"] = ["eventType", "eventSymbol", "eventTime", "eventFlags", "index", "time", "sequence", "count", "open", "high", "low", "close", "volume", "vwap", "bidVolume", "askVolume"],
     ["Order"] = ["eventType", "eventSymbol", "eventTime", "eventFlags", "index", "time", "sequence", "source", "scope", "orderSide", "exchangeCode", "marketMaker", "price", "size", "count"]
 };
