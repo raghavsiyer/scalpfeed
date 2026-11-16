@@ -215,11 +215,17 @@ async Task RunScan(int port, string liveCode)
     var eastern = TimeZoneInfo.FindSystemTimeZoneById("Eastern Standard Time");
     DateTime Et(int h, int m, int s) => TimeZoneInfo.ConvertTimeToUtc(new DateTime(2026, 11, 16, h, m, s, DateTimeKind.Unspecified), eastern);
     var plain = new IbkrScan();
+    Check(plain is { Rows: 25, PriceAbove: 0.10, PriceBelow: 25, VolumeAbove: 50_000, ChangeAbove: 10, IntervalSeconds: 2, Location: "STK.US.MAJOR" },
+        "by default it's momo-algo's: 25 rows, $0.10-$25, over 50,000 shares, up 10%, every 2 s");
     Check(plain.CodeAt(Et(15, 59, 59)) == "TOP_PERC_GAIN" && plain.CodeAt(Et(16, 0, 0)) == "TOP_AFTER_HOURS_PERC_GAIN"
           && plain.CodeAt(Et(3, 59, 59)) == "TOP_AFTER_HOURS_PERC_GAIN" && plain.CodeAt(Et(4, 0, 0)) == "TOP_PERC_GAIN",
         "after-hours gainers from 16:00 to 4:00 ET, Top % Gainers from 4:00");
+    Check(plain.Filter("TOP_PERC_GAIN") == "changePercAbove=10;" && plain.Filter("TOP_AFTER_HOURS_PERC_GAIN") == "afterHoursChangePercAbove=10;",
+        "the change filter matches the scan: the after-hours one filters by after-hours change");
+    Check(plain.IntervalAt(Et(4, 0, 0)) == 2 && plain.IntervalAt(Et(19, 59, 59)) == 2 && plain.IntervalAt(Et(20, 0, 0)) == 60 && plain.IntervalAt(Et(3, 59, 59)) == 60,
+        "every 2 s from 4:00 to 20:00 ET, every minute outside");
 
-    var clock = Et(15, 59, 57);
+    var clock = Et(15, 59, 50);
     {
         using var gateway = new FakeGateway();
         var sink = new IbkrTestSink();
@@ -227,35 +233,49 @@ async Task RunScan(int port, string liveCode)
         client.SetSink(sink);
         client.Start();
         var timer = Stopwatch.StartNew();
-        while (timer.Elapsed < TimeSpan.FromSeconds(10) && gateway.ScanRequests.IsEmpty)
-            await Task.Delay(20);
-        var f = gateway.ScanRequests.FirstOrDefault() ?? [];
-        int first = f.Length > 1 ? int.Parse(f[1], CultureInfo.InvariantCulture) : 0;
-        Check(f.Length == 26 && f[0] == "22" && first > IbkrClient.ScanRequestId && f[2] == "50" && f[3] == "STK"
-              && f[4] == "STK.US.MAJOR" && f[5] == "TOP_PERC_GAIN" && f[6] == "1" && f[7] == "20" && f[8] == "100000" && f[19] == "0",
-            $"the scanner is asked for once live, with its filters ({string.Join("|", f)})");
+        async Task<string[]> NextRequest(int count, double seconds)
+        {
+            var until = timer.Elapsed + TimeSpan.FromSeconds(seconds);
+            while (timer.Elapsed < until && gateway.ScanRequests.Count < count)
+                await Task.Delay(10);
+            return gateway.ScanRequests.Skip(count - 1).FirstOrDefault() ?? [];
+        }
 
+        int Id(string[] request) => request.Length > 1 ? int.Parse(request[1], CultureInfo.InvariantCulture) : 0;
+
+        var f = await NextRequest(1, 10);
+        int first = Id(f);
+        Check(f.Length == 26 && f[0] == "22" && first > IbkrClient.ScanRequestId && f[2] == "25" && f[3] == "STK" && f[4] == "STK.US.MAJOR"
+              && f[5] == "TOP_PERC_GAIN" && f[6] == "1" && f[7] == "20" && f[8] == "100000" && f[19] == "0" && f[23] == "changePercAbove=10;",
+            $"a scan goes once live, with its filters ({string.Join("|", f)})");
+
+        var answered = timer.Elapsed;
         gateway.SendScan(first, ("GDHG", "STK"), ("BRK B", "STK"), ("XYZ", "WAR"), ("GMM", "STK"));
         gateway.SendScan(12345, ("NOPE", "STK"));
-        while (timer.Elapsed < TimeSpan.FromSeconds(10) && sink.Scans.IsEmpty)
-            await Task.Delay(20);
-        await Task.Delay(200);
-        Check(sink.Scans.Count == 1 && sink.Scans.First().SequenceEqual(new[] { "GDHG", "BRK B", "GMM" }), $"its rows reach the bridge in rank order, stocks only ({string.Join(" ", sink.Scans.FirstOrDefault() ?? [])})");
-
-        // The close: the regular scan is cancelled and the after-hours one asked for, under a new id.
-        clock = Et(16, 0, 1);
-        while (timer.Elapsed < TimeSpan.FromSeconds(15) && gateway.ScanRequests.Count < 2)
-            await Task.Delay(20);
-        var second = gateway.ScanRequests.Skip(1).FirstOrDefault() ?? [];
-        int next = second.Length > 1 ? int.Parse(second[1], CultureInfo.InvariantCulture) : 0;
-        Check(gateway.ScanCancels.SequenceEqual(new[] { first }) && next > first && second[5] == "TOP_AFTER_HOURS_PERC_GAIN",
-            $"at 16:00 ET the after-hours scan replaces it ({string.Join(" ", gateway.ScanCancels)} cancelled, {(second.Length > 5 ? second[5] : "nothing")} asked)");
-        gateway.SendScan(first, ("OLD", "STK"));
-        gateway.SendScan(next, ("BKHAR", "STK"), ("PARA", "STK"));
         await Task.Delay(300);
-        Check(sink.Scans.Last().SequenceEqual(new[] { "BKHAR", "PARA" }) && sink.Scans.Count == 2, "and only the new scan's rows count");
-        await Task.Delay(1500);
-        Check(gateway.ScanRequests.Count == 2, "with nothing more asked while the session stays the same");
+        Check(sink.Scans.Count == 1 && sink.Scans.First().SequenceEqual(new[] { "GDHG", "BRK B", "GMM" }), $"its rows reach the bridge in rank order, stocks only ({string.Join(" ", sink.Scans.FirstOrDefault() ?? [])})");
+        Check(gateway.ScanCancels.SequenceEqual(new[] { first }), "and it's cancelled as soon as it answers");
+
+        var second = await NextRequest(2, 5);
+        var gap = timer.Elapsed - answered;
+        Check(Id(second) > first && second.Length > 5 && second[5] == "TOP_PERC_GAIN" && gap > TimeSpan.FromSeconds(1.4) && gap < TimeSpan.FromSeconds(2.6),
+            $"the next goes about 2 s after the last, under a new id ({gap.TotalSeconds:F1} s)");
+
+        // The close: the next scan is the after-hours one, with the after-hours change filter.
+        clock = Et(16, 0, 1);
+        gateway.SendScan(Id(second), ("GDHG", "STK"));
+        var third = await NextRequest(3, 5);
+        Check(third.Length > 23 && third[5] == "TOP_AFTER_HOURS_PERC_GAIN" && third[23] == "afterHoursChangePercAbove=10;",
+            $"from 16:00 ET it's the after-hours scan ({(third.Length > 23 ? third[5] + " " + third[23] : "nothing")})");
+
+        // A late answer from an old scan is ignored; a refused one lets the next go when its interval is up.
+        gateway.SendScan(first, ("OLD", "STK"));
+        gateway.SendError(Id(third), 162, "API scanner subscription cancelled");
+        await Task.Delay(300);
+        Check(sink.Scans.Last().SequenceEqual(new[] { "GDHG" }) && gateway.ScanRequests.Count == 3, "an old scan's answer is ignored");
+        gateway.SendError(Id(third), 200, "No security definition has been found for the request");
+        var fourth = await NextRequest(4, 5);
+        Check(Id(fourth) > Id(third), "a scan IBKR refuses doesn't stop the next");
         await client.StopAsync();
     }
 
@@ -267,12 +287,12 @@ async Task RunScan(int port, string liveCode)
     real.SetSink(live);
     real.Start();
     var wait = Stopwatch.StartNew();
-    while (wait.Elapsed < TimeSpan.FromSeconds(75) && live.Scans.Count < 2)
+    while (wait.Elapsed < TimeSpan.FromSeconds(30) && live.Scans.Count < 5)
         await Task.Delay(100);
     foreach (var scan in live.Scans)
         Console.WriteLine($"RESULT {scan.Count} rows: {string.Join(" ", scan)}");
-    Console.WriteLine($"RESULT {live.Scans.Count} lists in {wait.Elapsed.TotalSeconds:F0} s");
-    Check(!live.Scans.IsEmpty && live.Scans.First().Count > 0, "the real Gateway answers with a list");
+    Console.WriteLine($"RESULT {live.Scans.Count} lists in {wait.Elapsed.TotalSeconds:F1} s");
+    Check(live.Scans.Count >= 2, "the real Gateway answers scan after scan");
     await real.StopAsync();
 }
 
@@ -3057,6 +3077,10 @@ internal sealed class FakeGateway : IDisposable
             text.Append($"{i}\0{1000 + i}\0{rows[i].Symbol}\0{rows[i].Type}\0\0\0\0SMART\0USD\0{rows[i].Symbol}\0NMS\0{rows[i].Symbol}\0\0\0\0\0");
         this.Send(text.ToString());
     }
+
+    /// <summary>An error message on a request, as Gateway sends one.</summary>
+    public void SendError(int id, int code, string text) =>
+        this.Send(string.Join((char)0, "4", "2", id.ToString(CultureInfo.InvariantCulture), code.ToString(CultureInfo.InvariantCulture), text) + (char)0);
 
     private void OnMarketDataRequest(int id, string symbol, string exchange)
     {

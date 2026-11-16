@@ -14,16 +14,38 @@ namespace ScalpFeedVendor.Feed;
 internal enum TapeMode { Ibkr, Merged, Tastytrade }
 
 /// <summary>
-/// An IBKR market scanner the client keeps running while connected (your request, 2026-11-16): by default the top
-/// 50 percentage gainers on the US listing exchanges (STK.US.MAJOR leaves out OTC). Filters left NaN or 0 are off.
+/// An IBKR market scanner the client keeps running while connected (your request, 2026-11-16), set up as momo-algo's
+/// (your choice, same day): the top 25 percentage gainers on the US listing exchanges (STK.US.MAJOR leaves out OTC),
+/// $0.10 to $25, over 50,000 shares and up 10% or more, as a fresh one-off scan every 2 seconds from 4:00 to 20:00 ET
+/// and every minute outside it. momo-algo found a one-off scan fresher than a subscription, whose updates come about
+/// every 30 seconds, and IBKR answers one in 160-730 ms. Filters left NaN or 0 are off.
 /// From 16:00 to 4:00 ET it's the after-hours gainers instead, since Top % Gainers keeps the regular session's list
 /// after the close (GMM and GDHG at 16:22 ET on 11-16, while the after-hours scan had BKHAR, PARA and DVLT).
 /// IBKR has no premarket scan, and doesn't need one: momo-algo measured on 2026-08-05 that in premarket Top %
 /// Gainers ranks premarket trades against the prior close, while the after-hours scan returns nothing after 4:00.
 /// </summary>
-internal sealed record IbkrScan(string Code = "TOP_PERC_GAIN", string AfterHoursCode = "TOP_AFTER_HOURS_PERC_GAIN", string Location = "STK.US.MAJOR", int Rows = 50, double PriceAbove = double.NaN, double PriceBelow = double.NaN, int VolumeAbove = 0)
+internal sealed record IbkrScan(
+    string Code = "TOP_PERC_GAIN",
+    string AfterHoursCode = "TOP_AFTER_HOURS_PERC_GAIN",
+    string Location = "STK.US.MAJOR",
+    int Rows = 25,
+    double PriceAbove = 0.10,
+    double PriceBelow = 25,
+    int VolumeAbove = 50_000,
+    double ChangeAbove = 10,
+    double IntervalSeconds = 2)
 {
     private static readonly TimeZoneInfo Eastern = TimeZoneInfo.FindSystemTimeZoneById("Eastern Standard Time");
+
+    /// <summary>Outside 4:00 to 20:00 ET nothing moves, so the scan runs once a minute.</summary>
+    public const double QuietIntervalSeconds = 60;
+
+    /// <summary>Seconds between scans at this moment.</summary>
+    public double IntervalAt(DateTime utc)
+    {
+        var time = TimeZoneInfo.ConvertTimeFromUtc(utc, Eastern).TimeOfDay;
+        return time >= TimeSpan.FromHours(4) && time < TimeSpan.FromHours(20) ? this.IntervalSeconds : QuietIntervalSeconds;
+    }
 
     /// <summary>The scan for this moment: after hours from 16:00 to 4:00 ET, the regular one from 4:00.</summary>
     public string CodeAt(DateTime utc)
@@ -48,8 +70,19 @@ internal sealed record IbkrScan(string Code = "TOP_PERC_GAIN", string AfterHours
             o["rows"]?.GetValue<int>() ?? d.Rows,
             o["priceAbove"]?.GetValue<double>() ?? d.PriceAbove,
             o["priceBelow"]?.GetValue<double>() ?? d.PriceBelow,
-            o["volumeAbove"]?.GetValue<int>() ?? d.VolumeAbove);
+            o["volumeAbove"]?.GetValue<int>() ?? d.VolumeAbove,
+            o["changeAbove"]?.GetValue<double>() ?? d.ChangeAbove,
+            o["intervalSeconds"]?.GetValue<double>() ?? d.IntervalSeconds);
     }
+
+    /// <summary>
+    /// The change filter for this scan. It has to match the scan: on the after-hours one, changePercAbove would
+    /// still filter by the regular session's change and hide a stock that only started moving after the close.
+    /// </summary>
+    public string Filter(string code) =>
+        this.ChangeAbove > 0
+            ? $"{(code.Contains("AFTER_HOURS", StringComparison.Ordinal) ? "afterHoursChangePercAbove" : "changePercAbove")}={this.ChangeAbove.ToString(CultureInfo.InvariantCulture)};"
+            : "";
 
     /// <summary>reqScannerSubscription for server versions 143 and up, which take filter options and no version field.</summary>
     public object[] Request(int id, string code) =>
@@ -58,7 +91,7 @@ internal sealed record IbkrScan(string Code = "TOP_PERC_GAIN", string AfterHours
         Optional(this.PriceAbove), Optional(this.PriceBelow), this.VolumeAbove > 0 ? this.VolumeAbove : "",
         "", "", "", "", "", "", "", "", "", "", // market cap, ratings, maturity and coupon bounds
         false, "", "", "", // exclude convertibles, option volume, setting pairs, stock type
-        "", "", // filter options, subscription options
+        this.Filter(code), "", // filter options, subscription options
     ];
 
     private static object Optional(double value) => double.IsNaN(value) ? "" : value;
@@ -179,11 +212,15 @@ internal sealed class IbkrClient
     /// <summary>The scanners' request ids count up from here, far above the streams' and history's, which start at 1.</summary>
     public const int ScanRequestId = 2_000_000_000;
 
-    // The scan running on this connection, 0 and null when none is; and one start at a time.
+    // The one-off scan waiting for its answer (0 when none is), when it went, the code last asked for, and when
+    // the next may go, in Stopwatch stamps.
+    private static readonly long ScanGiveUpTicks = Stopwatch.Frequency * 10;
     private int scanId;
-    private string scanCode;
     private int scanSeq;
-    private int scanStarting;
+    private long scanSentStamp;
+    private long nextScanStamp;
+    private string scanCode;
+    private Timer scanTimer;
 
     /// <summary>What decides the session for the scan. The harness sets it; FeedClock won't stray that far.</summary>
     public Func<DateTime> ScanClock { get; set; } = () => DateTime.UtcNow;
@@ -194,6 +231,9 @@ internal sealed class IbkrClient
     private const int TooManyDepthRequests = 309;
     private const int TooManyTapeRequests = 10190;
     private const int NothingToCancel = 310;
+
+    // Shared with real historical data failures, so it's only ignored on a scan's id.
+    private const int ScannerCancelled = 162;
     private const int FirstInfoCode = 2100;
     private const int LastInfoCode = 2999;
     private const int ConnectivityLost = 1100;
@@ -307,6 +347,8 @@ internal sealed class IbkrClient
         this.stopCts = new CancellationTokenSource();
         this.flushTimer = new Timer(this.OnFlushTimer, null, Timeout.Infinite, Timeout.Infinite);
         this.housekeepingTimer = new Timer(this.OnHousekeeping, null, 1000, 1000);
+        if (this.config.TopGainers != null)
+            this.scanTimer = new Timer(this.OnScanTimer, null, 250, 250);
         this.nextStatsUtc = DateTime.UtcNow.AddMinutes(1);
         this.runTask = Task.Run(() => this.RunAsync(this.stopCts.Token));
     }
@@ -317,6 +359,7 @@ internal sealed class IbkrClient
             return;
 
         this.housekeepingTimer?.Dispose();
+        this.scanTimer?.Dispose();
         this.flushTimer?.Dispose();
         this.stopCts.Cancel();
         try
@@ -526,9 +569,9 @@ internal sealed class IbkrClient
         this.replays.Clear();
         this.bookRefreshes.Clear();
 
-        // A scanner ends with the socket; housekeeping starts it again once this connection is subscribed.
+        // A scan in flight ends with the socket; the next starts once this connection is subscribed.
         Volatile.Write(ref this.scanId, 0);
-        this.scanCode = null;
+        Volatile.Write(ref this.nextScanStamp, 0);
         this.slotRetryUntilUtc.Clear();
         this.slotRefusalsLogged.Clear();
         lock (this.depthGate)
@@ -1045,38 +1088,71 @@ internal sealed class IbkrClient
         }
     }
 
-    /// <summary>Starts the scan this session wants, cancelling the one it replaces.</summary>
-    private async Task StartScanAsync(IbkrScan scan)
+    /// <summary>
+    /// Every 250 ms: starts the next one-off scan once the last has answered and its interval is up. One that
+    /// never answers is cancelled after 10 seconds, so a lost answer doesn't stop the list.
+    /// </summary>
+    private void OnScanTimer(object timerState)
     {
-        if (Interlocked.Exchange(ref this.scanStarting, 1) == 1)
+        if (!this.subscribed || this.net == null || this.config.TopGainers is not { } scan)
             return;
 
+        long now = Stopwatch.GetTimestamp();
+        int waiting = Volatile.Read(ref this.scanId);
+        if (waiting != 0)
+        {
+            if (now - Volatile.Read(ref this.scanSentStamp) > ScanGiveUpTicks && Interlocked.CompareExchange(ref this.scanId, 0, waiting) == waiting)
+                _ = this.CancelScanAsync(waiting);
+            return;
+        }
+
+        if (now < Volatile.Read(ref this.nextScanStamp))
+            return;
+
+        var utc = this.ScanClock();
+        Volatile.Write(ref this.nextScanStamp, now + (long)(scan.IntervalAt(utc) * Stopwatch.Frequency));
+        _ = this.StartScanAsync(scan, scan.CodeAt(utc), now);
+    }
+
+    private async Task StartScanAsync(IbkrScan scan, string code, long now)
+    {
+        int id = ScanRequestId + Interlocked.Increment(ref this.scanSeq);
+        Volatile.Write(ref this.scanSentStamp, now);
+        Volatile.Write(ref this.scanId, id);
         try
         {
-            string code = scan.CodeAt(this.ScanClock());
-            int old = Volatile.Read(ref this.scanId);
-            int id = ScanRequestId + Interlocked.Increment(ref this.scanSeq);
-            Volatile.Write(ref this.scanId, id);
-            this.scanCode = code;
-            if (old != 0)
-                await this.SendAsync(CancellationToken.None, 23, 1, old).ConfigureAwait(false);
             await this.SendAsync(CancellationToken.None, scan.Request(id, code)).ConfigureAwait(false);
-            Log.Info($"[scan] asked IBKR for {code} on {scan.Location}, {scan.Rows} rows");
+            if (code != this.scanCode)
+                Log.Info($"[scan] asking IBKR for {code} on {scan.Location} every {scan.IntervalSeconds:0.#} s: {scan.Rows} rows, {scan.Filter(code)} price {scan.PriceAbove}-{scan.PriceBelow}, volume over {scan.VolumeAbove:#,0}");
+            this.scanCode = code;
         }
         catch (Exception ex) when (ex is IOException or ObjectDisposedException or InvalidOperationException)
         {
-            Log.Info($"[scan] couldn't start the scan: {ex.Message}");
-        }
-        finally
-        {
-            Volatile.Write(ref this.scanStarting, 0);
+            Interlocked.CompareExchange(ref this.scanId, 0, id);
+            Log.Info($"[scan] couldn't send the scan: {ex.Message}");
         }
     }
 
+    private async Task CancelScanAsync(int id)
+    {
+        try
+        {
+            await this.SendAsync(CancellationToken.None, 23, 1, id).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is IOException or ObjectDisposedException or InvalidOperationException)
+        {
+            // The socket went; the scan went with it.
+        }
+    }
+
+    /// <summary>A one-off scan's answer: it's cancelled at once, and the next may go when its interval is up.</summary>
     private void OnScannerData(ref FieldReader f)
     {
-        if (f.Int() != Volatile.Read(ref this.scanId))
+        int id = f.Int();
+        if (id != Volatile.Read(ref this.scanId) || Interlocked.CompareExchange(ref this.scanId, 0, id) != id)
             return;
+
+        _ = this.CancelScanAsync(id);
 
         int count = f.Int();
         var symbols = new List<string>(Math.Max(count, 0));
@@ -1337,6 +1413,16 @@ internal sealed class IbkrClient
             return;
         }
 
+        if (id >= ScanRequestId)
+        {
+            // Every cancel is answered with 162 "API scanner subscription cancelled". Anything else ends this scan,
+            // and says why once per kind; the next goes when its interval is up.
+            if (code != ScannerCancelled && this.codesLogged.Add(code))
+                Log.Info($"[scan] {code}: {Clip(message)}");
+            Interlocked.CompareExchange(ref this.scanId, 0, id);
+            return;
+        }
+
         if (code is >= FirstInfoCode and <= LastInfoCode || id < 0)
         {
             // Informational: farm status and depth entitlements. Worth keeping once per code.
@@ -1394,9 +1480,6 @@ internal sealed class IbkrClient
             bool occasional = slotClock >= this.nextOccasionalRetryUtc;
             if (occasional)
                 this.nextOccasionalRetryUtc = slotClock + OccasionalSlotRetry;
-
-            if (this.subscribed && this.config.TopGainers is { } scan && scan.CodeAt(this.ScanClock()) != this.scanCode)
-                _ = this.StartScanAsync(scan);
 
             if (this.subscribed)
             {
