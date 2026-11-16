@@ -1,4 +1,4 @@
-namespace ScalpFeedIndicators;
+namespace ScalpFeedVendor.Feed;
 
 /// <summary>
 /// RVOL's arithmetic, apart from Quantower so the harness can test it: today's volume over the average daily

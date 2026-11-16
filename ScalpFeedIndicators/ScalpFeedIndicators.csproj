@@ -13,8 +13,9 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- The float cache's format, shared with the connection that writes it. -->
+    <!-- The float cache's format and RVOL's arithmetic, shared with the connection. -->
     <Compile Include="..\ScalpFeedVendor\Feed\FloatFacts.cs" LinkBase="Shared" />
+    <Compile Include="..\ScalpFeedVendor\Feed\RelativeVolumeMath.cs" LinkBase="Shared" />
   </ItemGroup>
 
   <ItemGroup>

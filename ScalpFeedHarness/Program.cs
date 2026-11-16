@@ -327,6 +327,75 @@ async Task RunRvol(string[] symbols)
     Check(RelativeVolumeMath.Ratio(51, 25.5) == 2 && double.IsNaN(RelativeVolumeMath.Ratio(10, 0)) && double.IsNaN(RelativeVolumeMath.Ratio(double.NaN, 5)), "RVOL is today over the average, and nothing without either");
     Check(RelativeVolumeMath.TodayEt(new DateTime(2026, 11, 17, 3, 0, 0, DateTimeKind.Utc)) == today && RelativeVolumeMath.TodayEt(new DateTime(2026, 11, 17, 6, 0, 0, DateTimeKind.Utc)) == today.AddDays(1), "today is the Eastern date");
 
+    // The connection's loader of those averages, with a stand-in for the daily bars: 60 earlier sessions of
+    // volume 1 to 60 and today's, or 3 for a new listing, or nothing while "down".
+    var clock = new DateTime(2026, 11, 16, 15, 0, 0, DateTimeKind.Utc);
+    var asked = new ConcurrentQueue<string>();
+    var told = new ConcurrentQueue<string>();
+    int loading = 0, mostLoading = 0;
+    bool down = false;
+    async Task<IReadOnlyList<BarRow>> Bars(string candle, DateTime from, DateTime to, CancellationToken ct)
+    {
+        int n = Interlocked.Increment(ref loading);
+        mostLoading = Math.Max(mostLoading, n);
+        await Task.Delay(20, ct);
+        Interlocked.Decrement(ref loading);
+        asked.Enqueue(candle);
+        if (down)
+            return [];
+
+        int earlier = candle.StartsWith("NEWCO", StringComparison.Ordinal) ? 3 : 60;
+        return Enumerable.Range(0, earlier + 1)
+            .Select(i => new BarRow(new DateTimeOffset(to.Date.AddDays(-i), TimeSpan.Zero).ToUnixTimeMilliseconds(), 1, 1, 1, 1, i == 0 ? 1_000_000 : i, 1))
+            .ToList();
+    }
+
+    using var averages = new VolumeAverages(Bars, told.Enqueue, () => clock);
+    Check(double.IsNaN(averages.Get("AVGA")), "no average before it's loaded");
+    foreach (var s in new[] { "AVGA", "AVGB", "AVGA" })
+        averages.Want(s);
+    await averages.IdleAsync();
+    Check(asked.Order().SequenceEqual(new[] { "AVGA{=1d}", "AVGB{=1d}" }) && mostLoading == 1, $"each symbol's daily bars are loaded once, one at a time ({string.Join(" ", asked)})");
+    Check(averages.Get("AVGA") == 25.5 && told.Order().SequenceEqual(new[] { "AVGA", "AVGB" }), $"the average is kept, and the connection told ({averages.Get("AVGA")})");
+
+    asked.Clear();
+    averages.Want("AVGA");
+    await averages.IdleAsync();
+    using (var reconnected = new VolumeAverages(Bars, null, () => clock))
+    {
+        reconnected.Want("AVGA");
+        await reconnected.IdleAsync();
+        Check(asked.IsEmpty && reconnected.Get("AVGA") == 25.5, "not loaded again the same day, nor after a reconnect");
+    }
+
+    averages.Want("NEWCO");
+    await averages.IdleAsync();
+    averages.Want("NEWCO");
+    await averages.IdleAsync();
+    Check(asked.SequenceEqual(new[] { "NEWCO{=1d}" }) && double.IsNaN(averages.Get("NEWCO")), "a new listing has no average, and isn't asked about again that day");
+
+    asked.Clear();
+    clock = clock.AddDays(1);
+    Check(averages.Get("AVGA") == 25.5, "yesterday's average stands in until today's is loaded");
+    averages.Want("AVGA");
+    await averages.IdleAsync();
+    Check(asked.SequenceEqual(new[] { "AVGA{=1d}" }), "the next day it's loaded again");
+
+    asked.Clear();
+    down = true;
+    async Task<int> WantDown(TimeSpan later)
+    {
+        clock += later;
+        averages.Want("DOWNCO");
+        await averages.IdleAsync();
+        return asked.Count;
+    }
+
+    Check(await WantDown(TimeSpan.Zero) == 1 && await WantDown(TimeSpan.FromSeconds(59)) == 1 && await WantDown(TimeSpan.FromSeconds(2)) == 2,
+        "a load that fails is tried again after a minute");
+    Check(await WantDown(TimeSpan.FromMinutes(9)) == 2 && await WantDown(TimeSpan.FromMinutes(2)) == 3 && double.IsNaN(averages.Get("DOWNCO")),
+        "and after that every 10 minutes");
+
     if (symbols.Length == 0)
         return;
 
@@ -334,6 +403,7 @@ async Task RunRvol(string[] symbols)
     var history = new HistoryClient(async (force, ct) => await client.GetQuoteTokenAsync(ct));
     var now = DateTime.UtcNow;
     var todayEt = RelativeVolumeMath.TodayEt(now);
+    using var loader = new VolumeAverages(history.LoadAsync, null);
     foreach (var symbol in symbols)
     {
         var bars = await history.LoadAsync(symbol + "{=1d}", now.AddDays(-100), now, CancellationToken.None);
@@ -341,6 +411,10 @@ async Task RunRvol(string[] symbols)
         double avg = RelativeVolumeMath.Average(days, todayEt);
         double todayVolume = days.LastOrDefault().Item1.Date == todayEt ? days[^1].Volume : double.NaN;
         Console.WriteLine($"RESULT {symbol,-5} today {todayVolume:#,0}  50-day average {avg:#,0} over {days.Count(d => d.Item1.Date < todayEt)} sessions  RVOL {RelativeVolumeMath.Ratio(todayVolume, avg):0.00}");
+
+        loader.Want(symbol);
+        await loader.IdleAsync();
+        Check(loader.Get(symbol).Equals(avg), $"{symbol}: the connection's loader gets the same average from the real bars");
     }
 }
 

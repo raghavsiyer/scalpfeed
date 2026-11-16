@@ -67,6 +67,8 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
     private HistoryClient history;
     private IbkrBridge ibkr;
     private FloatSource floats;
+    private VolumeAverages averages;
+    private DateTime nextAveragesUtc;
 
     private const string TopGainersList = "IBKR Top Gainers";
     private readonly object topGainersGate = new();
@@ -181,6 +183,7 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
             this.ibkr = new IbkrBridge(this.TimedPush, this.OnIbkrPrint, this.OnTopGainers);
             this.ibkr.Start();
             this.floats = new FloatSource(this.OnFloatArrived);
+            this.averages = new VolumeAverages(this.history.LoadAsync, this.OnAverageArrived);
 
             return ConnectionResult.CreateSuccess();
         }
@@ -460,14 +463,24 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
     }
 
     /// <summary>
-    /// Sends the symbol again with its float, from the float fetcher's thread. Whether Quantower takes in a symbol
-    /// sent again isn't documented; if it doesn't, Symbol Info shows the float from the next start, and the
-    /// Watchlist's Float column, which reads float-cache.json itself, shows it either way.
+    /// Sends the symbol again with its float, from the float fetcher's thread, and its Watchlist row at once.
+    /// Whether Quantower takes in a symbol sent again isn't documented; if it doesn't, Symbol Info shows the float
+    /// from the next start.
     /// </summary>
     private void OnFloatArrived(string symbol)
     {
         if (this.equityBySymbol.TryGetValue(symbol, out var info))
             this.PushMessage(this.CreateSymbol(info));
+        this.PushDayBarNow(this.streamerById.GetValueOrDefault(symbol, symbol));
+    }
+
+    /// <summary>From the average loader's thread: the row gets its RVOL without waiting for the next trade.</summary>
+    private void OnAverageArrived(string streamer) => this.PushDayBarNow(streamer);
+
+    private void PushDayBarNow(string streamer)
+    {
+        if (this.statesByStreamer.TryGetValue(streamer, out var state) && state.Id != null && (state.QuoteOn || state.LastOn))
+            this.PushDayBar(state, FeedClock.UtcNowTicks);
     }
 
     private static List<VariableTick> ToVariableTicks(IReadOnlyList<TickBand> bands) =>
@@ -503,7 +516,11 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
         if (parameters.SubscribeType == SubscribeQuoteType.Quote)
         {
             if (on)
+            {
                 this.floats?.Want(id);
+                this.averages?.Want(streamer);
+            }
+
             state.QuoteOn = on;
             this.ibkr?.SetQuote(state, on);
         }
@@ -795,7 +812,11 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
         if (!(state.QuoteOn || state.LastOn) || nowTicks < state.NextDayBarTicks)
             return;
         state.NextDayBarTicks = nowTicks + DayBarEveryTicks;
+        this.PushDayBar(state, nowTicks);
+    }
 
+    private void PushDayBar(SymbolState state, long nowTicks)
+    {
         var bar = new DayBar(state.Id, new DateTime(nowTicks, DateTimeKind.Utc));
         if (!double.IsNaN(state.Open))
             bar.Open = state.Open;
@@ -822,6 +843,21 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
                 bar.Change = state.LastPrice - from;
                 bar.ChangePercentage = bar.Change / from * 100;
             }
+        }
+
+        // Quantower's Free version runs no indicators in a Watchlist, so the float and RVOL go in columns that
+        // stocks leave empty: the float, in shares, as open interest, and RVOL as both the quote asset volume
+        // and the previous settlement, until it's seen which of the two the Watchlist shows as a plain number.
+        // Blank when the float is unknown or doubtful (FloatFacts), or there's no average yet (VolumeAverages).
+        if (this.floats?.Get(state.Id) is { Known: true, Doubtful: false } facts)
+            bar.OpenInterest = facts.Float;
+
+        double rvol = RelativeVolumeMath.Ratio(state.DayVolume, this.averages?.Get(state.Streamer) ?? double.NaN);
+        if (!double.IsNaN(rvol))
+        {
+            rvol = Math.Round(rvol, 2);
+            bar.QuoteAssetVolume = rvol;
+            bar.PrevSettlementPrice = rvol;
         }
 
         this.PushMessage(bar);
@@ -1033,6 +1069,7 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
             this.CheckFallback();
             this.CheckLag();
             this.CheckToken(link);
+            this.WantAverages();
             this.WriteStats(link);
         }
         catch (Exception ex)
@@ -1177,6 +1214,25 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
         });
     }
 
+    /// <summary>
+    /// Once a minute, for every symbol on screen: a new Eastern day needs a new average, and a load that failed
+    /// gets another try. One that's already in for today costs a lookup.
+    /// </summary>
+    private void WantAverages()
+    {
+        var now = DateTime.UtcNow;
+        var source = this.averages;
+        if (source == null || now < this.nextAveragesUtc)
+            return;
+        this.nextAveragesUtc = now.AddMinutes(1);
+
+        foreach (var state in this.statesByStreamer.Values)
+        {
+            if (state.QuoteOn)
+                source.Want(state.Streamer);
+        }
+    }
+
     private void WriteStats(DxLinkLink link)
     {
         var now = DateTime.UtcNow;
@@ -1231,6 +1287,8 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
         this.ibkr = null;
         this.floats?.Dispose();
         this.floats = null;
+        this.averages?.Dispose();
+        this.averages = null;
 
         var link = this.live;
         this.live = null;

@@ -1,4 +1,5 @@
 using System.Drawing;
+using ScalpFeedVendor.Feed;
 using TradingPlatform.BusinessLayer;
 
 namespace ScalpFeedIndicators;
