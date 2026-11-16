@@ -16,9 +16,21 @@ internal enum TapeMode { Ibkr, Merged, Tastytrade }
 /// <summary>
 /// An IBKR market scanner the client keeps running while connected (your request, 2026-11-16): by default the top
 /// 50 percentage gainers on the US listing exchanges (STK.US.MAJOR leaves out OTC). Filters left NaN or 0 are off.
+/// From 16:00 to 4:00 ET it's the after-hours gainers instead, since Top % Gainers keeps the regular session's list
+/// after the close (GMM and GDHG at 16:22 ET on 11-16, while the after-hours scan had BKHAR, PARA and DVLT).
+/// IBKR has no premarket scan.
 /// </summary>
-internal sealed record IbkrScan(string Code = "TOP_PERC_GAIN", string Location = "STK.US.MAJOR", int Rows = 50, double PriceAbove = double.NaN, double PriceBelow = double.NaN, int VolumeAbove = 0)
+internal sealed record IbkrScan(string Code = "TOP_PERC_GAIN", string AfterHoursCode = "TOP_AFTER_HOURS_PERC_GAIN", string Location = "STK.US.MAJOR", int Rows = 50, double PriceAbove = double.NaN, double PriceBelow = double.NaN, int VolumeAbove = 0)
 {
+    private static readonly TimeZoneInfo Eastern = TimeZoneInfo.FindSystemTimeZoneById("Eastern Standard Time");
+
+    /// <summary>The scan for this moment: after hours from 16:00 to 4:00 ET, the regular one from 4:00.</summary>
+    public string CodeAt(DateTime utc)
+    {
+        var time = TimeZoneInfo.ConvertTimeFromUtc(utc, Eastern).TimeOfDay;
+        return time >= TimeSpan.FromHours(16) || time < TimeSpan.FromHours(4) ? this.AfterHoursCode : this.Code;
+    }
+
     /// <summary>From ibkr.json's topGainers: false turns it off, an object changes what it asks for.</summary>
     public static IbkrScan From(JsonNode json)
     {
@@ -30,6 +42,7 @@ internal sealed record IbkrScan(string Code = "TOP_PERC_GAIN", string Location =
         var d = new IbkrScan();
         return new IbkrScan(
             (string)o["scanCode"] ?? d.Code,
+            (string)o["afterHoursScanCode"] ?? d.AfterHoursCode,
             (string)o["location"] ?? d.Location,
             o["rows"]?.GetValue<int>() ?? d.Rows,
             o["priceAbove"]?.GetValue<double>() ?? d.PriceAbove,
@@ -38,9 +51,9 @@ internal sealed record IbkrScan(string Code = "TOP_PERC_GAIN", string Location =
     }
 
     /// <summary>reqScannerSubscription for server versions 143 and up, which take filter options and no version field.</summary>
-    public object[] Request(int id) =>
+    public object[] Request(int id, string code) =>
     [
-        22, id, this.Rows, "STK", this.Location, this.Code,
+        22, id, this.Rows, "STK", this.Location, code,
         Optional(this.PriceAbove), Optional(this.PriceBelow), this.VolumeAbove > 0 ? this.VolumeAbove : "",
         "", "", "", "", "", "", "", "", "", "", // market cap, ratings, maturity and coupon bounds
         false, "", "", "", // exclude convertibles, option volume, setting pairs, stock type
@@ -157,12 +170,22 @@ internal sealed class IbkrClient
 
     /// <summary>
     /// startApi, reqMarketDataType, reqMktData, cancelMktData, reqMktDepth, cancelMktDepth,
-    /// reqTickByTickData, cancelTickByTickData, reqHistoricalData, cancelHistoricalData, reqScannerSubscription.
+    /// reqTickByTickData, cancelTickByTickData, reqHistoricalData, cancelHistoricalData, reqScannerSubscription,
+    /// cancelScannerSubscription.
     /// </summary>
-    public static readonly IReadOnlySet<int> AllowedRequests = new HashSet<int> { 71, 59, 1, 2, 10, 11, 97, 98, 20, 25, 22 };
+    public static readonly IReadOnlySet<int> AllowedRequests = new HashSet<int> { 71, 59, 1, 2, 10, 11, 97, 98, 20, 25, 22, 23 };
 
-    /// <summary>The scanner's request id, far above the streams' and history's, which count up from 1.</summary>
+    /// <summary>The scanners' request ids count up from here, far above the streams' and history's, which start at 1.</summary>
     public const int ScanRequestId = 2_000_000_000;
+
+    // The scan running on this connection, 0 and null when none is; and one start at a time.
+    private int scanId;
+    private string scanCode;
+    private int scanSeq;
+    private int scanStarting;
+
+    /// <summary>What decides the session for the scan. The harness sets it; FeedClock won't stray that far.</summary>
+    public Func<DateTime> ScanClock { get; set; } = () => DateTime.UtcNow;
 
     private const string ClientVersions = "v100..176";
     private const int FlushDelayMs = 20;
@@ -501,6 +524,10 @@ internal sealed class IbkrClient
         this.dirtyDepth.Clear();
         this.replays.Clear();
         this.bookRefreshes.Clear();
+
+        // A scanner ends with the socket; housekeeping starts it again once this connection is subscribed.
+        Volatile.Write(ref this.scanId, 0);
+        this.scanCode = null;
         this.slotRetryUntilUtc.Clear();
         this.slotRefusalsLogged.Clear();
         lock (this.depthGate)
@@ -579,13 +606,6 @@ internal sealed class IbkrClient
             this.subscribed = true;
             foreach (var key in everything)
                 await this.RequestAsync(key).ConfigureAwait(false);
-
-            // Each connection starts it again: a scanner ends with the socket.
-            if (this.config.TopGainers is { } scan)
-            {
-                await this.SendAsync(CancellationToken.None, scan.Request(ScanRequestId)).ConfigureAwait(false);
-                Log.Info($"[scan] asked IBKR for {scan.Code} on {scan.Location}, {scan.Rows} rows");
-            }
         }
         catch (Exception ex) when (ex is IOException or ObjectDisposedException or InvalidOperationException)
         {
@@ -1024,9 +1044,37 @@ internal sealed class IbkrClient
         }
     }
 
+    /// <summary>Starts the scan this session wants, cancelling the one it replaces.</summary>
+    private async Task StartScanAsync(IbkrScan scan)
+    {
+        if (Interlocked.Exchange(ref this.scanStarting, 1) == 1)
+            return;
+
+        try
+        {
+            string code = scan.CodeAt(this.ScanClock());
+            int old = Volatile.Read(ref this.scanId);
+            int id = ScanRequestId + Interlocked.Increment(ref this.scanSeq);
+            Volatile.Write(ref this.scanId, id);
+            this.scanCode = code;
+            if (old != 0)
+                await this.SendAsync(CancellationToken.None, 23, 1, old).ConfigureAwait(false);
+            await this.SendAsync(CancellationToken.None, scan.Request(id, code)).ConfigureAwait(false);
+            Log.Info($"[scan] asked IBKR for {code} on {scan.Location}, {scan.Rows} rows");
+        }
+        catch (Exception ex) when (ex is IOException or ObjectDisposedException or InvalidOperationException)
+        {
+            Log.Info($"[scan] couldn't start the scan: {ex.Message}");
+        }
+        finally
+        {
+            Volatile.Write(ref this.scanStarting, 0);
+        }
+    }
+
     private void OnScannerData(ref FieldReader f)
     {
-        if (f.Int() != ScanRequestId)
+        if (f.Int() != Volatile.Read(ref this.scanId))
             return;
 
         int count = f.Int();
@@ -1345,6 +1393,9 @@ internal sealed class IbkrClient
             bool occasional = slotClock >= this.nextOccasionalRetryUtc;
             if (occasional)
                 this.nextOccasionalRetryUtc = slotClock + OccasionalSlotRetry;
+
+            if (this.subscribed && this.config.TopGainers is { } scan && scan.CodeAt(this.ScanClock()) != this.scanCode)
+                _ = this.StartScanAsync(scan);
 
             if (this.subscribed)
             {

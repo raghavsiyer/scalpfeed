@@ -383,17 +383,15 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
     };
 
     /// <summary>
-    /// IBKR's top gainers, kept as a symbol list you open in a Watchlist. Looking the symbols up can call back into
-    /// this connection (a symbol it hasn't made yet), so it runs off IBKR's thread, one list at a time, and a list
-    /// the same as the last is left alone.
+    /// IBKR's top gainers, kept as a symbol list you open in a Watchlist: the regular session's, or after hours the
+    /// after-hours ones (IbkrScan). Looking the symbols up can call back into this connection (a symbol it hasn't
+    /// made yet), so it runs off IBKR's thread, one list at a time. A list the same as the last is left alone,
+    /// unless the list has gone (deleted in Quantower), when it's made again.
     /// </summary>
     private void OnTopGainers(IReadOnlyList<string> symbols)
     {
         lock (this.topGainersGate)
         {
-            if (this.topGainersSent != null && symbols.SequenceEqual(this.topGainersSent))
-                return;
-
             bool idle = this.topGainersNext == null;
             this.topGainersNext = symbols;
             if (idle)
@@ -415,25 +413,7 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
 
             try
             {
-                string connectionId = Core.Instance.Connections.Connected.FirstOrDefault(c => c.VendorName == ScalpFeedVendor.VendorName)?.Id;
-                var symbols = new List<Symbol>();
-                foreach (var name in names)
-                {
-                    // Stocks only: leveraged ETFs (SOXS, UVIX, MSTZ on 11-16) crowd a gainers list.
-                    var symbol = Core.Instance.GetSymbol(new GetSymbolRequestParameters { SymbolId = name }, connectionId);
-                    if (symbol != null && symbol.SymbolType != SymbolType.ETF)
-                        symbols.Add(symbol);
-                }
-
-                if (Core.Instance.SymbolList.Any(l => l.Name == TopGainersList))
-                    Core.Instance.ReplaceSymbolList(TopGainersList, symbols);
-                else
-                    Core.Instance.AddSymbolList(TopGainersList, symbols);
-
-                // It changes every 30 seconds or so, so only the first of each connection goes in the log.
-                if (!this.topGainersLogged)
-                    Log.Info($"[scan] {TopGainersList}: {symbols.Count} stocks of {names.Count} rows, {string.Join(" ", symbols.Take(10).Select(s => s.Name))} ...");
-                this.topGainersLogged = true;
+                this.PublishTopGainers(names);
             }
             catch (Exception ex)
             {
@@ -450,6 +430,33 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
                 }
             }
         }
+    }
+
+    private void PublishTopGainers(IReadOnlyList<string> names)
+    {
+        bool exists = Core.Instance.SymbolList.Any(l => l.Name == TopGainersList);
+        if (exists && this.topGainersSent != null && names.SequenceEqual(this.topGainersSent))
+            return;
+
+        string connectionId = Core.Instance.Connections.Connected.FirstOrDefault(c => c.VendorName == ScalpFeedVendor.VendorName)?.Id;
+        var symbols = new List<Symbol>();
+        foreach (var name in names)
+        {
+            // Stocks only: leveraged ETFs (SOXS, UVIX, MSTZ on 11-16) crowd a gainers list.
+            var symbol = Core.Instance.GetSymbol(new GetSymbolRequestParameters { SymbolId = name }, connectionId);
+            if (symbol != null && symbol.SymbolType != SymbolType.ETF)
+                symbols.Add(symbol);
+        }
+
+        if (exists)
+            Core.Instance.ReplaceSymbolList(TopGainersList, symbols);
+        else
+            Core.Instance.AddSymbolList(TopGainersList, symbols);
+
+        // It changes every 30 seconds or so, so only the first of each connection, and each remaking, go in the log.
+        if (!this.topGainersLogged || !exists)
+            Log.Info($"[scan] {TopGainersList}: {symbols.Count} stocks of {names.Count} rows, {string.Join(" ", symbols.Take(10).Select(s => s.Name))} ...");
+        this.topGainersLogged = true;
     }
 
     /// <summary>

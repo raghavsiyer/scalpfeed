@@ -198,7 +198,7 @@ switch (args[0])
         await RunRvol(args[1..]);
         break;
     case "scan":
-        await RunScan(args.Length > 1 ? int.Parse(args[1], CultureInfo.InvariantCulture) : 0);
+        await RunScan(args.Length > 1 ? int.Parse(args[1], CultureInfo.InvariantCulture) : 0, args.Length > 2 ? args[2] : null);
         break;
 }
 
@@ -206,32 +206,56 @@ Console.WriteLine(failures == 0 ? "\nALL CHECKS PASSED" : $"\n{failures} CHECK(S
 return failures == 0 ? 0 : 1;
 
 // IBKR's top gainers scanner against the stand-in, then, given a port, on the real Gateway (read-only).
-async Task RunScan(int port)
+async Task RunScan(int port, string liveCode)
 {
     Check(IbkrScan.From(JsonNode.Parse("false")) == null && IbkrScan.From(null) == new IbkrScan(), "topGainers in ibkr.json: false turns it off, and it's on by default");
     var custom = IbkrScan.From(JsonNode.Parse("""{"priceAbove":1,"priceBelow":20,"volumeAbove":100000}"""));
     Check(custom == new IbkrScan(PriceAbove: 1, PriceBelow: 20, VolumeAbove: 100000), "its filters can be set");
 
-    using (var gateway = new FakeGateway())
+    var eastern = TimeZoneInfo.FindSystemTimeZoneById("Eastern Standard Time");
+    DateTime Et(int h, int m, int s) => TimeZoneInfo.ConvertTimeToUtc(new DateTime(2026, 11, 16, h, m, s, DateTimeKind.Unspecified), eastern);
+    var plain = new IbkrScan();
+    Check(plain.CodeAt(Et(15, 59, 59)) == "TOP_PERC_GAIN" && plain.CodeAt(Et(16, 0, 0)) == "TOP_AFTER_HOURS_PERC_GAIN"
+          && plain.CodeAt(Et(3, 59, 59)) == "TOP_AFTER_HOURS_PERC_GAIN" && plain.CodeAt(Et(4, 0, 0)) == "TOP_PERC_GAIN",
+        "after-hours gainers from 16:00 to 4:00 ET, Top % Gainers from 4:00");
+
+    var clock = Et(15, 59, 57);
     {
+        using var gateway = new FakeGateway();
         var sink = new IbkrTestSink();
-        var client = new IbkrClient(new IbkrConfig(true, "127.0.0.1", gateway.Port, 1, false, TopGainers: custom));
+        var client = new IbkrClient(new IbkrConfig(true, "127.0.0.1", gateway.Port, 1, false, TopGainers: custom)) { ScanClock = () => clock };
         client.SetSink(sink);
         client.Start();
         var timer = Stopwatch.StartNew();
         while (timer.Elapsed < TimeSpan.FromSeconds(10) && gateway.ScanRequests.IsEmpty)
             await Task.Delay(20);
         var f = gateway.ScanRequests.FirstOrDefault() ?? [];
-        Check(f.Length == 26 && f[0] == "22" && f[1] == IbkrClient.ScanRequestId.ToString(CultureInfo.InvariantCulture) && f[2] == "50" && f[3] == "STK"
+        int first = f.Length > 1 ? int.Parse(f[1], CultureInfo.InvariantCulture) : 0;
+        Check(f.Length == 26 && f[0] == "22" && first > IbkrClient.ScanRequestId && f[2] == "50" && f[3] == "STK"
               && f[4] == "STK.US.MAJOR" && f[5] == "TOP_PERC_GAIN" && f[6] == "1" && f[7] == "20" && f[8] == "100000" && f[19] == "0",
             $"the scanner is asked for once live, with its filters ({string.Join("|", f)})");
 
-        gateway.SendScan(IbkrClient.ScanRequestId, ("GDHG", "STK"), ("BRK B", "STK"), ("XYZ", "WAR"), ("GMM", "STK"));
+        gateway.SendScan(first, ("GDHG", "STK"), ("BRK B", "STK"), ("XYZ", "WAR"), ("GMM", "STK"));
         gateway.SendScan(12345, ("NOPE", "STK"));
         while (timer.Elapsed < TimeSpan.FromSeconds(10) && sink.Scans.IsEmpty)
             await Task.Delay(20);
         await Task.Delay(200);
         Check(sink.Scans.Count == 1 && sink.Scans.First().SequenceEqual(new[] { "GDHG", "BRK B", "GMM" }), $"its rows reach the bridge in rank order, stocks only ({string.Join(" ", sink.Scans.FirstOrDefault() ?? [])})");
+
+        // The close: the regular scan is cancelled and the after-hours one asked for, under a new id.
+        clock = Et(16, 0, 1);
+        while (timer.Elapsed < TimeSpan.FromSeconds(15) && gateway.ScanRequests.Count < 2)
+            await Task.Delay(20);
+        var second = gateway.ScanRequests.Skip(1).FirstOrDefault() ?? [];
+        int next = second.Length > 1 ? int.Parse(second[1], CultureInfo.InvariantCulture) : 0;
+        Check(gateway.ScanCancels.SequenceEqual(new[] { first }) && next > first && second[5] == "TOP_AFTER_HOURS_PERC_GAIN",
+            $"at 16:00 ET the after-hours scan replaces it ({string.Join(" ", gateway.ScanCancels)} cancelled, {(second.Length > 5 ? second[5] : "nothing")} asked)");
+        gateway.SendScan(first, ("OLD", "STK"));
+        gateway.SendScan(next, ("BKHAR", "STK"), ("PARA", "STK"));
+        await Task.Delay(300);
+        Check(sink.Scans.Last().SequenceEqual(new[] { "BKHAR", "PARA" }) && sink.Scans.Count == 2, "and only the new scan's rows count");
+        await Task.Delay(1500);
+        Check(gateway.ScanRequests.Count == 2, "with nothing more asked while the session stays the same");
         await client.StopAsync();
     }
 
@@ -239,7 +263,7 @@ async Task RunScan(int port)
         return;
 
     var live = new IbkrTestSink();
-    var real = new IbkrClient(new IbkrConfig(true, "127.0.0.1", port, 87, IbkrConfig.Load().AllowLiveAccount, TopGainers: new IbkrScan()));
+    var real = new IbkrClient(new IbkrConfig(true, "127.0.0.1", port, 87, IbkrConfig.Load().AllowLiveAccount, TopGainers: liveCode == null ? new IbkrScan() : new IbkrScan(liveCode, liveCode)));
     real.SetSink(live);
     real.Start();
     var wait = Stopwatch.StartNew();
@@ -552,7 +576,7 @@ async Task RunVenueTops()
     await Task.Delay(100);
     Check(gateway.MarketDataCancels.Count(venueIds.Contains) == 2, $"the venue quotes are cancelled with the depth, all but the refused one ({gateway.MarketDataCancels.Count(venueIds.Contains)})");
     Check(client.State == IbkrState.Live, "the canary is untouched");
-    Check(IbkrClient.AllowedRequests.SetEquals(new[] { 71, 59, 1, 2, 10, 11, 97, 98, 20, 25, 22 }), "the whitelist is unchanged: market data, history and the scanner, no orders");
+    Check(IbkrClient.AllowedRequests.SetEquals(new[] { 71, 59, 1, 2, 10, 11, 97, 98, 20, 25, 22, 23 }), "the whitelist is unchanged: market data, history and the scanner, no orders");
 
     await client.StopAsync();
 }
@@ -3007,6 +3031,9 @@ internal sealed class FakeGateway : IDisposable
                         case "22":
                             this.ScanRequests.Enqueue(f);
                             break;
+                        case "23":
+                            this.ScanCancels.Enqueue(int.Parse(f[2], CultureInfo.InvariantCulture));
+                            break;
                     }
                 }
             }
@@ -3018,6 +3045,9 @@ internal sealed class FakeGateway : IDisposable
 
     /// <summary>Each reqScannerSubscription's fields, as sent.</summary>
     public ConcurrentQueue<string[]> ScanRequests { get; } = new();
+
+    /// <summary>Each cancelScannerSubscription's request id.</summary>
+    public ConcurrentQueue<int> ScanCancels { get; } = new();
 
     /// <summary>A scannerData answer: each row a symbol and its type, ranked in the order given.</summary>
     public void SendScan(int id, params (string Symbol, string Type)[] rows)
