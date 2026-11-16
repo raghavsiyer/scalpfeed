@@ -191,10 +191,116 @@ switch (args[0])
     case "alarm":
         await RunAlarmTest();
         break;
+    case "float":
+        await RunFloat();
+        break;
 }
 
 Console.WriteLine(failures == 0 ? "\nALL CHECKS PASSED" : $"\n{failures} CHECK(S) FAILED");
 return failures == 0 ? 0 : 1;
+
+// The float from stockanalysis.com through Firecrawl, against canned answers: nothing is sent anywhere.
+async Task RunFloat()
+{
+    // Trimmed from Firecrawl's answers on 2026-11-16.
+    static string Stats(string symbol, string flt, string shares, string volume) =>
+        $$$"""{"success":true,"data":{"alexandria":[{"provider":"stockanalysis-com","capability":"securities/stock_statistics","creditsCost":5,"data":{"name":"{{{symbol}}}","sections":[ {"id":"shares","items":[{"hover":"{{{shares}}}","id":"sharesout","title":"Shares Outstanding","value":"x"},{"hover":"{{{flt}}}","id":"float","title":"Float","value":"x"}]}, {"id":"stockPrice","items":[{"hover":"{{{volume}}}","id":"averageVolume","title":"Average Volume (20 Days)","value":"x"}]}],"symbol":"{{{symbol}}}"}}]}}""";
+    const string NotFound = """{"success":true,"data":{"alexandria":[{"provider":"stockanalysis-com","capability":"securities/stock_statistics","error":{"code":"not_found","message":"The workflow could not find that resource.","status":404}}]}}""";
+
+    long ms = 1_794_860_000_000;
+    var gdhg = FloatFacts.FromStatistics(JsonNode.Parse(Stats("GDHG", "29,519,326", "47,127,140", "5,256,126"))["data"]["alexandria"][0]["data"], "2026-11-16", ms);
+    var fgl = FloatFacts.FromStatistics(JsonNode.Parse(Stats("FGL", "8,557", "11,456", "1,565,709"))["data"]["alexandria"][0]["data"], "2026-11-16", ms);
+    var fcuv = FloatFacts.FromStatistics(JsonNode.Parse(Stats("FCUV", "546,711", "648,251", "5,977,944"))["data"]["alexandria"][0]["data"], "2026-11-16", ms);
+    Check(gdhg.Float == 29_519_326 && gdhg.SharesOut == 47_127_140 && gdhg.AverageVolume == 5_256_126, "the float, share count and 20-day volume come from the exact values");
+    Check(gdhg.Describe() == "29.52M" && fcuv.Describe() == "546,711", $"shown as 29.52M, and under a million in full ({gdhg.Describe()}, {fcuv.Describe()})");
+    Check(fgl.Doubtful && !gdhg.Doubtful && !fcuv.Doubtful, "FGL, trading 183 times its float a day, is doubtful; GDHG and FCUV (11 times) aren't");
+    Check(fgl.Describe() == "8,557 ? (trades 183x that a day, so likely out of date)", $"and says why ({fgl.Describe()})");
+    Check(FloatFacts.DayOf(new DateTime(2026, 11, 16, 3, 0, 0, DateTimeKind.Utc)) == "2026-11-15" && FloatFacts.DayOf(new DateTime(2026, 11, 16, 9, 0, 0, DateTimeKind.Utc)) == "2026-11-16", "a day is an Eastern day");
+    Check(FloatFacts.SiteSymbol("BRK/B") == "BRK.B", "share classes are asked for with a dot");
+
+    string dir = Path.Combine(Path.GetTempPath(), "scalpfeed-float-" + Environment.ProcessId);
+    Directory.CreateDirectory(dir);
+    string cachePath = Path.Combine(dir, "float-cache.json");
+    FloatFacts.WriteCache(cachePath, new Dictionary<string, FloatFacts> { ["GDHG"] = gdhg, ["ZZZZ"] = new("2026-11-16", double.NaN, double.NaN, double.NaN, ms) });
+    var back = FloatFacts.ReadCache(cachePath);
+    Check(back["gdhg"] == gdhg && !back["ZZZZ"].Known && back["ZZZZ"].Day == "2026-11-16", "the cache file reads back the same, a missing symbol included, whatever the case");
+    File.Delete(cachePath);
+
+    // The fetcher, with a stand-in for Firecrawl.
+    var now = new DateTime(2026, 11, 16, 15, 0, 0, DateTimeKind.Utc);
+    string key = null;
+    var sent = new ConcurrentQueue<string>();
+    var answers = new ConcurrentDictionary<string, (int, string)>();
+    int inFlight = 0, mostInFlight = 0;
+    var arrived = new ConcurrentQueue<string>();
+    async Task<(int, string)> Send(string k, string json, CancellationToken ct)
+    {
+        int n = Interlocked.Increment(ref inFlight);
+        mostInFlight = Math.Max(mostInFlight, n);
+        await Task.Delay(30, ct);
+        Interlocked.Decrement(ref inFlight);
+        string symbol = (string)JsonNode.Parse(json)["alexandria"]["options"]["symbol"];
+        sent.Enqueue(symbol);
+        return answers.GetValueOrDefault(symbol, (200, Stats(symbol, "1,000,000", "2,000,000", "500,000")));
+    }
+
+    using var floats = new FloatSource(arrived.Enqueue, cachePath, Send, () => key, () => now);
+    floats.Want("GDHG");
+    await floats.IdleAsync();
+    Check(sent.IsEmpty && floats.Get("GDHG") == null, "with no key, nothing is sent");
+
+    key = "fc-test";
+    answers["GDHG"] = (200, Stats("GDHG", "29,519,326", "47,127,140", "5,256,126"));
+    answers["ZQZQX"] = (200, NotFound);
+    foreach (var s in new[] { "GDHG", "GMM", "ZQZQX", "BRK/B", "GDHG" })
+        floats.Want(s);
+    await floats.IdleAsync();
+    Check(sent.Order().SequenceEqual(new[] { "BRK.B", "GDHG", "GMM", "ZQZQX" }), $"each symbol asked once ({string.Join(" ", sent)})");
+    Check(mostInFlight == 1, "one request at a time");
+    Check(floats.Get("GDHG")?.Float == 29_519_326 && arrived.Contains("GDHG"), "the float is kept, and the connection told");
+    Check(floats.Get("ZQZQX") is { Known: false } && FloatFacts.ReadCache(cachePath).Count == 4, "a symbol the site doesn't have is kept as unknown, and all four are in the file");
+
+    sent.Clear();
+    floats.Want("GDHG");
+    floats.Want("ZQZQX");
+    await floats.IdleAsync();
+    Check(sent.IsEmpty, "not asked again the same day, found or not");
+    using (var reopened = new FloatSource(null, cachePath, Send, () => key, () => now))
+    {
+        reopened.Want("GDHG");
+        await reopened.IdleAsync();
+        Check(sent.IsEmpty && reopened.Get("GDHG")?.Float == 29_519_326, "nor after a restart: the file is read back");
+    }
+
+    now = now.AddDays(1);
+    floats.Want("GDHG");
+    await floats.IdleAsync();
+    Check(sent.SequenceEqual(new[] { "GDHG" }), "the next day it's asked again");
+
+    sent.Clear();
+    answers["FAIL"] = (500, "");
+    floats.Want("FAIL");
+    await floats.IdleAsync();
+    floats.Want("FAIL");
+    await floats.IdleAsync();
+    now = now.AddMinutes(11);
+    floats.Want("FAIL");
+    await floats.IdleAsync();
+    Check(sent.Count(s => s == "FAIL") == 2, "a failure waits 10 minutes before asking again");
+
+    sent.Clear();
+    answers["BROKE"] = (402, "");
+    floats.Want("BROKE");
+    await floats.IdleAsync();
+    floats.Want("OTHER");
+    await floats.IdleAsync();
+    now = now.AddMinutes(61);
+    floats.Want("OTHER");
+    await floats.IdleAsync();
+    Check(sent.SequenceEqual(new[] { "BROKE", "OTHER" }), $"out of credits stops all fetches for an hour ({string.Join(" ", sent)})");
+
+    Directory.Delete(dir, true);
+}
 
 // Depth pacing against a stand-in for Gateway, so it takes no real slots and can't disturb Quantower.
 async Task RunDepthPacing()

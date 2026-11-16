@@ -13,6 +13,11 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- The float cache's format, shared with the connection that writes it. -->
+    <Compile Include="..\ScalpFeedVendor\Feed\FloatFacts.cs" LinkBase="Shared" />
+  </ItemGroup>
+
+  <ItemGroup>
     <!-- Compile against the installed DLL; Quantower supplies it at runtime, so never copy it. -->
     <Reference Include="TradingPlatform.BusinessLayer">
       <HintPath>$(QuantowerBin)\TradingPlatform.BusinessLayer.dll</HintPath>

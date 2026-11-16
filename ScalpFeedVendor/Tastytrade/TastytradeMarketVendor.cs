@@ -57,6 +57,7 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
 
     private readonly ConcurrentDictionary<string, SymbolState> statesByStreamer = new();
     private readonly ConcurrentDictionary<string, string> streamerById = new();
+    private readonly ConcurrentDictionary<string, EquityInfo> equityBySymbol = new();
     private readonly SubscriptionBook book = new();
     private readonly FeedHealth health = new();
     private readonly SemaphoreSlim tokenGate = new(1, 1);
@@ -65,6 +66,7 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
     private DxLinkLink live;
     private HistoryClient history;
     private IbkrBridge ibkr;
+    private FloatSource floats;
     private System.Threading.Timer flushTimer;
     private System.Threading.Timer housekeepingTimer;
     private CancellationTokenSource lifetime;
@@ -172,6 +174,7 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
             // and the quote stays on tastytrade until IBKR answers.
             this.ibkr = new IbkrBridge(this.TimedPush, this.OnIbkrPrint);
             this.ibkr.Start();
+            this.floats = new FloatSource(this.OnFloatArrived);
 
             return ConnectionResult.CreateSuccess();
         }
@@ -309,7 +312,9 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
     private MessageSymbol CreateSymbol(EquityInfo info)
     {
         this.streamerById[info.Symbol] = info.StreamerSymbol;
+        this.equityBySymbol[info.Symbol] = info;
         this.GetState(info.StreamerSymbol).Id = info.Symbol;
+        this.floats?.Want(info.Symbol);
 
         return new MessageSymbol(info.Symbol)
         {
@@ -335,8 +340,52 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
             AllowCalculateRealtimeVolume = false,
             AllowCalculateRealtimeTicks = true,
             AllowCalculateRealtimeTrades = true,
-            QuoteDelay = this.currentToken is { IsRealTime: false } ? TimeSpan.FromTicks(DelayedFeedTicks) : TimeSpan.Zero
+            QuoteDelay = this.currentToken is { IsRealTime: false } ? TimeSpan.FromTicks(DelayedFeedTicks) : TimeSpan.Zero,
+            SymbolAdditionalInfo = this.FloatInfo(info.Symbol),
         };
+    }
+
+    /// <summary>The float in Symbol Info, from what's kept; null until there's something to show.</summary>
+    private List<AdditionalInfoItem> FloatInfo(string symbol)
+    {
+        var facts = this.floats?.Get(symbol);
+        if (facts == null)
+            return null;
+
+        string fetched = $"{DateTimeOffset.FromUnixTimeMilliseconds(facts.FetchedMs).LocalDateTime:MM-dd HH:mm}, stockanalysis.com";
+        return facts.Known
+            ?
+            [
+                FloatItem("float", "Float", facts.Describe(), 10),
+                FloatItem("sharesOut", "Shares outstanding", FloatFacts.Shares(facts.SharesOut), 20),
+                FloatItem("floatFetched", "Float fetched", fetched, 30),
+            ]
+            :
+            [
+                FloatItem("float", "Float", facts.Describe(), 10),
+                FloatItem("floatFetched", "Float fetched", fetched, 30),
+            ];
+    }
+
+    private static AdditionalInfoItem FloatItem(string id, string name, string value, int sortIndex) => new()
+    {
+        Id = id,
+        NameKey = name,
+        GroupInfo = "Float",
+        DataType = ComparingType.String,
+        SortIndex = sortIndex,
+        Value = value,
+    };
+
+    /// <summary>
+    /// Sends the symbol again with its float, from the float fetcher's thread. Whether Quantower takes in a symbol
+    /// sent again isn't documented; if it doesn't, Symbol Info shows the float from the next start, and the
+    /// Watchlist's Float column, which reads float-cache.json itself, shows it either way.
+    /// </summary>
+    private void OnFloatArrived(string symbol)
+    {
+        if (this.equityBySymbol.TryGetValue(symbol, out var info))
+            this.PushMessage(this.CreateSymbol(info));
     }
 
     private static List<VariableTick> ToVariableTicks(IReadOnlyList<TickBand> bands) =>
@@ -371,6 +420,8 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
 
         if (parameters.SubscribeType == SubscribeQuoteType.Quote)
         {
+            if (on)
+                this.floats?.Want(id);
             state.QuoteOn = on;
             this.ibkr?.SetQuote(state, on);
         }
@@ -1093,6 +1144,8 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
         // The Gateway connection itself stays open for whichever vendor comes next.
         this.ibkr?.Stop();
         this.ibkr = null;
+        this.floats?.Dispose();
+        this.floats = null;
 
         var link = this.live;
         this.live = null;
