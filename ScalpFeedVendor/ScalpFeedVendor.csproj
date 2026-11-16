@@ -1,14 +1,14 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <!-- Quantower v1.147.10 and its bundled vendors are built for .NET 10. -->
+    <!-- Quantower v1.147.11 and its bundled vendors are built for .NET 10. -->
     <TargetFramework>net10.0</TargetFramework>
     <LangVersion>latest</LangVersion>
     <Nullable>disable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <GenerateDependencyFile>false</GenerateDependencyFile>
-    <QuantowerBin Condition="'$(QuantowerBin)' == ''">C:\Quantower\TradingPlatform\v1.147.10\bin</QuantowerBin>
+    <QuantowerBin Condition="'$(QuantowerBin)' == ''">C:\Quantower\TradingPlatform\v1.147.11\bin</QuantowerBin>
     <!-- dotnet build -p:TestHooks=true adds a file trigger that drops the socket on demand. -->
     <DefineConstants Condition="'$(TestHooks)' == 'true'">$(DefineConstants);TESTHOOKS</DefineConstants>
   </PropertyGroup>

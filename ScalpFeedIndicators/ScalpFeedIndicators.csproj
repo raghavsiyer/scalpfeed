@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <!-- Same as the connection plugin: Quantower v1.147.10 runs on .NET 10. -->
+    <!-- Same as the connection plugin: Quantower v1.147.11 runs on .NET 10. -->
     <TargetFramework>net10.0</TargetFramework>
     <LangVersion>latest</LangVersion>
     <Nullable>disable</Nullable>
@@ -9,7 +9,7 @@
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <GenerateDependencyFile>false</GenerateDependencyFile>
     <AssemblyName>KeyMovingAverages</AssemblyName>
-    <QuantowerBin Condition="'$(QuantowerBin)' == ''">C:\Quantower\TradingPlatform\v1.147.10\bin</QuantowerBin>
+    <QuantowerBin Condition="'$(QuantowerBin)' == ''">C:\Quantower\TradingPlatform\v1.147.11\bin</QuantowerBin>
   </PropertyGroup>
 
   <ItemGroup>
