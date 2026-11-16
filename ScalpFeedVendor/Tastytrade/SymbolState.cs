@@ -42,6 +42,7 @@ internal sealed class SymbolState
     public double ResPrice = double.NaN;
     public double ResPaired = double.NaN;
     public double ResImbalance = double.NaN;
+    public bool PauseEstimateLogged;
     public double LuldLoggedLower = double.NaN;
     public double LuldLoggedUpper = double.NaN;
 
@@ -55,6 +56,10 @@ internal sealed class SymbolState
     public long LastPrintIndex;
     public long LastPrintTicks;
     public long LastTradeTimeMs;
+
+    // Whether LastTradeTimeMs is from the Trade stream as it is now. A resubscribed stream's first event brings it
+    // up to date, and until then it can be from before the symbol was last closed.
+    public volatile bool TradeTimeCurrent;
     public long NextDayBarTicks;
     public double LastPrice = double.NaN;
     public double LastSize = double.NaN;

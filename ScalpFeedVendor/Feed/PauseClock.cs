@@ -11,8 +11,8 @@ namespace ScalpFeedVendor.Feed;
 /// The start is IBKR's tick arriving, so it can be a fraction of a second late.
 ///
 /// A start is only known when the symbol was seen trading first on the same IBKR stream. One already paused when
-/// first seen (opened mid-pause) has none, and nor has a regulatory halt (Halted 1), which has no set reopening
-/// time. A cancelled stream forgets its start, since the reopening could pass unwatched. Starts are kept here
+/// first seen (opened mid-pause) has none, and its countdown is estimated from the last trade instead
+/// (EstimatedLeft). A regulatory halt (Halted 1) has no set reopening time at all. A cancelled stream forgets its start, since the reopening could pass unwatched. Starts are kept here
 /// rather than per vendor, so Quantower's reconnects, which build new symbol states that first see the pause
 /// as new, don't lose them, and nor do IBKR reconnects, which are usually seconds.
 /// </summary>
@@ -25,6 +25,10 @@ internal sealed class PauseClock
 
     // A start older than this, met again with nothing in between, is from a reopening the plugin didn't see.
     private static readonly long StaleTicks = Stopwatch.Frequency * 3600;
+
+    // How long after its last trade a pause is taken to have begun, and the oldest last trade worth estimating from.
+    private const double DeclaredAfterLastTradeSeconds = 1;
+    private const long StaleLastTradeMs = 3600_000;
 
     // Stopwatch stamps, by IBKR symbol.
     private readonly ConcurrentDictionary<string, long> starts = new();
@@ -52,6 +56,18 @@ internal sealed class PauseClock
     /// <summary>Seconds until the reopening is due, 300 down to 1, or null when the pause's start isn't known.</summary>
     public int? SecondsLeft(string symbol, long stamp) =>
         this.starts.TryGetValue(symbol, out long start) ? Left((double)(stamp - start) / Stopwatch.Frequency) : null;
+
+    /// <summary>
+    /// Seconds until the reopening of a pause already on when the symbol was opened, from its last trade, or null
+    /// when there's none or it's over an hour old. Nothing trades during a pause, and one begins about a second
+    /// after the last trade. Seen on 2026-11-16: GDHG's and GMM's six pauses that day began (IBKR's Halted tick)
+    /// 0 to 2 s after their last trade, and the two times GDHG was opened mid-pause, it reopened about 301 s after
+    /// its last trade. So the estimate is within a second or two, either way.
+    /// </summary>
+    public static int? EstimatedLeft(long lastTradeUtcMs, long nowUtcMs) =>
+        lastTradeUtcMs > 0 && nowUtcMs - lastTradeUtcMs <= StaleLastTradeMs
+            ? Left((nowUtcMs - lastTradeUtcMs) / 1000.0 - DeclaredAfterLastTradeSeconds)
+            : null;
 
     /// <summary>
     /// What the Res row reads: the seconds left times 1000, so 300,000 counting down to 1,000 (your choice of

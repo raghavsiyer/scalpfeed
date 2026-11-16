@@ -381,6 +381,8 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
         }
 
         bool any = state.QuoteOn || state.LastOn;
+        if (!any)
+            state.TradeTimeCurrent = false;
         this.book.Set(new FeedKey("Quote", streamer), state.QuoteOn);
         this.book.Set(new FeedKey("TimeAndSale", streamer), state.LastOn);
         this.book.Set(new FeedKey("Trade", streamer), any);
@@ -540,6 +542,7 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
             this.EmitPrint(state, row.Price, row.Size, ToUtcTicks(row.Time), PrintSide.Undefined, double.NaN, double.NaN, true, false);
 
         state.LastTradeTimeMs = Math.Max(state.LastTradeTimeMs, row.Time);
+        state.TradeTimeCurrent = true;
         this.MaybePushDayBar(state, row.ArrivalUtcTicks);
     }
 

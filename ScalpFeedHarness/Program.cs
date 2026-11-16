@@ -819,6 +819,14 @@ async Task RunLuld()
     pauses.Forget("SWITCHED");
     pauses.OnHalted("SWITCHED", -1, 2, t0 + Sec(900));
     Check(pauses.SecondsLeft("SWITCHED", t0 + Sec(900)) == null, "a cancelled stream forgets the start: the pause met later may be another one");
+
+    // Opened mid-pause: estimated from the last trade, the pause taken to begin a second after it.
+    long lastMs = 1_794_845_271_200; // GDHG's last trade before its pause, 08:07:51.2 local on 11-16
+    Check(PauseClock.EstimatedLeft(lastMs, lastMs + 1000) == 300 && PauseClock.EstimatedLeft(lastMs, lastMs + 300) == 300, "a pause opened just after its last trade reads 300");
+    Check(PauseClock.EstimatedLeft(lastMs, lastMs + 178_500) == 123, "GDHG opened at 08:10:49.7 reads 123 s, and it traded again at 08:12:52");
+    Check(PauseClock.EstimatedLeft(lastMs, lastMs + 421_000) == 180, "7 minutes in, an extension is 3 minutes from the 10-minute mark");
+    Check(PauseClock.EstimatedLeft(lastMs, lastMs - 400) == 300, "a last trade a moment ahead of this PC's clock reads as the start");
+    Check(PauseClock.EstimatedLeft(0, lastMs) == null && PauseClock.EstimatedLeft(lastMs, lastMs + 3_600_001) == null, "no estimate with no last trade, or one over an hour old");
 }
 
 // The slow-update diagnostics: off by default, and slow work matched against garbage collection pauses.

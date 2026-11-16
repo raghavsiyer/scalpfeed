@@ -47,9 +47,11 @@ internal sealed class IbkrBridge : IIbkrSink
     public const string ResVenue = "Res";
 
     /// <summary>
-    /// What the Res row reads when the reopening time isn't known (a halt, or a pause already on when the
-    /// symbol was opened): a fixed size far above any real row. In a pause whose start was seen it reads the
-    /// seconds until the reopening times 1000 instead (PauseClock), by your choice of 2026-11-13. The Limit rows read 1.
+    /// What the Res row reads when the reopening time isn't known (a halt, or a pause whose start wasn't seen and
+    /// with no recent last trade to estimate it from): a fixed size far above any real row. In a pause it reads the
+    /// seconds until the reopening times 1000 instead (PauseClock), by your choice of 2026-11-13, estimated from
+    /// the last trade when the pause was already on when the symbol was opened (your choice of 2026-11-16). The
+    /// Limit rows read 1.
     /// </summary>
     public const double MarkerRowSize = 999_999;
 
@@ -228,6 +230,7 @@ internal sealed class IbkrBridge : IIbkrSink
         bool wasKnown = state.IbkrHalted >= 0;
         PauseClock.Shared.OnHalted(symbol, state.IbkrHalted, halted, Stopwatch.GetTimestamp());
         state.IbkrHalted = halted;
+        state.PauseEstimateLogged = false;
         state.Luld.OnHalt(halted > 0);
 
         // Auction numbers from before a halt are the opening or closing cross's, and after it they're stale.
@@ -255,6 +258,7 @@ internal sealed class IbkrBridge : IIbkrSink
 
         int was = state.IbkrHalted;
         state.IbkrHalted = -1;
+        state.PauseEstimateLogged = false;
         if (was <= 0)
             return;
 
@@ -382,7 +386,7 @@ internal sealed class IbkrBridge : IIbkrSink
         long now = Stopwatch.GetTimestamp();
         foreach (var (symbol, state) in this.statesByIbkr)
         {
-            if (state.DepthOn && state.IbkrHalted > 0 && state.ResPrice > 0 && PauseClock.Shared.SecondsLeft(symbol, now) != null)
+            if (state.DepthOn && state.IbkrHalted > 0 && state.ResPrice > 0 && (PauseClock.Shared.SecondsLeft(symbol, now) ?? EstimatedSecondsLeft(state)) != null)
                 current.RefreshBook(symbol);
         }
     }
@@ -423,7 +427,15 @@ internal sealed class IbkrBridge : IIbkrSink
         // Paired shares and imbalance are in the log.
         if (hasBook && state.IbkrHalted > 0 && state.ResPrice > 0)
         {
-            double size = PauseClock.RowSize(PauseClock.Shared.SecondsLeft(IbkrClient.ToIbkrSymbol(state.Streamer), Stopwatch.GetTimestamp()), MarkerRowSize);
+            int? left = PauseClock.Shared.SecondsLeft(IbkrClient.ToIbkrSymbol(state.Streamer), Stopwatch.GetTimestamp());
+            if (left == null && (left = EstimatedSecondsLeft(state)) != null && !state.PauseEstimateLogged)
+            {
+                state.PauseEstimateLogged = true;
+                Log.Info($"[res] {state.Streamer} opened mid-pause, last trade at {DateTimeOffset.FromUnixTimeMilliseconds(state.LastTradeTimeMs).LocalDateTime:HH:mm:ss.fff}, " +
+                         $"so the countdown is estimated from that: {left} s to the reopening");
+            }
+
+            double size = PauseClock.RowSize(left, MarkerRowSize);
             bids = this.WithMarkerRow(bids, state.ResPrice, size, ResVenue, true, this.bidsWithRes);
             asks = this.WithMarkerRow(asks, state.ResPrice, size, ResVenue, false, this.asksWithRes);
         }
@@ -432,6 +444,12 @@ internal sealed class IbkrBridge : IIbkrSink
         Fill(book.Asks, asks, QuotePriceType.Ask, this.askIds, state.Id, now, bestAsk, state.IbkrAsk);
         this.push(book);
     }
+
+    /// <summary>For a pause whose start wasn't seen: the countdown from the last trade, once tastytrade's Trade stream is current.</summary>
+    private static int? EstimatedSecondsLeft(SymbolState state) =>
+        state.IbkrHalted == 2 && state.TradeTimeCurrent
+            ? PauseClock.EstimatedLeft(state.LastTradeTimeMs, (FeedClock.UtcNowTicks - DateTime.UnixEpoch.Ticks) / TimeSpan.TicksPerMillisecond)
+            : null;
 
     private List<IbkrDepthRow> WithMarkerRow(List<IbkrDepthRow> rows, double price, double shares, string venue, bool bids, List<IbkrDepthRow> into)
     {
