@@ -7,10 +7,12 @@ using System.Text.Json.Nodes;
 namespace ScalpFeedVendor.Feed;
 
 /// <summary>
-/// Fetches each symbol's float from stockanalysis.com through Firecrawl (your choice, 2026-11-16), at most once a
-/// day per symbol, when it's first quoted (a Watchlist row, chart or DOM), one request at a time, in the background, and keeps it in float-cache.json. tastytrade has no
-/// float, and its share counts are stale. Each fetch costs 5 Firecrawl credits; a symbol the site doesn't have
-/// costs nothing and isn't asked about again that day. The key is yours, in firecrawl.json, and stays out of the log.
+/// Fetches each symbol's float from stockanalysis.com through Firecrawl (your choice, 2026-11-16) when it's quoted
+/// (a Watchlist row, chart or DOM), one request at a time, in the background, and keeps it in float-cache.json.
+/// tastytrade has no float, and its share counts are stale. Each fetch costs 5 Firecrawl credits and the free plan
+/// has 1,000 a month, so a float is kept for a week (your choice, same day): floats change slowly, apart from
+/// offerings. A symbol the site doesn't have costs nothing and is asked about again the next day. The key is
+/// yours, in firecrawl.json, and stays out of the log.
 /// </summary>
 internal sealed class FloatSource : IDisposable
 {
@@ -58,14 +60,17 @@ internal sealed class FloatSource : IDisposable
     /// <summary>The facts kept for the symbol, however old, or null.</summary>
     public FloatFacts Get(string symbol) => this.cache.GetValueOrDefault(symbol);
 
-    /// <summary>Asks for today's facts unless they're here, already asked for, or a recent attempt failed.</summary>
+    /// <summary>How long a float found is kept before it's fetched again.</summary>
+    public static readonly TimeSpan KeepFound = TimeSpan.FromDays(7);
+
+    /// <summary>Asks for the facts unless they're fresh, already asked for, or a recent attempt failed.</summary>
     public void Want(string symbol)
     {
         if (string.IsNullOrEmpty(symbol))
             return;
 
         var now = this.utcNow();
-        if (this.cache.TryGetValue(symbol, out var facts) && facts.Day == FloatFacts.DayOf(now))
+        if (this.cache.TryGetValue(symbol, out var facts) && Fresh(facts, now))
             return;
         if (now < this.pausedUntilUtc || (this.retryAtUtc.TryGetValue(symbol, out var at) && now < at))
             return;
@@ -76,6 +81,12 @@ internal sealed class FloatSource : IDisposable
         if (Interlocked.CompareExchange(ref this.working, 1, 0) == 0)
             _ = Task.Run(this.WorkAsync);
     }
+
+    /// <summary>A float found is good for a week; that the site hasn't got a symbol, until the next day.</summary>
+    public static bool Fresh(FloatFacts facts, DateTime utc) =>
+        facts.Known
+            ? utc - DateTimeOffset.FromUnixTimeMilliseconds(facts.FetchedMs).UtcDateTime < KeepFound
+            : facts.Day == FloatFacts.DayOf(utc);
 
     /// <summary>For the harness: waits until nothing is queued or being fetched.</summary>
     public async Task IdleAsync()

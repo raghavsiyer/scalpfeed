@@ -493,8 +493,19 @@ async Task RunFloat()
 
     now = now.AddDays(1);
     floats.Want("GDHG");
+    floats.Want("ZQZQX");
     await floats.IdleAsync();
-    Check(sent.SequenceEqual(new[] { "GDHG" }), "the next day it's asked again");
+    Check(sent.SequenceEqual(new[] { "ZQZQX" }), $"the next day a float found is still kept, and a symbol not found is asked again, which costs nothing ({string.Join(" ", sent)})");
+
+    sent.Clear();
+    now = now.AddDays(5.9);
+    floats.Want("GDHG");
+    await floats.IdleAsync();
+    Check(sent.IsEmpty, "a float is kept for a week");
+    now = now.AddDays(0.2);
+    floats.Want("GDHG");
+    await floats.IdleAsync();
+    Check(sent.SequenceEqual(new[] { "GDHG" }), "and fetched again after it");
 
     sent.Clear();
     answers["FAIL"] = (500, "");

@@ -6,7 +6,7 @@ namespace ScalpFeedVendor.Feed;
 
 /// <summary>
 /// A stock's float and share count from stockanalysis.com's statistics page, through Firecrawl, as kept in
-/// float-cache.json: one entry per symbol, fetched at most once a day (Eastern). Float NaN means the site
+/// float-cache.json: one entry per symbol, fetched again after a week (FloatSource). Float NaN means the site
 /// doesn't have the symbol. Nothing here needs the plugin, so the Watchlist's Float column reads the same file.
 /// </summary>
 internal sealed record FloatFacts(string Day, double Float, double SharesOut, double AverageVolume, long FetchedMs)
