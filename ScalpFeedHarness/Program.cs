@@ -1087,6 +1087,27 @@ async Task RunLuld()
     luld.OnTrade(12.00, Et(9, 30, 3, day: 12), true);
     Check(Show(luld, Et(9, 30, 4, day: 12), 13.0) == "10.8/13.2 ref 12", "a new day starts over");
 
+    // Which side the Res row goes on (2026-11-17): the asks for a halt up, the bids for a halt down.
+    var run = new LuldBand();
+    run.OnTrade(4.00, Et(10, 0, 0), true);
+    run.OnTrade(4.40, Et(10, 0, 10), true);
+    Check(ResSide.FromBand(run, 4.40, Et(10, 0, 11)) == ResSide.Up, "a halt with the last trade above the band's reference went up");
+    Check(ResSide.FromBand(run, 3.60, Et(10, 0, 11)) == ResSide.Down, "and below it, down");
+    Check(ResSide.FromBand(run, 4.00, Et(10, 0, 11)) == ResSide.Unknown && ResSide.FromBand(run, double.NaN, Et(10, 0, 11)) == ResSide.Unknown,
+        "at the reference, or with no last trade, it can't say");
+    Check(ResSide.FromBand(run, 4.40, Et(10, 5, 11)) == ResSide.Unknown, "nor with no round lot in the last five minutes, when the reference may be from earlier");
+    Check(ResSide.FromBand(run, 4.40, Et(9, 0, 0, day: 13)) == ResSide.Unknown, "nor outside 9:30-16:00, where there's no band");
+    run.OnTrade(4.40, Et(10, 6, 0), true);
+    run.OnHalt(true);
+    Check(ResSide.FromBand(run, 4.40, Et(10, 6, 1)) == ResSide.Unknown, "the halt stops the band, so it's asked as the halt begins");
+    Check(ResSide.FromAuction(2.25, 3.55) == ResSide.Down, "a halt the band didn't see goes the way its auction points: NXXT paused limit-down at 3.55, indicative 2.25");
+    Check(ResSide.FromAuction(4.80, 4.40) == ResSide.Up, "an auction above the last trade points up");
+    Check(ResSide.FromAuction(2.24000001, 2.24) == ResSide.Unknown && ResSide.FromAuction(2.25, double.NaN) == ResSide.Unknown,
+        "an auction at the last trade, or no last trade, points neither way");
+    Check(ResSide.OnAsks(ResSide.Up) && !ResSide.OnBids(ResSide.Up), "halt up: among the asks only");
+    Check(ResSide.OnBids(ResSide.Down) && !ResSide.OnAsks(ResSide.Down), "halt down: among the bids only");
+    Check(ResSide.OnBids(ResSide.Unknown) && ResSide.OnAsks(ResSide.Unknown), "which way not known: both sides, as before");
+
     Check(PrintFilter.IsOddLot("F I"u8) && PrintFilter.IsOddLot("I"u8) && !PrintFilter.IsOddLot("F"u8) && !PrintFilter.IsOddLot(""u8), "IBKR's condition I marks an odd lot");
 
     using var gateway = new FakeGateway();

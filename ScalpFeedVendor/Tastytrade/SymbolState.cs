@@ -43,6 +43,9 @@ internal sealed class SymbolState
     public double ResPaired = double.NaN;
     public double ResImbalance = double.NaN;
     public bool PauseEstimateLogged;
+
+    // Which way the halt went, for the side its Res row goes on (ResSide): 1 up, -1 down, 0 not known yet.
+    public int HaltWay;
     public double LuldLoggedLower = double.NaN;
     public double LuldLoggedUpper = double.NaN;
 
@@ -56,6 +59,10 @@ internal sealed class SymbolState
     public long LastPrintIndex;
     public long LastPrintTicks;
     public long LastTradeTimeMs;
+
+    // The Trade stream's last price, written by tastytrade's receive thread. A symbol opened mid-halt has printed
+    // nothing, so this is its only last trade to judge the Res row's side by.
+    public double LastTradePrice = double.NaN;
 
     // Whether LastTradeTimeMs is from the Trade stream as it is now. A resubscribed stream's first event brings it
     // up to date, and until then it can be from before the symbol was last closed.

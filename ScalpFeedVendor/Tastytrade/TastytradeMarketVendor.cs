@@ -696,6 +696,8 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
         if (this.fallbackOn && !state.IbkrTape && row.Time > state.LastTradeTimeMs && !double.IsNaN(row.Price))
             this.EmitPrint(state, row.Price, row.Size, ToUtcTicks(row.Time), PrintSide.Undefined, double.NaN, double.NaN, true, false);
 
+        if (row.Time >= state.LastTradeTimeMs && row.Price > 0)
+            state.LastTradePrice = row.Price;
         state.LastTradeTimeMs = Math.Max(state.LastTradeTimeMs, row.Time);
         state.TradeTimeCurrent = true;
         this.MaybePushDayBar(state, row.ArrivalUtcTicks);

@@ -164,6 +164,32 @@ internal sealed class LuldBand
         }
     }
 
+    /// <summary>
+    /// The reference price, for which way a halt beginning now went (ResSide). Only while the band runs and has had
+    /// a round lot in the last five minutes, so a reference left from earlier in the day doesn't count. Asked
+    /// before OnHalt, which stops the band.
+    /// </summary>
+    public bool TryGetRecentReference(long utcTicks, out double reference)
+    {
+        reference = double.NaN;
+        if (!InSession(utcTicks, out var et))
+            return false;
+
+        lock (this.gate)
+        {
+            this.StartDay(et.Date);
+            if (this.halted || this.awaitingReopen || double.IsNaN(this.reference))
+                return false;
+
+            this.Advance(utcTicks);
+            if (this.window.Count == 0)
+                return false;
+
+            reference = this.reference;
+            return true;
+        }
+    }
+
     public bool TryGetBands(long utcTicks, double prevClose, bool isTier1, out Bands bands)
     {
         bands = default;

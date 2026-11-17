@@ -230,10 +230,24 @@ internal sealed class IbkrBridge : IIbkrSink
         if (!this.statesByIbkr.TryGetValue(symbol, out var state) || halted == state.IbkrHalted)
             return;
 
-        bool wasKnown = state.IbkrHalted >= 0;
-        PauseClock.Shared.OnHalted(symbol, state.IbkrHalted, halted, Stopwatch.GetTimestamp());
+        int before = state.IbkrHalted;
+        bool wasKnown = before >= 0;
+        PauseClock.Shared.OnHalted(symbol, before, halted, Stopwatch.GetTimestamp());
         state.IbkrHalted = halted;
         state.PauseEstimateLogged = false;
+
+        // Which way it went, asked of the band before the halt stops it. A pause turning into a halt keeps it.
+        if (halted <= 0)
+        {
+            state.HaltWay = ResSide.Unknown;
+        }
+        else if (before <= 0)
+        {
+            state.HaltWay = ResSide.FromBand(state.Luld, state.LastPrice, FeedClock.UtcNowTicks);
+            if (state.HaltWay != ResSide.Unknown)
+                Log.Info($"[res] {symbol} halted {ResSide.Word(state.HaltWay)} at {state.LastPrice}, so its Res row goes among the {ResSide.Side(state.HaltWay)}");
+        }
+
         state.Luld.OnHalt(halted > 0);
 
         // Auction numbers from before a halt are the opening or closing cross's, and after it they're stale.
@@ -270,6 +284,7 @@ internal sealed class IbkrBridge : IIbkrSink
             return;
 
         state.ResPrice = state.ResPaired = state.ResImbalance = double.NaN;
+        state.HaltWay = ResSide.Unknown;
         state.Luld.ForgetHalt();
         Log.Info($"[luld] {symbol} not streaming from IBKR mid-{(was == 2 ? "pause" : "halt")}, so it's forgotten until IBKR says it again");
     }
@@ -429,9 +444,9 @@ internal sealed class IbkrBridge : IIbkrSink
             LogBand(state, band);
         }
 
-        // During a halt or pause, the price the listing market would reopen at now, on both sides so it
-        // stays put as the imbalance swings, sized by the seconds until the reopening where that's known.
-        // Paired shares and imbalance are in the log.
+        // During a halt or pause, the price the listing market would reopen at now: among the asks for a halt
+        // up and the bids for a halt down (ResSide), on both sides while which way isn't known, sized by the
+        // seconds until the reopening where that's known. Paired shares and imbalance are in the log.
         if (hasBook && state.IbkrHalted > 0 && state.ResPrice > 0)
         {
             int? left = PauseClock.Shared.SecondsLeft(IbkrClient.ToIbkrSymbol(state.Streamer), Stopwatch.GetTimestamp());
@@ -442,15 +457,31 @@ internal sealed class IbkrBridge : IIbkrSink
                          $"so the countdown is estimated from that: {left} s to the reopening");
             }
 
+            // A halt whose start the band didn't see goes the way its reopening points, decided once.
+            if (state.HaltWay == ResSide.Unknown)
+            {
+                double last = LastTrade(state);
+                state.HaltWay = ResSide.FromAuction(state.ResPrice, last);
+                if (state.HaltWay != ResSide.Unknown)
+                    Log.Info($"[res] {state.Streamer} which way it halted wasn't seen, so the auction at {state.ResPrice}, " +
+                             $"{(state.HaltWay == ResSide.Up ? "above" : "below")} the last trade at {last}, puts its Res row among the {ResSide.Side(state.HaltWay)}");
+            }
+
             double size = PauseClock.RowSize(left, MarkerRowSize);
-            bids = this.WithMarkerRow(bids, state.ResPrice, size, ResVenue, true, this.bidsWithRes);
-            asks = this.WithMarkerRow(asks, state.ResPrice, size, ResVenue, false, this.asksWithRes);
+            if (ResSide.OnBids(state.HaltWay))
+                bids = this.WithMarkerRow(bids, state.ResPrice, size, ResVenue, true, this.bidsWithRes);
+            if (ResSide.OnAsks(state.HaltWay))
+                asks = this.WithMarkerRow(asks, state.ResPrice, size, ResVenue, false, this.asksWithRes);
         }
 
         Fill(book.Bids, bids, QuotePriceType.Bid, this.bidIds, state.Id, now, bestBid, state.IbkrBid);
         Fill(book.Asks, asks, QuotePriceType.Ask, this.askIds, state.Id, now, bestAsk, state.IbkrAsk);
         this.push(book);
     }
+
+    /// <summary>The last trade: the Trade stream's once it's current, since the tape may not have printed since the symbol was last open.</summary>
+    private static double LastTrade(SymbolState state) =>
+        state.TradeTimeCurrent && state.LastTradePrice > 0 ? state.LastTradePrice : state.LastPrice;
 
     /// <summary>For a pause whose start wasn't seen: the countdown from the last trade, once tastytrade's Trade stream is current.</summary>
     private static int? EstimatedSecondsLeft(SymbolState state) =>
