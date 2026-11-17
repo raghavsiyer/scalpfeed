@@ -66,12 +66,19 @@ internal sealed class IbkrBridge : IIbkrSink
     private DateTime notLiveSinceUtc;
 
     private readonly Action<IReadOnlyList<string>> topGainers;
+    private readonly Action<IReadOnlyList<string>> halts;
+    private readonly Action<SymbolState> haltRow;
 
-    public IbkrBridge(Action<Message> push, PrintHandler emitPrint, Action<IReadOnlyList<string>> topGainers = null)
+    /// <param name="halts">The halted stocks scan's list, in tastytrade's symbols.</param>
+    /// <param name="haltRow">Sends a halted symbol's Watchlist row again, so its countdown moves (each second during a halt, once after).</param>
+    public IbkrBridge(Action<Message> push, PrintHandler emitPrint, Action<IReadOnlyList<string>> topGainers = null,
+        Action<IReadOnlyList<string>> halts = null, Action<SymbolState> haltRow = null)
     {
         this.push = push;
         this.emitPrint = emitPrint;
         this.topGainers = topGainers;
+        this.halts = halts;
+        this.haltRow = haltRow;
         this.bidIds = Enumerable.Range(0, 200).Select(i => "b" + i).ToArray();
         this.askIds = Enumerable.Range(0, 200).Select(i => "a" + i).ToArray();
     }
@@ -260,6 +267,10 @@ internal sealed class IbkrBridge : IIbkrSink
     public void OnIbkrScan(IReadOnlyList<string> symbols) =>
         this.topGainers?.Invoke(symbols.Select(IbkrClient.FromIbkrSymbol).ToList());
 
+    /// <summary>The halted stocks scan's list, in tastytrade's symbols.</summary>
+    public void OnIbkrHaltScan(IReadOnlyList<string> symbols) =>
+        this.halts?.Invoke(symbols.Select(IbkrClient.FromIbkrSymbol).ToList());
+
     public void OnIbkrQuoteStopped(string symbol)
     {
         if (this.statesByIbkr.TryGetValue(symbol, out var state))
@@ -401,7 +412,8 @@ internal sealed class IbkrBridge : IIbkrSink
 
     /// <summary>
     /// A paused symbol's book goes out again each second, so its Res row's countdown moves even when nothing
-    /// else in the book does. The client sends it from its own thread, the next time any data arrives.
+    /// else in the book does. The client sends it from its own thread, the next time any data arrives. Its
+    /// Watchlist row goes out again too, from here, and once more after the halt so its halt columns clear.
     /// </summary>
     private void RefreshCountdowns(IbkrClient current)
     {
@@ -410,6 +422,8 @@ internal sealed class IbkrBridge : IIbkrSink
         {
             if (state.DepthOn && state.IbkrHalted > 0 && state.ResPrice > 0 && (PauseClock.Shared.SecondsLeft(symbol, now) ?? EstimatedSecondsLeft(state)) != null)
                 current.RefreshBook(symbol);
+            if (state.QuoteOn && (state.IbkrHalted > 0 || state.HaltColumnsShown))
+                this.haltRow?.Invoke(state);
         }
     }
 
@@ -482,6 +496,15 @@ internal sealed class IbkrBridge : IIbkrSink
     /// <summary>The last trade: the Trade stream's once it's current, since the tape may not have printed since the symbol was last open.</summary>
     private static double LastTrade(SymbolState state) =>
         state.TradeTimeCurrent && state.LastTradePrice > 0 ? state.LastTradePrice : state.LastPrice;
+
+    /// <summary>
+    /// The seconds until a halted symbol reopens, as the depth's Res row counts them: from the pause's start where it
+    /// was seen (PauseClock), else estimated from the last trade. Null when not halted or not known (a regulatory halt).
+    /// </summary>
+    public static int? SecondsToReopening(SymbolState state) =>
+        state.IbkrHalted > 0
+            ? PauseClock.Shared.SecondsLeft(IbkrClient.ToIbkrSymbol(state.Streamer), Stopwatch.GetTimestamp()) ?? EstimatedSecondsLeft(state)
+            : null;
 
     /// <summary>For a pause whose start wasn't seen: the countdown from the last trade, once tastytrade's Trade stream is current.</summary>
     private static int? EstimatedSecondsLeft(SymbolState state) =>

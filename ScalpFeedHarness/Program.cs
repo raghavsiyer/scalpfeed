@@ -214,6 +214,13 @@ async Task RunScan(int port, string liveCode)
     Check(IbkrScan.From(JsonNode.Parse("false")) == null && IbkrScan.From(null) == new IbkrScan(), "topGainers in ibkr.json: false turns it off, and it's on by default");
     var custom = IbkrScan.From(JsonNode.Parse("""{"priceAbove":1,"priceBelow":20,"volumeAbove":100000}"""));
     Check(custom == new IbkrScan(PriceAbove: 1, PriceBelow: 20, VolumeAbove: 100000), "its filters can be set");
+    var haltScan = IbkrScan.HaltDefaults;
+    Check(haltScan is { Code: "HALTED", AfterHoursCode: "HALTED", Rows: 50, PriceAbove: 0.10, PriceBelow: 25, VolumeAbove: 1, ChangeAbove: 0, IntervalSeconds: 2, Location: "STK.US.MAJOR" }
+          && haltScan.Filter("HALTED") == "",
+        "the halts scan is HALTED: 50 rows, $0.10-$25, traded today, no change filter, every 2 s");
+    Check(IbkrScan.From(JsonNode.Parse("false"), haltScan) == null && IbkrScan.From(null, haltScan) == haltScan
+          && IbkrScan.From(JsonNode.Parse("""{"rows":20}"""), haltScan) == haltScan with { Rows = 20 },
+        "halts in ibkr.json: false turns it off, it's on by default, and its filters can be set");
 
     var eastern = TimeZoneInfo.FindSystemTimeZoneById("Eastern Standard Time");
     DateTime Et(int h, int m, int s) => TimeZoneInfo.ConvertTimeToUtc(new DateTime(2026, 11, 16, h, m, s, DateTimeKind.Unspecified), eastern);
@@ -282,11 +289,61 @@ async Task RunScan(int port, string liveCode)
         await client.StopAsync();
     }
 
+    // Both scans: they take turns, one in flight at a time, and each answer goes to its own list.
+    {
+        using var gateway = new FakeGateway();
+        var sink = new IbkrTestSink();
+        var client = new IbkrClient(new IbkrConfig(true, "127.0.0.1", gateway.Port, 1, false, TopGainers: new IbkrScan(), Halts: haltScan)) { ScanClock = () => Et(10, 0, 0) };
+        client.SetSink(sink);
+        client.Start();
+        var timer = Stopwatch.StartNew();
+        async Task<string[]> Nth(int count)
+        {
+            var until = timer.Elapsed + TimeSpan.FromSeconds(10);
+            while (timer.Elapsed < until && gateway.ScanRequests.Count < count)
+                await Task.Delay(10);
+            return gateway.ScanRequests.Skip(count - 1).FirstOrDefault() ?? [];
+        }
+
+        int IdOf(string[] request) => request.Length > 1 ? int.Parse(request[1], CultureInfo.InvariantCulture) : 0;
+
+        var gainers = await Nth(1);
+        Check(gainers.Length > 5 && gainers[5] == "TOP_PERC_GAIN", "the gainers go first");
+        await Task.Delay(600);
+        Check(gateway.ScanRequests.Count == 1, "and the halts wait for their answer");
+        gateway.SendScan(IdOf(gainers), ("GDHG", "STK"));
+        var halted = await Nth(2);
+        Check(halted.Length == 26 && halted[5] == "HALTED" && halted[2] == "50" && halted[7] == "25" && halted[8] == "1" && halted[23] == "",
+            $"then the halts: traded today, no change filter ({string.Join("|", halted)})");
+        gateway.SendScan(IdOf(halted), ("NXXT", "STK"), ("AFNXU", "STK"), ("XYZ", "WAR"));
+        await Task.Delay(300);
+        Check(sink.Scans.Count == 1 && sink.Scans.First().SequenceEqual(new[] { "GDHG" }) && sink.HaltScans.Count == 1 && sink.HaltScans.First().SequenceEqual(new[] { "NXXT", "AFNXU" }),
+            "each answer reaches its own list, stocks only");
+        Check(gateway.ScanCancels.Contains(IdOf(gainers)) && gateway.ScanCancels.Contains(IdOf(halted)), "and each is cancelled as it answers");
+        var again = await Nth(3);
+        Check(again.Length > 5 && again[5] == "TOP_PERC_GAIN" && IdOf(again) > IdOf(halted), "then the gainers again, under a new id");
+
+        // Nothing halted: IBKR answers 165 "no items retrieved" (paper Gateway, 11-17), not an empty list.
+        gateway.SendScan(IdOf(again), ("GDHG", "STK"));
+        var noneHalted = await Nth(4);
+        gateway.SendError(IdOf(noneHalted), 165, "Historical Market Data Service query message:no items retrieved");
+        await Task.Delay(300);
+        Check(noneHalted.Length > 5 && noneHalted[5] == "HALTED" && sink.HaltScans.Count == 2 && sink.HaltScans.Last().Count == 0 && gateway.ScanCancels.Contains(IdOf(noneHalted)),
+            "a scan with nothing to list answers 165 no items retrieved, and its list goes empty");
+        var refused = await Nth(5);
+        gateway.SendError(IdOf(refused), 165, "Historical Market Data Service query message:Trading TWS session is connected from a different IP address");
+        await Task.Delay(300);
+        Check(refused.Length > 5 && refused[5] == "TOP_PERC_GAIN" && sink.Scans.Count == 2 && sink.Scans.Last().SequenceEqual(new[] { "GDHG" }),
+            "any other 165 is a failure, and leaves its list alone");
+        await client.StopAsync();
+    }
+
     if (port == 0)
         return;
 
     var live = new IbkrTestSink();
-    var real = new IbkrClient(new IbkrConfig(true, "127.0.0.1", port, 87, IbkrConfig.Load().AllowLiveAccount, TopGainers: liveCode == null ? new IbkrScan() : new IbkrScan(liveCode, liveCode)));
+    var real = new IbkrClient(new IbkrConfig(true, "127.0.0.1", port, 87, IbkrConfig.Load().AllowLiveAccount,
+        TopGainers: liveCode == null ? new IbkrScan() : new IbkrScan(liveCode, liveCode), Halts: liveCode == null ? haltScan : null));
     real.SetSink(live);
     real.Start();
     var wait = Stopwatch.StartNew();
@@ -294,6 +351,8 @@ async Task RunScan(int port, string liveCode)
         await Task.Delay(100);
     foreach (var scan in live.Scans)
         Console.WriteLine($"RESULT {scan.Count} rows: {string.Join(" ", scan)}");
+    foreach (var scan in live.HaltScans)
+        Console.WriteLine($"RESULT halts {scan.Count} rows: {string.Join(" ", scan)}");
     Console.WriteLine($"RESULT {live.Scans.Count} lists in {wait.Elapsed.TotalSeconds:F1} s");
     Check(live.Scans.Count >= 2, "the real Gateway answers scan after scan");
     await real.StopAsync();
@@ -2966,6 +3025,10 @@ internal sealed class IbkrTestSink : IIbkrSink
     public readonly System.Collections.Concurrent.ConcurrentQueue<IReadOnlyList<string>> Scans = new();
 
     public void OnIbkrScan(IReadOnlyList<string> symbols) => this.Scans.Enqueue(symbols);
+
+    public readonly System.Collections.Concurrent.ConcurrentQueue<IReadOnlyList<string>> HaltScans = new();
+
+    public void OnIbkrHaltScan(IReadOnlyList<string> symbols) => this.HaltScans.Enqueue(symbols);
 
     public readonly ConcurrentQueue<(string Symbol, int Tick, double Value)> Auctions = new();
 

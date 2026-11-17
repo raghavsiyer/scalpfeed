@@ -70,14 +70,11 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
     private VolumeAverages averages;
     private DateTime nextAveragesUtc;
 
-    private const string TopGainersList = "IBKR Top Gainers";
+    private readonly ScanList topGainers = new("IBKR Top Gainers", logEachChange: false);
+    private readonly ScanList halts = new("IBKR Halts", logEachChange: true);
 
     /// <summary>The Quote asset volume column shows the day's dollar volume in hundreds: $15.0M reads 150,126.</summary>
     private const double DollarVolumeUnit = 100;
-    private readonly object topGainersGate = new();
-    private IReadOnlyList<string> topGainersSent;
-    private IReadOnlyList<string> topGainersNext;
-    private bool topGainersLogged;
     private System.Threading.Timer flushTimer;
     private System.Threading.Timer housekeepingTimer;
     private CancellationTokenSource lifetime;
@@ -183,7 +180,7 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
 
             // Gateway being closed mustn't fail the connection: tape and charts still work,
             // and the quote stays on tastytrade until IBKR answers.
-            this.ibkr = new IbkrBridge(this.TimedPush, this.OnIbkrPrint, this.OnTopGainers);
+            this.ibkr = new IbkrBridge(this.TimedPush, this.OnIbkrPrint, this.topGainers.Offer, this.halts.Offer, s => this.PushDayBarNow(s.Streamer));
             this.ibkr.Start();
             this.floats = new FloatSource(this.OnFloatArrived);
             this.averages = new VolumeAverages(this.history.LoadAsync, this.OnAverageArrived);
@@ -387,83 +384,6 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
         SortIndex = sortIndex,
         Value = value,
     };
-
-    /// <summary>
-    /// IBKR's top gainers, kept as a symbol list you open in a Watchlist: the regular session's, or after hours the
-    /// after-hours ones (IbkrScan). Looking the symbols up can call back into this connection (a symbol it hasn't
-    /// made yet), so it runs off IBKR's thread, one list at a time. A list the same as the last is left alone,
-    /// unless the list has gone (deleted in Quantower), when it's made again.
-    /// </summary>
-    private void OnTopGainers(IReadOnlyList<string> symbols)
-    {
-        lock (this.topGainersGate)
-        {
-            bool idle = this.topGainersNext == null;
-            this.topGainersNext = symbols;
-            if (idle)
-                _ = Task.Run(this.PublishTopGainers);
-        }
-    }
-
-    private void PublishTopGainers()
-    {
-        while (true)
-        {
-            IReadOnlyList<string> names;
-            lock (this.topGainersGate)
-            {
-                names = this.topGainersNext;
-                if (names == null)
-                    return;
-            }
-
-            try
-            {
-                this.PublishTopGainers(names);
-            }
-            catch (Exception ex)
-            {
-                Log.Info($"[scan] couldn't update {TopGainersList}: {ex.GetBaseException().Message}");
-            }
-
-            lock (this.topGainersGate)
-            {
-                this.topGainersSent = names;
-                if (ReferenceEquals(this.topGainersNext, names))
-                {
-                    this.topGainersNext = null;
-                    return;
-                }
-            }
-        }
-    }
-
-    private void PublishTopGainers(IReadOnlyList<string> names)
-    {
-        bool exists = Core.Instance.SymbolList.Any(l => l.Name == TopGainersList);
-        if (exists && this.topGainersSent != null && names.SequenceEqual(this.topGainersSent))
-            return;
-
-        string connectionId = Core.Instance.Connections.Connected.FirstOrDefault(c => c.VendorName == ScalpFeedVendor.VendorName)?.Id;
-        var symbols = new List<Symbol>();
-        foreach (var name in names)
-        {
-            // Stocks only: leveraged ETFs (SOXS, UVIX, MSTZ on 11-16) crowd a gainers list.
-            var symbol = Core.Instance.GetSymbol(new GetSymbolRequestParameters { SymbolId = name }, connectionId);
-            if (symbol != null && symbol.SymbolType != SymbolType.ETF)
-                symbols.Add(symbol);
-        }
-
-        if (exists)
-            Core.Instance.ReplaceSymbolList(TopGainersList, symbols);
-        else
-            Core.Instance.AddSymbolList(TopGainersList, symbols);
-
-        // It changes every 30 seconds or so, so only the first of each connection, and each remaking, go in the log.
-        if (!this.topGainersLogged || !exists)
-            Log.Info($"[scan] {TopGainersList}: {symbols.Count} stocks of {names.Count} rows, {string.Join(" ", symbols.Take(10).Select(s => s.Name))} ...");
-        this.topGainersLogged = true;
-    }
 
     /// <summary>
     /// Sends the symbol again with its float, from the float fetcher's thread, and its Watchlist row at once.
@@ -867,6 +787,31 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
 
         if (state.DayTurnover > 0)
             bar.QuoteAssetVolume = Math.Round(state.DayTurnover / DollarVolumeUnit);
+
+        // During a halt, what the depth's Res row shows (your request, 2026-11-17): the reopening auction's price as
+        // the mark price and the seconds until the reopening as the mark size, for the IBKR Halts list. Each blank
+        // until known, and the countdown always is for a regulatory halt. The halt's end sends zeros once, in case a
+        // blank leaves the last value up (not yet seen either way).
+        if (state.IbkrHalted > 0)
+        {
+            if (state.ResPrice > 0)
+            {
+                bar.Mark = state.ResPrice;
+                state.HaltColumnsShown = true;
+            }
+
+            if (IbkrBridge.SecondsToReopening(state) is int left)
+            {
+                bar.MarkSize = left;
+                state.HaltColumnsShown = true;
+            }
+        }
+        else if (state.HaltColumnsShown)
+        {
+            state.HaltColumnsShown = false;
+            bar.Mark = 0;
+            bar.MarkSize = 0;
+        }
 
         this.PushMessage(bar);
     }

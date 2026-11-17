@@ -46,6 +46,9 @@ internal sealed class SymbolState
 
     // Which way the halt went, for the side its Res row goes on (ResSide): 1 up, -1 down, 0 not known yet.
     public int HaltWay;
+
+    // The Watchlist row shows a halt's Res price and countdown, so the first row after the halt clears them.
+    public volatile bool HaltColumnsShown;
     public double LuldLoggedLower = double.NaN;
     public double LuldLoggedUpper = double.NaN;
 

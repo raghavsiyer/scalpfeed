@@ -54,15 +54,23 @@ internal sealed record IbkrScan(
         return time >= TimeSpan.FromHours(16) || time < TimeSpan.FromHours(4) ? this.AfterHoursCode : this.Code;
     }
 
-    /// <summary>From ibkr.json's topGainers: false turns it off, an object changes what it asks for.</summary>
-    public static IbkrScan From(JsonNode json)
-    {
-        if (json is JsonValue v && v.TryGetValue(out bool on))
-            return on ? new IbkrScan() : null;
-        if (json is not JsonObject o)
-            return new IbkrScan();
+    /// <summary>
+    /// IBKR's halted stocks (your request, 2026-11-17), kept as the IBKR Halts list: scan code HALTED, on the same
+    /// exchanges and $0.10-$25 as the gainers, up to 50 rows, every 2 s, and only stocks traded today. Unfiltered
+    /// on the paper Gateway at 11:20 ET on 11-17 its 19 rows were all halts with no trading that day (SPAC units,
+    /// names halted for weeks), Halted 1 and volume 0, and a volume over 0 left none of them.
+    /// </summary>
+    public static IbkrScan HaltDefaults { get; } = new("HALTED", "HALTED", Rows: 50, VolumeAbove: 1, ChangeAbove: 0);
 
-        var d = new IbkrScan();
+    /// <summary>From ibkr.json's topGainers or halts: false turns it off, an object changes what it asks for.</summary>
+    public static IbkrScan From(JsonNode json, IbkrScan defaults = null)
+    {
+        var d = defaults ?? new IbkrScan();
+        if (json is JsonValue v && v.TryGetValue(out bool on))
+            return on ? d : null;
+        if (json is not JsonObject o)
+            return d;
+
         return new IbkrScan(
             (string)o["scanCode"] ?? d.Code,
             (string)o["afterHoursScanCode"] ?? d.AfterHoursCode,
@@ -97,7 +105,7 @@ internal sealed record IbkrScan(
     private static object Optional(double value) => double.IsNaN(value) ? "" : value;
 }
 
-internal sealed record IbkrConfig(bool Enabled, string Host, int Port, int ClientId, bool AllowLiveAccount, int DepthRows = 50, TapeMode Tape = TapeMode.Ibkr, int TradingClientIdSetting = 0, IbkrScan TopGainers = null)
+internal sealed record IbkrConfig(bool Enabled, string Host, int Port, int ClientId, bool AllowLiveAccount, int DepthRows = 50, TapeMode Tape = TapeMode.Ibkr, int TradingClientIdSetting = 0, IbkrScan TopGainers = null, IbkrScan Halts = null)
 {
     public static string FilePath => Path.Combine(Log.AppDir, "ibkr.json");
 
@@ -107,7 +115,7 @@ internal sealed record IbkrConfig(bool Enabled, string Host, int Port, int Clien
     /// <summary>Reads ibkr.json, which is optional. The defaults suit a paper IB Gateway.</summary>
     public static IbkrConfig Load()
     {
-        var config = new IbkrConfig(true, "127.0.0.1", 4002, 78, false, TopGainers: new IbkrScan());
+        var config = new IbkrConfig(true, "127.0.0.1", 4002, 78, false, TopGainers: new IbkrScan(), Halts: IbkrScan.HaltDefaults);
         try
         {
             if (!File.Exists(FilePath))
@@ -123,7 +131,8 @@ internal sealed record IbkrConfig(bool Enabled, string Host, int Port, int Clien
                 json["depthRows"]?.GetValue<int>() ?? config.DepthRows,
                 Enum.TryParse<TapeMode>((string)json["tape"], true, out var tape) ? tape : config.Tape,
                 json["tradingClientId"]?.GetValue<int>() ?? config.TradingClientIdSetting,
-                IbkrScan.From(json["topGainers"]));
+                IbkrScan.From(json["topGainers"]),
+                IbkrScan.From(json["halts"], IbkrScan.HaltDefaults));
         }
         catch (Exception ex) when (ex is JsonException or InvalidOperationException or IOException)
         {
@@ -160,6 +169,9 @@ internal interface IIbkrSink
 
     /// <summary>The scanner's latest list, best first, in IBKR's symbols. It comes again whenever IBKR updates it.</summary>
     void OnIbkrScan(IReadOnlyList<string> symbols);
+
+    /// <summary>The halted stocks scan's latest list (<see cref="IbkrScan.HaltDefaults"/>), in IBKR's symbols.</summary>
+    void OnIbkrHaltScan(IReadOnlyList<string> symbols);
 
     /// <summary>
     /// One of the listing market's auction numbers, from the symbol's quote: <see cref="IbkrClient.AuctionPriceTick"/>,
@@ -212,14 +224,20 @@ internal sealed class IbkrClient
     /// <summary>The scanners' request ids count up from here, far above the streams' and history's, which start at 1.</summary>
     public const int ScanRequestId = 2_000_000_000;
 
-    // The one-off scan waiting for its answer (0 when none is), when it went, the code last asked for, and when
-    // the next may go, in Stopwatch stamps.
+    /// <summary>The scans, which take turns with one in flight at a time: the top gainers, then the halts.</summary>
+    public const int GainersScan = 0;
+    public const int HaltsScan = 1;
+
+    // The one-off scan waiting for its answer (0 when none is), which scan it is, when it went, and by scan the code
+    // last asked for and when the next may go, in Stopwatch stamps.
     private static readonly long ScanGiveUpTicks = Stopwatch.Frequency * 10;
     private int scanId;
+    private int scanKind;
+    private int lastScanKind = HaltsScan;
     private int scanSeq;
     private long scanSentStamp;
-    private long nextScanStamp;
-    private string scanCode;
+    private readonly long[] nextScanStamps = new long[2];
+    private readonly string[] scanCodes = new string[2];
     private Timer scanTimer;
 
     /// <summary>What decides the session for the scan. The harness sets it; FeedClock won't stray that far.</summary>
@@ -234,6 +252,9 @@ internal sealed class IbkrClient
 
     // Shared with real historical data failures, so it's only ignored on a scan's id.
     private const int ScannerCancelled = 162;
+
+    // "Historical Market Data Service query message": on a scan, either nothing to list or a failure, by its text.
+    private const int NoScanItems = 165;
     private const int FirstInfoCode = 2100;
     private const int LastInfoCode = 2999;
     private const int ConnectivityLost = 1100;
@@ -347,7 +368,7 @@ internal sealed class IbkrClient
         this.stopCts = new CancellationTokenSource();
         this.flushTimer = new Timer(this.OnFlushTimer, null, Timeout.Infinite, Timeout.Infinite);
         this.housekeepingTimer = new Timer(this.OnHousekeeping, null, 1000, 1000);
-        if (this.config.TopGainers != null)
+        if (this.config.TopGainers != null || this.config.Halts != null)
             this.scanTimer = new Timer(this.OnScanTimer, null, 250, 250);
         this.nextStatsUtc = DateTime.UtcNow.AddMinutes(1);
         this.runTask = Task.Run(() => this.RunAsync(this.stopCts.Token));
@@ -571,7 +592,8 @@ internal sealed class IbkrClient
 
         // A scan in flight ends with the socket; the next starts once this connection is subscribed.
         Volatile.Write(ref this.scanId, 0);
-        Volatile.Write(ref this.nextScanStamp, 0);
+        Volatile.Write(ref this.nextScanStamps[GainersScan], 0);
+        Volatile.Write(ref this.nextScanStamps[HaltsScan], 0);
         this.slotRetryUntilUtc.Clear();
         this.slotRefusalsLogged.Clear();
         lock (this.depthGate)
@@ -1089,12 +1111,13 @@ internal sealed class IbkrClient
     }
 
     /// <summary>
-    /// Every 250 ms: starts the next one-off scan once the last has answered and its interval is up. One that
-    /// never answers is cancelled after 10 seconds, so a lost answer doesn't stop the list.
+    /// Every 250 ms: starts the next one-off scan once the last has answered, the gainers and the halts in turn,
+    /// each when its own interval is up. One that never answers is cancelled after 10 seconds, so a lost answer
+    /// doesn't stop the lists.
     /// </summary>
     private void OnScanTimer(object timerState)
     {
-        if (!this.subscribed || this.net == null || this.config.TopGainers is not { } scan)
+        if (!this.subscribed || this.net == null)
             return;
 
         long now = Stopwatch.GetTimestamp();
@@ -1106,25 +1129,33 @@ internal sealed class IbkrClient
             return;
         }
 
-        if (now < Volatile.Read(ref this.nextScanStamp))
-            return;
+        for (int turn = 1; turn <= 2; turn++)
+        {
+            int kind = (this.lastScanKind + turn) % 2;
+            var scan = kind == GainersScan ? this.config.TopGainers : this.config.Halts;
+            if (scan == null || now < Volatile.Read(ref this.nextScanStamps[kind]))
+                continue;
 
-        var utc = this.ScanClock();
-        Volatile.Write(ref this.nextScanStamp, now + (long)(scan.IntervalAt(utc) * Stopwatch.Frequency));
-        _ = this.StartScanAsync(scan, scan.CodeAt(utc), now);
+            var utc = this.ScanClock();
+            this.lastScanKind = kind;
+            Volatile.Write(ref this.nextScanStamps[kind], now + (long)(scan.IntervalAt(utc) * Stopwatch.Frequency));
+            _ = this.StartScanAsync(scan, kind, scan.CodeAt(utc), now);
+            return;
+        }
     }
 
-    private async Task StartScanAsync(IbkrScan scan, string code, long now)
+    private async Task StartScanAsync(IbkrScan scan, int kind, string code, long now)
     {
         int id = ScanRequestId + Interlocked.Increment(ref this.scanSeq);
         Volatile.Write(ref this.scanSentStamp, now);
+        Volatile.Write(ref this.scanKind, kind);
         Volatile.Write(ref this.scanId, id);
         try
         {
             await this.SendAsync(CancellationToken.None, scan.Request(id, code)).ConfigureAwait(false);
-            if (code != this.scanCode)
+            if (code != this.scanCodes[kind])
                 Log.Info($"[scan] asking IBKR for {code} on {scan.Location} every {scan.IntervalSeconds:0.#} s: {scan.Rows} rows, {scan.Filter(code)} price {scan.PriceAbove}-{scan.PriceBelow}, volume over {scan.VolumeAbove:#,0}");
-            this.scanCode = code;
+            this.scanCodes[kind] = code;
         }
         catch (Exception ex) when (ex is IOException or ObjectDisposedException or InvalidOperationException)
         {
@@ -1149,6 +1180,7 @@ internal sealed class IbkrClient
     private void OnScannerData(ref FieldReader f)
     {
         int id = f.Int();
+        int kind = Volatile.Read(ref this.scanKind);
         if (id != Volatile.Read(ref this.scanId) || Interlocked.CompareExchange(ref this.scanId, 0, id) != id)
             return;
 
@@ -1171,7 +1203,16 @@ internal sealed class IbkrClient
                 symbols.Add(symbol);
         }
 
-        Volatile.Read(ref this.sink)?.OnIbkrScan(symbols);
+        this.DeliverScan(kind, symbols);
+    }
+
+    private void DeliverScan(int kind, IReadOnlyList<string> symbols)
+    {
+        var current = Volatile.Read(ref this.sink);
+        if (kind == HaltsScan)
+            current?.OnIbkrHaltScan(symbols);
+        else
+            current?.OnIbkrScan(symbols);
     }
 
     private void OnHistoricalData(ref FieldReader f)
@@ -1415,15 +1456,26 @@ internal sealed class IbkrClient
 
         if (id >= ScanRequestId)
         {
+            // A scan with nothing to list answers 165 "...no items retrieved" instead of with no rows (HALTED on the
+            // paper Gateway, 11:03 ET on 11-17), so that's the list going empty. Other 165s are failures: "Trading
+            // TWS session is connected from a different IP address" on 11-16.
+            bool empty = code == NoScanItems && message.Contains("no items retrieved", StringComparison.OrdinalIgnoreCase);
+
             // Every cancel is answered with 162 "API scanner subscription cancelled". Anything else ends this scan,
             // and says why once per kind; the next goes when its interval is up.
-            if (code != ScannerCancelled && this.codesLogged.Add(code))
+            if (code != ScannerCancelled && !empty && this.codesLogged.Add(code))
                 Log.Info($"[scan] {code}: {Clip(message)}");
 
             // A refused scan can stay open at IBKR, and ten open ones block every new one (322 at 14:17 on
             // 11-16, after a competing TWS login made each scan fail with 165), so it's cancelled as well.
+            int kind = Volatile.Read(ref this.scanKind);
             if (Interlocked.CompareExchange(ref this.scanId, 0, id) == id)
+            {
                 _ = this.CancelScanAsync(id);
+                if (empty)
+                    this.DeliverScan(kind, []);
+            }
+
             return;
         }
 
