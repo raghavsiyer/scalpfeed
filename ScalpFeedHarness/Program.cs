@@ -1326,6 +1326,16 @@ async Task RunHotkey()
     Check(OrderHotkeys.Decide(shiftX, [svre with { Position = 1 }]).Problem?.Contains("under one share") == true, "half of 1 share is under a share: nothing");
     Check(OrderHotkeys.Decide(shiftX, [svre]).Problem?.Contains("no long position") == true, "flat: nothing to sell");
 
+    // The price Quantower's order history and chart markers show: the limit while working, the fill once done.
+    var akan = new IbkrOrder(54, "DU1", "AKAN", true, 1000, "LMT", 3.34, double.NaN, "IOC", true, "PreSubmitted", 360, 3.24, DateTime.UtcNow);
+    Check(akan.ShownPrice == 3.34, "a working order shows its limit, even part filled");
+    Check((akan with { Status = "Filled", Filled = 1000 }).ShownPrice == 3.24, "a filled one shows its average fill: AKAN's 3.34 limit filled at 3.24 (order 54)");
+    Check((akan with { Status = "Cancelled", Filled = 433, AvgFillPrice = 3.2476 }).ShownPrice == 3.2476, "an IOC cancelled part filled shows its fills' average");
+    Check((akan with { Status = "Cancelled", Filled = 0, AvgFillPrice = 0 }).ShownPrice == 3.34, "one cancelled with no fills keeps its limit");
+    var market = akan with { Type = "MKT", LimitPrice = double.NaN, Filled = 0, AvgFillPrice = 0 };
+    Check(double.IsNaN(market.ShownPrice) && (market with { Status = "Filled", Filled = 1000, AvgFillPrice = 3.25 }).ShownPrice == 3.25,
+        "a market order: no price while working, its fill once filled");
+
     // What a key-down does, for Alt+1 (0), Shift+Z (1) and Shift+X (2).
     var keys = new List<(uint, uint)> { (HotkeyListener.Alt, '1'), (HotkeyListener.Shift, 'Z'), (HotkeyListener.Shift, 'X') };
     Check(OrderHotkeys.TryParseKeys("Shift+X", out m, out vk) && m == HotkeyListener.Shift && vk == 'X', "Shift+X is Shift and the X key");

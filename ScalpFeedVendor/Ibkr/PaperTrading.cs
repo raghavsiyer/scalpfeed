@@ -380,8 +380,13 @@ internal sealed class PaperTrading : ITraderSink
             LastUpdateTime = o.UpdatedUtc,
         };
 
-        if (!double.IsNaN(o.LimitPrice))
-            message.Price = o.LimitPrice;
+        // A finished order with fills shows its average fill as its price (IbkrOrder.ShownPrice), and its limit, if it
+        // had one, in its comment.
+        double shown = o.ShownPrice;
+        if (!double.IsNaN(shown))
+            message.Price = shown;
+        if (shown != o.LimitPrice && !double.IsNaN(o.LimitPrice))
+            message.Comment = $"limit {o.LimitPrice.ToString(CultureInfo.InvariantCulture)}";
         if (!double.IsNaN(o.StopPrice))
             message.TriggerPrice = o.StopPrice;
         if (o.Filled > 0)

@@ -24,6 +24,14 @@ internal sealed record IbkrOrder(
 {
     /// <summary>IBKR's statuses after which the order can't fill any more.</summary>
     public bool IsDone => this.Status is "Filled" or "Cancelled" or "ApiCancelled" or "Inactive" or IbkrTrader.GoneStatus;
+
+    /// <summary>
+    /// The price Quantower shows for the order: its limit while it works, where it rests, and once it's finished with
+    /// fills, its average fill, so order history and the chart's order markers show where it filled rather than the
+    /// limit it would have paid (your request, 2026-11-18: an Alt+1 at a 3.34 limit filled at 3.24 and showed 3.34).
+    /// NaN for a working order with no limit (market, stop).
+    /// </summary>
+    public double ShownPrice => this.IsDone && this.Filled > 0 && this.AvgFillPrice > 0 ? this.AvgFillPrice : this.LimitPrice;
 }
 
 /// <summary>What Quantower asks for: an IBKR order type (MKT, LMT, STP, STP LMT) and time in force (DAY, GTC, IOC).</summary>
