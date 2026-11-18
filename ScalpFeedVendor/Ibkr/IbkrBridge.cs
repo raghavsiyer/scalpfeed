@@ -55,8 +55,10 @@ internal sealed class IbkrBridge : IIbkrSink
     /// </summary>
     public const double MarkerRowSize = 999_999;
 
-    // IBKR's receive thread only: the book with a LULD band's row put in, then the Res row.
+    // IBKR's receive thread only: the book less the rows past the LULD bands, with a band's row put in, then the Res row.
     private readonly List<IbkrDepthRow> bandRow = new(1);
+    private readonly List<IbkrDepthRow> bidsInBand = new();
+    private readonly List<IbkrDepthRow> asksInBand = new();
     private readonly List<IbkrDepthRow> bidsWithBand = new();
     private readonly List<IbkrDepthRow> asksWithBand = new();
     private readonly List<IbkrDepthRow> bidsWithRes = new();
@@ -449,9 +451,14 @@ internal sealed class IbkrBridge : IIbkrSink
         bool hasBook = bids.Count + asks.Count > 0;
 
         // The computed LULD bands go in as one marked row a side, the lower among the bids and the upper
-        // among the asks. Never into an empty book, where they'd pass for the market, and nor does Res.
+        // among the asks, with the rows past them taken out (LuldBand.Within). Never into an empty book, where
+        // they'd pass for the market, and nor does Res.
         if (hasBook && state.Luld.TryGetBands(now.Ticks, state.PrevClose, state.IsTier1, out var band))
         {
+            LuldBand.Within(bids, band, true, this.bidsInBand);
+            LuldBand.Within(asks, band, false, this.asksInBand);
+            bids = this.bidsInBand;
+            asks = this.asksInBand;
             if (band.Lower > 0)
                 bids = this.WithMarkerRow(bids, band.Lower, LuldBand.MarkerShares, LuldBand.Label(false, band.Exact), true, this.bidsWithBand);
             asks = this.WithMarkerRow(asks, band.Upper, LuldBand.MarkerShares, LuldBand.Label(true, band.Exact), false, this.asksWithBand);

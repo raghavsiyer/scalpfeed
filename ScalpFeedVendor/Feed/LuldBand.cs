@@ -54,6 +54,35 @@ internal sealed class LuldBand
 
     public static bool IsLabel(string venue) => Array.IndexOf(Labels, venue) >= 0;
 
+    /// <summary>How far past a rough band (picked up mid-session) rows still show: as far as it can be off.</summary>
+    public const double RoughMargin = 0.01;
+
+    /// <summary>
+    /// The depth's rows on one side, less those past the band (your request, 2026-11-18: no rows under Limit Down
+    /// or Limit Up): bids priced below the lower band and asks above the upper, resting orders that can't trade
+    /// while the band stands. Rows at the band itself stay. A rough band (Exact false) can be off by up to 1% of the
+    /// price either way, so rows within 1% past it stay too, rather than hide orders the real band may allow; with
+    /// no lower band (a reference so low it would be 0 or less), the bids all stay.
+    /// </summary>
+    public static void Within(List<IbkrDepthRow> rows, Bands band, bool bids, List<IbkrDepthRow> into)
+    {
+        into.Clear();
+        double edge = bids ? band.Lower : band.Upper;
+        if (!(edge > 0))
+        {
+            into.AddRange(rows);
+            return;
+        }
+
+        if (!band.Exact)
+            edge *= bids ? 1 - RoughMargin : 1 + RoughMargin;
+        foreach (var row in rows)
+        {
+            if (bids ? row.Price >= edge - 1e-9 : row.Price <= edge + 1e-9)
+                into.Add(row);
+        }
+    }
+
     /// <summary>Tier 1 is the S&P 500, the Russell 1000 and some ETPs; everything else is Tier 2.</summary>
     public static bool IsTier1(string symbol) => Volatile.Read(ref tier1).Contains(symbol);
 

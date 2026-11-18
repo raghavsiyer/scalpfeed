@@ -1132,6 +1132,24 @@ async Task RunLuld()
     Check(LuldBand.Label(true, true) == "Limit Up" && LuldBand.Label(false, true) == "Limit Down"
           && LuldBand.Label(true, false) == "Limit Up ~" && LuldBand.Label(false, false) == "Limit Down ~", "the rows read Limit Up and Limit Down, with ~ when rough");
     Check(LuldBand.IsLabel("Limit Down ~") && !LuldBand.IsLabel("LULD") && !LuldBand.IsLabel("ARCA"), "and only those count as band rows");
+
+    // No rows past the bands: bids under Limit Down, asks over Limit Up.
+    var bidBook = new List<IbkrDepthRow> { new(5.02, 300, "NSDQ"), new(5.00, 500, "ARCA"), new(4.95, 200, "NSDQ"), new(4.94, 100, "EDGX"), new(4.90, 1000, "NSDQ") };
+    var askBook = new List<IbkrDepthRow> { new(5.05, 300, "NSDQ"), new(5.50, 400, "ARCA"), new(5.51, 100, "NSDQ"), new(5.60, 900, "NSDQ") };
+    var inBand = new List<IbkrDepthRow>();
+    string Prices(List<IbkrDepthRow> rows) => string.Join(" ", rows.Select(r => r.Price));
+    var exactBand = new LuldBand.Bands(4.95, 5.50, 5.225, true);
+    LuldBand.Within(bidBook, exactBand, true, inBand);
+    Check(Prices(inBand) == "5.02 5 4.95", $"bids under Limit Down go, the one at it stays ({Prices(inBand)})");
+    LuldBand.Within(askBook, exactBand, false, inBand);
+    Check(Prices(inBand) == "5.05 5.5", $"asks over Limit Up go, the one at it stays ({Prices(inBand)})");
+    var roughBand = exactBand with { Exact = false };
+    LuldBand.Within(bidBook, roughBand, true, inBand);
+    Check(Prices(inBand) == "5.02 5 4.95 4.94", $"a rough band keeps rows within 1% past it, as the real one may allow them ({Prices(inBand)})");
+    LuldBand.Within(askBook, roughBand, false, inBand);
+    Check(Prices(inBand) == "5.05 5.5 5.51", $"on both sides ({Prices(inBand)})");
+    LuldBand.Within(bidBook, exactBand with { Lower = double.NaN }, true, inBand);
+    Check(inBand.Count == bidBook.Count, "with no lower band, the bids all stay");
     Check(PrintFilter.IsReopening("@5 X"u8) && PrintFilter.IsReopening("@5 x"u8) && !PrintFilter.IsReopening("@  o"u8) && !PrintFilter.IsReopening("F I"u8), "condition 5 marks a reopening print");
 
     var low = new LuldBand();
