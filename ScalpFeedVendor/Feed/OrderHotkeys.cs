@@ -293,6 +293,13 @@ internal sealed class HotkeyListener
             return false;
 
         bool inFront = this.InFront();
+        if (!inFront && !repeat && !OrderHotkeys.Types(held, virtualKey))
+        {
+            // Which program was in front, said off the hook's thread. Keys that type aren't logged: that's typing elsewhere.
+            uint process = ForegroundProcessId();
+            _ = Task.Run(() => Log.Info($"[hotkey] {NameOf(held, virtualKey, this.keys, this.parsed)} pressed with {ProcessName(process)} in front, not Quantower (process {Environment.ProcessId}), so nothing was sent"));
+        }
+
         bool typing = inFront && OrderHotkeys.Types(held, virtualKey) && this.Typing();
         var (fire, swallow) = OrderHotkeys.OnKeyDown(this.parsed, virtualKey, held, repeat, inFront, typing);
         if (typing && !swallow && !repeat && !this.typingLogged)
@@ -320,6 +327,34 @@ internal sealed class HotkeyListener
     }
 
     private static bool Held(int virtualKey) => (GetAsyncKeyState(virtualKey) & 0x8000) != 0;
+
+    private static string NameOf(uint held, uint virtualKey, IReadOnlyList<OrderHotkey> keys, List<(uint Modifiers, uint Key)> parsed)
+    {
+        int at = parsed.IndexOf((held, virtualKey));
+        return at >= 0 ? keys[at].Keys : $"key {virtualKey:X}";
+    }
+
+    private static uint ForegroundProcessId()
+    {
+        var window = GetForegroundWindow();
+        return window != IntPtr.Zero && GetWindowThreadProcessId(window, out uint process) != 0 ? process : 0;
+    }
+
+    private static string ProcessName(uint process)
+    {
+        if (process == 0)
+            return "no window";
+
+        try
+        {
+            using var p = System.Diagnostics.Process.GetProcessById((int)process);
+            return $"{p.ProcessName} (process {process})";
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException)
+        {
+            return $"process {process}";
+        }
+    }
 
     private static bool IsThisProcessInFront()
     {
