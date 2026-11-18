@@ -3,18 +3,26 @@ namespace ScalpFeedVendor.Feed;
 /// <summary>
 /// Sizes in the market depth panel, by your choice of 2026-11-06: in whole hundreds, so 2870 shares
 /// shows as 28, and with rows of 100 shares or fewer left out unless they're at the best price, because
-/// hiding those would show a wrong spread. Only depth rows use this. The quote, tape and bars are
-/// unaffected.
+/// hiding those would show a wrong spread. Nasdaq's own rows (venue NSDQ) behind the best price are left
+/// out up to 500 shares, 5 lots (your choice, 2026-11-18); its market makers (TSSM, MLCO and so on) keep
+/// the 100. Only depth rows use this. The quote, tape and bars are unaffected.
 /// </summary>
 internal static class DepthSizes
 {
+    /// <summary>IBKR's smart depth names Nasdaq's own book NSDQ (SVRE's book, 2026-11-18).</summary>
+    public const string NasdaqVenue = "NSDQ";
+
     private const double MostSharesHidden = 100;
+    private const double MostNasdaqSharesHidden = 500;
     private const double SamePrice = 1e-9;
 
     /// <param name="bestInBook">This side's best price among the depth rows.</param>
     /// <param name="quoted">This side's price on IBKR's quote, which can differ from the book for a moment.</param>
-    public static bool Shows(double shares, double price, double bestInBook, double quoted) =>
-        shares > 0 && (shares > MostSharesHidden || Math.Abs(price - bestInBook) < SamePrice || Math.Abs(price - quoted) < SamePrice);
+    /// <param name="venue">The row's venue, which sets how many shares behind the best price are left out.</param>
+    public static bool Shows(double shares, double price, double bestInBook, double quoted, string venue = null) =>
+        shares > 0 && (shares > MostHidden(venue) || Math.Abs(price - bestInBook) < SamePrice || Math.Abs(price - quoted) < SamePrice);
+
+    private static double MostHidden(string venue) => venue == NasdaqVenue ? MostNasdaqSharesHidden : MostSharesHidden;
 
     /// <summary>A shown row reads at least 1, since 85 shares at the best price mustn't read as nothing there.</summary>
     public static double ToHundreds(double shares) => Math.Max(1, Math.Floor(shares / 100));

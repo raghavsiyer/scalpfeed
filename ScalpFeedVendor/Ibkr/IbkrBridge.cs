@@ -541,7 +541,7 @@ internal sealed class IbkrBridge : IIbkrSink
                 break;
 
             bool res = row.Venue == ResVenue;
-            if (res || LuldBand.IsLabel(row.Venue) || DepthSizes.Shows(row.Size, row.Price, bestInBook, quoted))
+            if (res || LuldBand.IsLabel(row.Venue) || DepthSizes.Shows(row.Size, row.Price, bestInBook, quoted, row.Venue))
             {
                 // The Res row's size is already what it should read. A Limit row's 100 shares read 1.
                 double size = res ? row.Size : DepthSizes.ToHundreds(row.Size);

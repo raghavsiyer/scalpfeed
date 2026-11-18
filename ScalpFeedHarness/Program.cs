@@ -125,6 +125,11 @@ switch (args[0])
         Check(DepthSizes.Shows(85, 342.00, 342.00, 342.00) && DepthSizes.ToHundreds(85) == 1, "85 shares at the best price shows, reading 1, not 0");
         Check(!DepthSizes.Shows(0, 2.57, 2.57, 2.57), "an empty row never shows");
         Check(DepthSizes.Shows(100, 2.57, 2.57, double.NaN), "with no quote, the book's best still shows");
+        Check(!DepthSizes.Shows(500, 2.55, 2.57, 2.57, "NSDQ") && !DepthSizes.Shows(200, 2.55, 2.57, 2.57, "NSDQ"), "behind the best price, Nasdaq's own rows of 500 shares or fewer don't show");
+        Check(DepthSizes.Shows(501, 2.55, 2.57, 2.57, "NSDQ") && DepthSizes.ToHundreds(501) == 5, "501 shares on Nasdaq shows behind the best, as 5");
+        Check(DepthSizes.Shows(300, 2.57, 2.57, 2.57, "NSDQ") && DepthSizes.Shows(300, 2.56, 2.57, 2.56, "NSDQ"), "Nasdaq's rows at the best price, book's or quote's, show at any size");
+        Check(DepthSizes.Shows(200, 2.55, 2.57, 2.57, "TSSM") && DepthSizes.Shows(200, 2.55, 2.57, 2.57, "BATS") && !DepthSizes.Shows(100, 2.55, 2.57, 2.57, "MLCO"),
+            "market makers and other venues keep the 100-share line");
         var depthRows = new List<IbkrDepthRow> { new(2.55, 100, "A"), new(2.57, 100, "B"), new(2.56, 300, "C") };
         Check(DepthSizes.Best(depthRows, true) == 2.57 && DepthSizes.Best(depthRows, false) == 2.55 && double.IsNaN(DepthSizes.Best(new List<IbkrDepthRow>(), true)), "the best price is found on each side");
         break;
