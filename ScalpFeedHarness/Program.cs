@@ -1293,6 +1293,11 @@ async Task RunHotkey()
         $"Alt+1, one depth open: buy 1,000 SVRE, IOC limit 0.9804 ({ticket})");
     Check(OrderHotkeys.Decide(alt1, [svre], Utc(18, 12, 0)).Ticket == new IbkrOrderTicket("SVRE", true, 1000, "LMT", 0.9804, double.NaN, "DAY"),
         "the same press at 7:00 ET premarket sends a DAY limit");
+    var alt2 = OrderHotkey.BuyTwoThousandAskPlusTen;
+    Check(alt2 is { Keys: "Alt+2", Buy: true, Shares: 2000, Offset: 0.10, Tif: "IOC", OfPosition: 0 }, "Alt+2 buys 2,000 shares at the ask plus 10 cents, immediate or cancel");
+    Check(OrderHotkeys.TryParseKeys("Alt+2", out m, out vk) && m == HotkeyListener.Alt && vk == '2', "Alt+2 is Alt and the 2 key");
+    Check(OrderHotkeys.Decide(alt2, [svre], rth).Ticket == new IbkrOrderTicket("SVRE", true, 2000, "LMT", 0.9804, double.NaN, "IOC"),
+        "Alt+2, one depth open: buy 2,000 SVRE, IOC limit 0.9804");
     Check(OrderHotkeys.Decide(alt1, []).Problem?.Contains("no market depth") == true, "no depth open: nothing, and says so");
     var two = OrderHotkeys.Decide(alt1, [svre, new HotkeyQuote("CRMN", 1.20, 1.21, false)]);
     Check(two.Ticket == null && two.Problem.Contains("SVRE, CRMN"), $"two depths open: nothing, naming them ({two.Problem})");
@@ -1341,6 +1346,9 @@ async Task RunHotkey()
     Check(OrderHotkeys.TryParseKeys("Shift+X", out m, out vk) && m == HotkeyListener.Shift && vk == 'X', "Shift+X is Shift and the X key");
     Check(OrderHotkeys.OnKeyDown(keys, 'X', HotkeyListener.Shift, false, true, false) == (2, true) && OrderHotkeys.OnKeyDown(keys, 'X', HotkeyListener.Shift, false, true, true) == (-1, false),
         "Shift+X fires with Quantower in front, and types an X while a text box has the cursor");
+    var withAlt2 = new List<(uint, uint)>(keys) { (HotkeyListener.Alt, '2') };
+    Check(OrderHotkeys.OnKeyDown(withAlt2, '2', HotkeyListener.Alt, false, true, true) == (3, true) && OrderHotkeys.OnKeyDown(withAlt2, '1', HotkeyListener.Alt, false, true, false) == (0, true),
+        "Alt+2 fires as its own key, even with a text cursor, and Alt+1 still fires as Alt+1");
     Check(OrderHotkeys.OnKeyDown(keys, 'Z', HotkeyListener.Shift, false, true, false) == (1, true), "Shift+Z with Quantower in front fires, and Quantower doesn't get the Z");
     Check(OrderHotkeys.OnKeyDown(keys, 'Z', HotkeyListener.Shift, false, false, false) == (-1, false), "with another program in front, it's just a capital Z there");
     Check(OrderHotkeys.OnKeyDown(keys, 'Z', HotkeyListener.Shift, false, true, true) == (-1, false), "with a text cursor in Quantower, it types the Z");

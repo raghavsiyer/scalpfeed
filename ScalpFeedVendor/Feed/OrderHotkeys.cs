@@ -13,6 +13,9 @@ internal sealed record OrderHotkey(string Keys, bool Buy, double Shares, double 
     /// <summary>Alt+1: buy 1,000 shares, limit at the ask plus 10 cents, immediate or cancel (your requests, 2026-11-18).</summary>
     public static OrderHotkey BuyAskPlusTen { get; } = new("Alt+1", true, 1000, 0.10, "IOC");
 
+    /// <summary>Alt+2: buy 2,000 shares, otherwise as Alt+1 (your request, 2026-11-18).</summary>
+    public static OrderHotkey BuyTwoThousandAskPlusTen { get; } = new("Alt+2", true, 2000, 0.10, "IOC");
+
     /// <summary>Shift+Z: sell the whole position, limit at the bid minus 10 cents, immediate or cancel (your request, 2026-11-18).</summary>
     public static OrderHotkey SellAllBidMinusTen { get; } = new("Shift+Z", false, 0, 0.10, "IOC", OfPosition: 1);
 
@@ -46,7 +49,7 @@ internal readonly record struct HotkeyQuote(string Symbol, double Bid, double As
 /// The stock is the one with a market depth open, since your DOM follows the stock you've picked; with none or
 /// several it sends nothing and says why. The price is IBKR's NBBO, at the moment of the key, rounded to IBKR's
 /// tick for the price: a cent from a dollar, a hundredth of a cent below. The order is a limit with the key's time in
-/// force, which IbkrTrader sends with outsideRth for premarket and after hours. All three keys are IOC (what doesn't
+/// force, which IbkrTrader sends with outsideRth for premarket and after hours. All the keys are IOC (what doesn't
 /// fill at once is cancelled) from 9:30 to 16:00 ET on weekdays, and DAY outside it (your choice, 2026-11-18): IBKR
 /// ignores outsideRth on an IOC sent to SMART (warning 2109 on every hotkey order that morning), so an IOC wouldn't
 /// work premarket, while a DAY limit does and stays working until it fills or you cancel it. A position key takes its
