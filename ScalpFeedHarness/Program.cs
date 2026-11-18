@@ -1468,6 +1468,46 @@ void RunRolling()
     Check(VolumeBrightness.Heat(100, 4) == 1 && VolumeBrightness.Heat(double.NaN, 4) == 0, "and no more past 16x; none while typical isn't known");
     Check(VolumeBrightness.Alpha(0) == 64 && VolumeBrightness.Alpha(0.5) == 159 && VolumeBrightness.Alpha(1) == 255 && VolumeBrightness.Alpha(2) == 255,
         $"opacity runs from a quarter (64) through half strength (159) to full (255) ({VolumeBrightness.Alpha(0)}, {VolumeBrightness.Alpha(0.5)}, {VolumeBrightness.Alpha(1)})");
+
+    // Shading by price: where in the candle the shares traded, with under 1,000 at a price at the lowest intensity.
+    Check(VolumeAtPrice.TickAt(1) == 0.01 && VolumeAtPrice.TickAt(0.99) == 0.0001, "ticks: a cent from $1, a hundredth of a cent below");
+    Check(VolumeAtPrice.Level(5.005) == 5.01 && VolumeAtPrice.Level(4.999) == 5.00 && VolumeAtPrice.Level(3.4499) == 3.45 && VolumeAtPrice.Level(0.51234) == 0.5123,
+        $"a trade counts at its tick, halves up: 5.005 at 5.01, 4.999 at 5.00, 0.51234 at 0.5123 ({VolumeAtPrice.Level(5.005)}, {VolumeAtPrice.Level(0.51234)})");
+
+    var p = new RollingCandle(TimeSpan.FromSeconds(10));
+    p.Add(T(0), 3.40, 100);
+    p.Add(T(1), 3.45, 3000);
+    p.Add(T(2), 3.405, 500);
+    p.Add(T(3), 3.4499, 2000);
+    var levels = new List<PriceLevel>();
+    var pb = p.At(T(3.5), levels);
+    Check(levels.SequenceEqual([new PriceLevel(3.45, 5000), new PriceLevel(3.41, 500), new PriceLevel(3.40, 100)]) && pb.Volume == 5600,
+        $"the candle's shares at each price, highest first, a midpoint print with its tick ({string.Join(", ", levels)})");
+    p.At(T(11.5), levels);
+    Check(levels.SequenceEqual([new PriceLevel(3.45, 2000), new PriceLevel(3.41, 500)]), "and they roll out with their trades");
+
+    Check(VolumeAtPrice.Alpha(5000, 5000, 1000, 255) == 255 && VolumeAtPrice.Alpha(1250, 5000, 1000, 255) == 160 && VolumeAtPrice.Alpha(999, 5000, 1000, 255) == 64,
+        $"the busiest price gets the candle's colour, a quarter of its shares half way, under 1,000 the lowest ({VolumeAtPrice.Alpha(1250, 5000, 1000, 255)})");
+    Check(VolumeAtPrice.Alpha(5000, 5000, 1000, 160) == 160 && VolumeAtPrice.Alpha(0, 5000, 0, 255) == 64 && VolumeAtPrice.Alpha(5000, 5000, 1000, 10) == 64,
+        "the busiest is only as bright as the candle; nothing traded is the lowest; never under the lowest");
+
+    // 1 cent = 10 pixels, the high (3.45) at row 50 and the low (3.40) at row 100.
+    var at = new List<PriceLevel> { new(3.45, 5000), new(3.41, 500), new(3.40, 100) };
+    int[] rows = VolumeAtPrice.RowAlphas(at, price => (3.50 - price) * 1000, 50, 100, 1000, 255);
+    Check(rows.Length == 51 && rows[..5].All(a => a == 255) && rows[5..].All(a => a == 64),
+        $"zoomed in, 3.45's half-cent band lights rows 50-54 (the half below the high) and the prices under 1,000 stay at the lowest ({string.Join(",", rows[..8])})");
+    var spread = new List<PriceLevel> { new(3.45, 4000), new(3.44, 1000), new(3.40, 2000) };
+    rows = VolumeAtPrice.RowAlphas(spread, price => (3.50 - price) * 1000, 50, 100, 1000, 255);
+    Check(rows[0] == 255 && rows[10] == 160 && rows[30] == 64 && rows[50] == (int)Math.Round(64 + (191 * Math.Sqrt(0.5))),
+        $"each price as bright as its shares: 4,000 full, 1,000 half way, none the lowest, 2,000 between ({rows[0]}, {rows[10]}, {rows[30]}, {rows[50]})");
+    // Zoomed out, 1 cent = 0.1 pixel: the candle is two rows and prices share them.
+    rows = VolumeAtPrice.RowAlphas(spread, price => (3.50 - price) * 10, 0, 1, 1000, 255);
+    Check(rows.SequenceEqual([255, 199]), $"zoomed out, a row two prices share takes the brighter ({string.Join(",", rows)})");
+    var quiet = new List<PriceLevel> { new(3.45, 600), new(3.44, 300) };
+    rows = VolumeAtPrice.RowAlphas(quiet, price => (3.50 - price) * 1000, 50, 60, 1000, 255);
+    Check(rows.All(a => a == 64), "a window under 1,000 shares is all at the lowest intensity");
+    rows = VolumeAtPrice.RowAlphas([new PriceLevel(3.45, 5000)], price => (3.50 - price) * 1000, 50, 50, 1000, 200);
+    Check(rows.SequenceEqual([200]), "a candle that never moved is one row, at the candle's colour");
 }
 
 // The slow-update diagnostics: off by default, and slow work matched against garbage collection pauses.

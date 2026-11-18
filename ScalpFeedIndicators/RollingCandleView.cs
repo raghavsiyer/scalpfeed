@@ -10,7 +10,11 @@ namespace ScalpFeedIndicators;
 /// window's volume under it. Its colour is as strong as its volume against the stock's typical volume for a window
 /// that long (VolumeBrightness): half at typical, full at twice typical, a quarter's opacity when quiet, and in a
 /// burst (over 4 times typical) more than that: a glow hugging the body and the wick (not the whole high-low range)
-/// that grows with the burst, with a white edge once it's well past. It takes the chart symbol's prints as they arrive (Symbol.NewLast) and, four times a
+/// that grows with the burst, with a white edge once it's well past. That colour is the candle's brightest; down its
+/// body and wick each price is shaded by the shares traded there (VolumeAtPrice), the busiest price brightest and
+/// prices under the least shares (1,000) or with none at a quarter's opacity, so it shows where volume was and
+/// wasn't traded. A window under the least shares is all at a quarter, with no glow. It takes the chart symbol's
+/// prints as they arrive (Symbol.NewLast) and, four times a
 /// second, asks the chart to redraw when the candle has changed, so trades roll out of the window even when nothing
 /// trades. Used by the Rolling Candle indicator and by Key Moving Averages, so a Free licence's two indicators a
 /// chart can still have it.
@@ -33,6 +37,7 @@ internal sealed class RollingCandleView
     private int seconds = 10;
     private double fullMultiple = 2;
     private double glowMultiple = 4;
+    private double minShares = VolumeAtPrice.DefaultMinShares;
 
     // What the chart's Symbol.NewLast delivered in the current minute, logged once a minute to Quantower's log, to
     // check against the prints the connection sent for the symbol (your report, 2026-11-18: highs and lows jumped
@@ -53,9 +58,10 @@ internal sealed class RollingCandleView
 
     /// <summary>
     /// Starts over on this symbol with a window of this many seconds, judged against the typical volume of the last
-    /// typicalMinutes: full colour at fullMultiple times typical, glowing beyond glowMultiple.
+    /// typicalMinutes: full colour at fullMultiple times typical, glowing beyond glowMultiple, and prices (or a
+    /// window) under minShares at the lowest intensity.
     /// </summary>
-    public void Start(Symbol chartSymbol, int windowSeconds, int typicalMinutes, double fullMultiple, double glowMultiple)
+    public void Start(Symbol chartSymbol, int windowSeconds, int typicalMinutes, double fullMultiple, double glowMultiple, double minShares)
     {
         this.Stop();
         this.seconds = Math.Max(1, windowSeconds);
@@ -66,6 +72,7 @@ internal sealed class RollingCandleView
         this.brightness.Clear();
         this.fullMultiple = fullMultiple;
         this.glowMultiple = glowMultiple;
+        this.minShares = Math.Max(0, minShares);
         if (chartSymbol == null)
             return;
 
@@ -137,13 +144,15 @@ internal sealed class RollingCandleView
         }
     }
 
-    /// <summary>The candle now, its colour's alpha, and its glow.</summary>
-    private Look TakeLook()
+    /// <summary>The candle now, its colour's alpha (its brightest), and its glow; into levels, when given, its shares at each price.</summary>
+    private Look TakeLook(List<PriceLevel> levels = null)
     {
         long now = DateTime.UtcNow.Ticks;
-        var bar = this.candle.At(now);
+        var bar = this.candle.At(now, levels);
         if (bar.IsEmpty)
             return new Look(bar, 0, 0);
+        if (!(bar.Volume >= this.minShares))
+            return new Look(bar, VolumeBrightness.Alpha(0), 0);
 
         double ratio = this.brightness.Ratio(now, bar.Volume);
         int alpha = VolumeBrightness.Alpha(VolumeBrightness.Strength(ratio, this.fullMultiple));
@@ -179,7 +188,8 @@ internal sealed class RollingCandleView
         if (window == null || graphics == null)
             return;
 
-        var look = this.TakeLook();
+        var levels = new List<PriceLevel>();
+        var look = this.TakeLook(levels);
         var bar = look.Bar;
         lock (this.gate)
             this.painted = look;
@@ -189,31 +199,36 @@ internal sealed class RollingCandleView
         var converter = window.CoordinatesConverter;
         Rectangle area = window.ClientRectangle;
         float barWidth = Math.Max(1f, (float)chart.BarsWidth);
-        float body = Math.Max(3f, barWidth * 0.7f);
+        float body = Math.Max(3f, MathF.Round(barWidth * 0.7f));
 
         // Two bar widths right of the latest bar, kept inside the chart when it's scrolled back or tight on the right.
         float x = this.latestBarTime() is DateTime latest ? (float)converter.GetChartX(latest) + barWidth * 2 : area.Right - body * 2;
         float left = area.Left + body;
         float right = area.Right - body - 2;
-        x = right > left ? Math.Clamp(x, left, right) : area.Right - body;
+        x = MathF.Round(right > left ? Math.Clamp(x, left, right) : area.Right - body);
 
-        float yOpen = (float)converter.GetChartY(bar.Open);
-        float yHigh = (float)converter.GetChartY(bar.High);
-        float yLow = (float)converter.GetChartY(bar.Low);
-        float yClose = (float)converter.GetChartY(bar.Close);
+        // Whole pixel rows, from the one the high is on to the one the low is on, so the shading's slices tile.
+        int Row(double price) => (int)Math.Clamp(Math.Floor(converter.GetChartY(price)), area.Top - 1, area.Bottom + 1);
+        int rowHigh = Row(bar.High);
+        int rowLow = Math.Max(rowHigh, Row(bar.Low));
+        int bodyTop = Math.Clamp(Math.Min(Row(bar.Open), Row(bar.Close)), rowHigh, rowLow);
+        int bodyBottom = Math.Clamp(Math.Max(Row(bar.Open), Row(bar.Close)), bodyTop, rowLow);
+        int[] rows = VolumeAtPrice.RowAlphas(levels, price => converter.GetChartY(price), rowHigh, rowLow, this.minShares, look.Alpha);
 
         var state = graphics.Save();
         try
         {
             graphics.SetClip(area);
+            graphics.SmoothingMode = SmoothingMode.None;
             var hue = bar.Close >= bar.Open ? Up : Down;
-            float top = Math.Min(yOpen, yClose);
-            float height = Math.Max(1f, Math.Abs(yClose - yOpen));
+            float bodyLeft = x - MathF.Round(body / 2);
+            float heat = look.Heat / 20f;
+            float wick = Math.Clamp(MathF.Round(body / 4), 1f, 3f) + (heat > 0 ? 1 : 0);
+            float wickLeft = x - MathF.Floor(wick / 2);
 
             // A burst: a glow that follows the candle itself (a rounded halo hugging the body, a thin one along the
-            // wick, not a box over the whole range), wider and stronger the bigger the burst, then a white edge on
-            // the body once it's well past. Faintest and widest layer first.
-            float heat = look.Heat / 20f;
+            // wick, not a box over the whole range), wider and stronger the bigger the burst. Faintest and widest
+            // layer first.
             if (heat > 0)
             {
                 graphics.SmoothingMode = SmoothingMode.AntiAlias;
@@ -221,25 +236,45 @@ internal sealed class RollingCandleView
                 {
                     float spread = (1.5f + (4.5f * heat)) * layer / 3f;
                     var glow = Color.FromArgb((int)((30 + (80 * heat)) / layer), hue);
-                    using var wickGlow = new Pen(glow, 1 + spread) { StartCap = LineCap.Round, EndCap = LineCap.Round };
-                    graphics.DrawLine(wickGlow, x, yHigh, x, yLow);
+                    using var wickGlow = new Pen(glow, wick + spread) { StartCap = LineCap.Round, EndCap = LineCap.Round };
+                    graphics.DrawLine(wickGlow, x, rowHigh, x, rowLow + 1);
                     using var bodyGlow = new SolidBrush(glow);
-                    using var halo = Rounded(x - (body / 2) - spread, top - spread, body + (2 * spread), height + (2 * spread), spread);
+                    using var halo = Rounded(bodyLeft - spread, bodyTop - spread, body + (2 * spread), bodyBottom + 1 - bodyTop + (2 * spread), spread);
                     graphics.FillPath(bodyGlow, halo);
                 }
 
                 graphics.SmoothingMode = SmoothingMode.None;
             }
 
-            var colour = Color.FromArgb(look.Alpha, hue);
-            using var pen = new Pen(colour, heat > 0 ? 2 : 1);
-            using var fill = new SolidBrush(colour);
-            graphics.DrawLine(pen, x, yHigh, x, yLow);
-            graphics.FillRectangle(fill, x - body / 2, top, body, height);
+            // The candle in slices of equal shade: the body's width between the open and the close, the wick's
+            // outside them, so the wick doesn't show through the body.
+            int start = 0;
+            for (int i = 1; i <= rows.Length; i++)
+            {
+                if (i < rows.Length && rows[i] == rows[start])
+                    continue;
+
+                int y0 = rowHigh + start;
+                int y1 = rowHigh + i;
+                using var fill = new SolidBrush(Color.FromArgb(rows[start], hue));
+                int inTop = Math.Max(y0, bodyTop);
+                int inBottom = Math.Min(y1, bodyBottom + 1);
+                if (inBottom > inTop)
+                    graphics.FillRectangle(fill, bodyLeft, inTop, body, inBottom - inTop);
+                int above = Math.Min(y1, bodyTop);
+                if (above > y0)
+                    graphics.FillRectangle(fill, wickLeft, y0, wick, above - y0);
+                int below = Math.Max(y0, bodyBottom + 1);
+                if (y1 > below)
+                    graphics.FillRectangle(fill, wickLeft, below, wick, y1 - below);
+                start = i;
+            }
+
+            // Well into a burst, a white edge on the body.
             if (heat >= 0.5f)
             {
                 using var edge = new Pen(Color.FromArgb(220, Color.White), 1);
-                graphics.DrawRectangle(edge, x - body / 2, top, body, height);
+                graphics.DrawRectangle(edge, bodyLeft, bodyTop, body - 1, bodyBottom - bodyTop);
             }
 
             // In a burst the volume reads in the candle's colour, in bold.
@@ -247,10 +282,10 @@ internal sealed class RollingCandleView
             using var text = new SolidBrush(heat > 0 ? hue : Label);
             string over = $"{this.seconds}s";
             var size = graphics.MeasureString(over, font);
-            graphics.DrawString(over, font, text, x - size.Width / 2, yHigh - size.Height - 1);
+            graphics.DrawString(over, font, text, x - size.Width / 2, rowHigh - size.Height - 1);
             string under = RollingCandle.FormatVolume(bar.Volume);
             size = graphics.MeasureString(under, font);
-            graphics.DrawString(under, font, text, x - size.Width / 2, yLow + 1);
+            graphics.DrawString(under, font, text, x - size.Width / 2, rowLow + 2);
         }
         finally
         {

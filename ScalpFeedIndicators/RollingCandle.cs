@@ -8,6 +8,96 @@ public readonly record struct RollingBar(double Open, double High, double Low, d
     public bool IsEmpty => double.IsNaN(this.Close);
 }
 
+/// <summary>The shares a rolling candle traded at one price.</summary>
+public readonly record struct PriceLevel(double Price, double Shares);
+
+/// <summary>
+/// How the rolling candle shades by price (your idea, 2026-11-18): each price as bright as the shares traded there,
+/// so the candle shows where in it volume was and wasn't traded. Trades are rounded to their tick, a cent at $1 and
+/// up and a hundredth of a cent below (Reg NMS's sub-penny rule), so a midpoint print at 5.005 counts at 5.01. A
+/// price with fewer than the least shares (1,000 by default) is at the lowest intensity, as are prices nothing
+/// traded at; above it, the busiest price gets the candle's colour (its strength against typical volume) and the
+/// rest fall between by the square root of their shares over the busiest's, so a price with a quarter of the
+/// busiest's shares is half way. A whole window under the least shares is all at the lowest intensity. This depends
+/// on nothing in Quantower, so the harness can test it.
+/// </summary>
+public static class VolumeAtPrice
+{
+    /// <summary>Under this many shares at a price (or in the window), the lowest intensity.</summary>
+    public const double DefaultMinShares = 1000;
+
+    /// <summary>The price increment quotes come in: a cent at $1 and up, a hundredth of a cent below.</summary>
+    public static double TickAt(double price) => price >= 1 ? 0.01 : 0.0001;
+
+    /// <summary>A trade's price rounded to its tick, halves up.</summary>
+    public static double Level(double price)
+    {
+        double tick = TickAt(price);
+        return Math.Round(Math.Round(price / tick, MidpointRounding.AwayFromZero) * tick, 6);
+    }
+
+    /// <summary>
+    /// The alpha for a price that traded these shares, when the busiest price in the window traded busiest and the
+    /// candle's colour has alpha top: the lowest intensity under minShares, top at the busiest.
+    /// </summary>
+    public static int Alpha(double shares, double busiest, double minShares, int top)
+    {
+        int floor = VolumeBrightness.Alpha(0);
+        if (!(shares > 0) || !(shares >= minShares) || !(busiest > 0))
+            return floor;
+        top = Math.Clamp(top, floor, 255);
+        return (int)Math.Round(floor + ((top - floor) * Math.Sqrt(Math.Min(1, shares / busiest))));
+    }
+
+    /// <summary>
+    /// The alpha of each pixel row of a candle drawn from row yHigh down to row yLow (row y is the pixels from y to
+    /// y + 1; toY gives a price's y): each price lights the rows whose middles are within half a tick of it, or the
+    /// row it's on when that's none, within the candle; a row two prices share takes the brighter; rows no price
+    /// lights are at the lowest intensity.
+    /// </summary>
+    public static int[] RowAlphas(IReadOnlyList<PriceLevel> levels, Func<double, double> toY, int yHigh, int yLow, double minShares, int top)
+    {
+        int floor = VolumeBrightness.Alpha(0);
+        var rows = new int[Math.Max(1, yLow - yHigh + 1)];
+        Array.Fill(rows, floor);
+        double busiest = 0;
+        foreach (var level in levels)
+            busiest = Math.Max(busiest, level.Shares);
+
+        foreach (var level in levels)
+        {
+            int alpha = Alpha(level.Shares, busiest, minShares, top);
+            if (alpha <= floor)
+                continue;
+
+            double half = TickAt(level.Price) / 2;
+            double a = toY(level.Price + half);
+            double b = toY(level.Price - half);
+            if (double.IsNaN(a) || double.IsNaN(b))
+                continue;
+
+            double centre = toY(level.Price);
+            int first = (int)Math.Ceiling(Math.Min(a, b) - 0.5);
+            int last = (int)Math.Floor(Math.Max(a, b) - 0.5);
+            if (last < first)
+                first = last = (int)Math.Floor(centre);
+            first = Math.Max(first, yHigh) - yHigh;
+            last = Math.Min(last, yLow) - yHigh;
+            if (last < first)
+            {
+                // A price at the candle's edge whose band falls just outside it: its nearest row.
+                int nearest = Math.Clamp((int)Math.Floor(centre), yHigh, yLow) - yHigh;
+                first = last = nearest;
+            }
+
+            for (int row = first; row <= last; row++)
+                rows[row] = Math.Max(rows[row], alpha);
+        }
+
+        return rows;
+    }
+}
+
 /// <summary>
 /// A single candle over a rolling window of the last N seconds (your idea, 2026-11-18), built like a normal candle
 /// from the trades inside it: open the first trade in the window, high and low the extremes, close the latest
@@ -46,8 +136,15 @@ public sealed class RollingCandle
     }
 
     /// <summary>The candle at nowUtcTicks: the trades after nowUtcTicks minus the window, up to now.</summary>
-    public RollingBar At(long nowUtcTicks)
+    public RollingBar At(long nowUtcTicks) => this.At(nowUtcTicks, null);
+
+    /// <summary>
+    /// The candle at nowUtcTicks, and into levels (cleared first, when given) the shares it traded at each price, each
+    /// trade rounded to its tick (VolumeAtPrice.Level), highest price first: where in the candle volume was traded.
+    /// </summary>
+    public RollingBar At(long nowUtcTicks, List<PriceLevel> levels)
     {
+        levels?.Clear();
         lock (this.gate)
         {
             long start = nowUtcTicks - Volatile.Read(ref this.window);
@@ -61,6 +158,7 @@ public sealed class RollingCandle
             double high = open;
             double low = open;
             double volume = 0;
+            Dictionary<double, double> byLevel = levels == null ? null : new();
             foreach (var (_, price, size) in this.trades)
             {
                 if (price > high)
@@ -68,6 +166,18 @@ public sealed class RollingCandle
                 if (price < low)
                     low = price;
                 volume += size;
+                if (byLevel != null)
+                {
+                    double level = VolumeAtPrice.Level(price);
+                    byLevel[level] = byLevel.GetValueOrDefault(level) + size;
+                }
+            }
+
+            if (byLevel != null)
+            {
+                foreach (var (price, shares) in byLevel)
+                    levels.Add(new PriceLevel(price, shares));
+                levels.Sort((a, b) => b.Price.CompareTo(a.Price));
             }
 
             return new RollingBar(open, high, low, this.last, volume, this.trades.Count);
