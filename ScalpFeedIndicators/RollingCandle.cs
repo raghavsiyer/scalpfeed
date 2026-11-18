@@ -8,8 +8,19 @@ public readonly record struct RollingBar(double Open, double High, double Low, d
     public bool IsEmpty => double.IsNaN(this.Close);
 }
 
-/// <summary>The shares a rolling candle traded at one price.</summary>
-public readonly record struct PriceLevel(double Price, double Shares);
+/// <summary>
+/// The shares a rolling candle traded at one price, and of them how many were bought (at or above the ask) and sold
+/// (at or below the bid), as the tape colours them; the rest traded between.
+/// </summary>
+public readonly record struct PriceLevel(double Price, double Shares, double Bought = 0, double Sold = 0);
+
+/// <summary>Which side took a print, as the tape colours it: bought at or above the ask, sold at or below the bid.</summary>
+public enum PrintTaker
+{
+    Between = 0,
+    Buyer = 1,
+    Seller = 2,
+}
 
 /// <summary>
 /// How the rolling candle shades by price (your idea, 2026-11-18): each price as bright as the shares traded there,
@@ -19,8 +30,12 @@ public readonly record struct PriceLevel(double Price, double Shares);
 /// traded at; above it, the busiest price gets the candle's colour (its strength against typical volume) and the
 /// rest fall between by the square root of their shares over the busiest's, so a price with a quarter of the
 /// busiest's shares is half way. A whole window under the least shares is all at the lowest intensity. The prices
-/// are stops of one smooth gradient down the candle (your feedback, 2026-11-18: slices of shade looked boxy). This
-/// depends on nothing in Quantower, so the harness can test it.
+/// are stops of one smooth gradient down the candle (your feedback, 2026-11-18: slices of shade looked boxy). Each
+/// price's colour is by who took it (your idea, 2026-11-18): green where it was bought, at or above the ask, red where
+/// it was sold, at or below the bid, as the tape colours them, and in between by the share bought, so big selling
+/// in the middle of a green candle shows red there. Prints between the bid and ask count for brightness but not
+/// colour; a price with none bought or sold, or under the least shares, and the quiet stretches between, keep the
+/// candle's own colour. This depends on nothing in Quantower, so the harness can test it.
 /// </summary>
 public static class VolumeAtPrice
 {
@@ -56,7 +71,8 @@ public static class VolumeAtPrice
     /// busy price fades into quiet ones over a tick instead of ending in a hard edge. Stops are merged a pixel row at a
     /// time (the row's middle, the brightest of them), so zoomed out, where many prices share a row, there's one stop
     /// a row; ones past the candle's ends count at the end. The first stop is at yTop and the last at yBottom, top
-    /// to bottom in between. With nothing to go on, the whole candle is at the lowest intensity.
+    /// to bottom in between. With nothing to go on, the whole candle is at the lowest intensity. Each stop says the
+    /// share of its shares bought, from prices with at least minShares (the rest are NaN: the candle's colour).
     /// </summary>
     public static List<ShadeStop> Stops(IReadOnlyList<PriceLevel> levels, Func<double, double> toY, double yTop, double yBottom, double minShares, int top)
     {
@@ -72,33 +88,36 @@ public static class VolumeAtPrice
             traded.Add(level.Price);
         }
 
-        // Pixel row -> brightest alpha on it.
-        var byRow = new SortedDictionary<long, int>();
-        void Put(double price, int alpha)
+        // Pixel row -> brightest alpha on it, and the shares bought and sold at the prices on it that count.
+        var byRow = new SortedDictionary<long, (int Alpha, double Bought, double Sold)>();
+        void Put(double price, int alpha, double bought, double sold)
         {
             double y = toY(price);
             if (double.IsNaN(y))
                 return;
             long row = (long)Math.Floor(Math.Clamp(y, yTop, Math.Max(yTop, yBottom - 1e-6)));
-            byRow[row] = byRow.TryGetValue(row, out int seen) ? Math.Max(seen, alpha) : alpha;
+            byRow[row] = byRow.TryGetValue(row, out var seen)
+                ? (Math.Max(seen.Alpha, alpha), seen.Bought + bought, seen.Sold + sold)
+                : (alpha, bought, sold);
         }
 
         foreach (var level in levels)
         {
-            Put(level.Price, Alpha(level.Shares, busiest, minShares, top));
+            bool counts = level.Shares > 0 && level.Shares >= minShares;
+            Put(level.Price, Alpha(level.Shares, busiest, minShares, top), counts ? level.Bought : 0, counts ? level.Sold : 0);
             double tick = TickAt(level.Price);
             foreach (double next in new[] { Level(level.Price + tick), Level(level.Price - tick) })
             {
                 if (!traded.Contains(next))
-                    Put(next, floor);
+                    Put(next, floor, 0, 0);
             }
         }
 
         var stops = new List<ShadeStop>(byRow.Count + 2);
-        foreach (var (row, alpha) in byRow)
-            stops.Add(new ShadeStop(Math.Clamp(row + 0.5, yTop, yBottom), alpha));
+        foreach (var (row, (alpha, bought, sold)) in byRow)
+            stops.Add(new ShadeStop(Math.Clamp(row + 0.5, yTop, yBottom), alpha, bought + sold > 0 ? bought / (bought + sold) : double.NaN));
         if (stops.Count == 0)
-            stops.Add(new ShadeStop(yTop, floor));
+            stops.Add(new ShadeStop(yTop, floor, double.NaN));
         if (stops[0].Y > yTop)
             stops.Insert(0, stops[0] with { Y = yTop });
         if (stops[^1].Y < yBottom)
@@ -107,8 +126,11 @@ public static class VolumeAtPrice
     }
 }
 
-/// <summary>One stop of a rolling candle's gradient: its y on the chart and its alpha there.</summary>
-public readonly record struct ShadeStop(double Y, int Alpha);
+/// <summary>
+/// One stop of a rolling candle's gradient: its y on the chart, its alpha there, and the share of its shares bought
+/// (1 all bought, 0 all sold; NaN for the candle's own colour).
+/// </summary>
+public readonly record struct ShadeStop(double Y, int Alpha, double Buying);
 
 /// <summary>
 /// A single candle over a rolling window of the last N seconds (your idea, 2026-11-18), built like a normal candle
@@ -122,7 +144,7 @@ public readonly record struct ShadeStop(double Y, int Alpha);
 public sealed class RollingCandle
 {
     private readonly object gate = new();
-    private readonly Queue<(long Ticks, double Price, double Size)> trades = new();
+    private readonly Queue<(long Ticks, double Price, double Size, PrintTaker Taker)> trades = new();
     private double last = double.NaN;
     private long window;
 
@@ -134,15 +156,15 @@ public sealed class RollingCandle
         set => Volatile.Write(ref this.window, Math.Max(TimeSpan.TicksPerMillisecond, value.Ticks));
     }
 
-    /// <summary>A trade that arrived at utcTicks. Prices of 0 or less, or sizes below 0, are skipped.</summary>
-    public void Add(long utcTicks, double price, double size)
+    /// <summary>A trade that arrived at utcTicks, and who took it. Prices of 0 or less, or sizes below 0, are skipped.</summary>
+    public void Add(long utcTicks, double price, double size, PrintTaker taker = PrintTaker.Between)
     {
         if (!(price > 0) || !(size >= 0))
             return;
 
         lock (this.gate)
         {
-            this.trades.Enqueue((utcTicks, price, size));
+            this.trades.Enqueue((utcTicks, price, size, taker));
             this.last = price;
         }
     }
@@ -152,7 +174,8 @@ public sealed class RollingCandle
 
     /// <summary>
     /// The candle at nowUtcTicks, and into levels (cleared first, when given) the shares it traded at each price, each
-    /// trade rounded to its tick (VolumeAtPrice.Level), highest price first: where in the candle volume was traded.
+    /// trade rounded to its tick (VolumeAtPrice.Level), with how many were bought and sold, highest price first: where
+    /// in the candle volume was traded, and by whom.
     /// </summary>
     public RollingBar At(long nowUtcTicks, List<PriceLevel> levels)
     {
@@ -170,8 +193,8 @@ public sealed class RollingCandle
             double high = open;
             double low = open;
             double volume = 0;
-            Dictionary<double, double> byLevel = levels == null ? null : new();
-            foreach (var (_, price, size) in this.trades)
+            Dictionary<double, PriceLevel> byLevel = levels == null ? null : new();
+            foreach (var (_, price, size, taker) in this.trades)
             {
                 if (price > high)
                     high = price;
@@ -181,14 +204,18 @@ public sealed class RollingCandle
                 if (byLevel != null)
                 {
                     double level = VolumeAtPrice.Level(price);
-                    byLevel[level] = byLevel.GetValueOrDefault(level) + size;
+                    var was = byLevel.GetValueOrDefault(level);
+                    byLevel[level] = new PriceLevel(
+                        level,
+                        was.Shares + size,
+                        was.Bought + (taker == PrintTaker.Buyer ? size : 0),
+                        was.Sold + (taker == PrintTaker.Seller ? size : 0));
                 }
             }
 
             if (byLevel != null)
             {
-                foreach (var (price, shares) in byLevel)
-                    levels.Add(new PriceLevel(price, shares));
+                levels.AddRange(byLevel.Values);
                 levels.Sort((a, b) => b.Price.CompareTo(a.Price));
             }
 

@@ -5,18 +5,20 @@ using TradingPlatform.BusinessLayer;
 namespace ScalpFeedIndicators;
 
 /// <summary>
-/// Puts a RollingCandle on its indicator's price chart: one candle just right of the latest bar, as wide as the
-/// chart's bars, green with the close at or above the open and red below, its window over it ("10s") and the
-/// window's volume under it. Its colour is as strong as its volume against the stock's typical volume for a window
-/// that long (VolumeBrightness): half at typical, full at twice typical, a quarter's opacity when quiet. That colour
-/// is the candle's brightest; down it each price is shaded by the shares traded there (VolumeAtPrice), in one smooth
-/// gradient: the busiest price brightest, prices under the least shares (1,000) or with none at a quarter's opacity,
-/// so it shows where volume was and wasn't traded. The wick is a 1-pixel line, as on the chart's own candles. In a
-/// burst (over 4 times typical) it's more than full colour: a soft glow around the body only (your feedback,
-/// 2026-11-18: never over the wick), and its busiest prices run hot, toward white. A window under the least shares
-/// is all at a quarter, with no glow. It takes the chart symbol's prints as they arrive (Symbol.NewLast) and, four
-/// times a second, asks the chart to redraw when the candle has changed, so trades roll out of the window even when
-/// nothing trades. Used by the Rolling Candle indicator and by Key Moving Averages, so a Free licence's two indicators a
+/// Puts a RollingCandle on its indicator's price chart: one candle just right of the latest bar, half as wide again
+/// as the chart's own candles by default (a setting), green with the close at or above the open and red below, its
+/// window over it ("10s") and the window's volume under it. Its colour is as strong as its volume against the
+/// stock's typical volume for a window that long (VolumeBrightness): half at typical, full at twice typical, a
+/// quarter's opacity when quiet. That's the candle's brightest; down it each price is shaded by the shares traded
+/// there (VolumeAtPrice), in one smooth gradient: the busiest price brightest, prices under the least shares (1,000)
+/// or with none at a quarter's opacity, so it shows where volume was and wasn't traded. Each price is green where it
+/// was bought and red where it was sold, by the tape's own colouring (the print's AggressorFlag), so big selling
+/// inside a green candle shows red there. The wick is a 1-pixel line, as on the chart's own candles. In a burst
+/// (over 4 times typical) it's more than full colour: a soft glow around the body only (your feedback, 2026-11-18:
+/// never over the wick), and its busiest prices run hot, toward white. A window under the least shares is all at a
+/// quarter, with no glow. It takes the chart symbol's prints as they arrive (Symbol.NewLast) and, four times a
+/// second, asks the chart to redraw when the candle has changed, so trades roll out of the window even when nothing
+/// trades. Used by the Rolling Candle indicator and by Key Moving Averages, so a Free licence's two indicators a
 /// chart can still have it.
 /// </summary>
 internal sealed class RollingCandleView
@@ -38,6 +40,7 @@ internal sealed class RollingCandleView
     private double fullMultiple = 2;
     private double glowMultiple = 4;
     private double minShares = VolumeAtPrice.DefaultMinShares;
+    private float widthScale = 1.5f;
 
     // What the chart's Symbol.NewLast delivered in the current minute, logged once a minute to Quantower's log, to
     // check against the prints the connection sent for the symbol (your report, 2026-11-18: highs and lows jumped
@@ -58,10 +61,10 @@ internal sealed class RollingCandleView
 
     /// <summary>
     /// Starts over on this symbol with a window of this many seconds, judged against the typical volume of the last
-    /// typicalMinutes: full colour at fullMultiple times typical, glowing beyond glowMultiple, and prices (or a
-    /// window) under minShares at the lowest intensity.
+    /// typicalMinutes: full colour at fullMultiple times typical, glowing beyond glowMultiple, prices (or a window)
+    /// under minShares at the lowest intensity, and widthScale times as wide as the chart's own candles.
     /// </summary>
-    public void Start(Symbol chartSymbol, int windowSeconds, int typicalMinutes, double fullMultiple, double glowMultiple, double minShares)
+    public void Start(Symbol chartSymbol, int windowSeconds, int typicalMinutes, double fullMultiple, double glowMultiple, double minShares, double widthScale)
     {
         this.Stop();
         this.seconds = Math.Max(1, windowSeconds);
@@ -73,6 +76,7 @@ internal sealed class RollingCandleView
         this.fullMultiple = fullMultiple;
         this.glowMultiple = glowMultiple;
         this.minShares = Math.Max(0, minShares);
+        this.widthScale = (float)Math.Clamp(widthScale, 0.2, 10);
         if (chartSymbol == null)
             return;
 
@@ -102,7 +106,11 @@ internal sealed class RollingCandleView
     private void OnNewLast(Symbol from, Last last)
     {
         long now = DateTime.UtcNow.Ticks;
-        this.candle.Add(now, last.Price, last.Size);
+        // Who took it, as the tape colours it: ScalpFeed marks a print Buy at or above the ask, Sell at or below the bid.
+        var taker = last.AggressorFlag == AggressorFlag.Buy ? PrintTaker.Buyer
+            : last.AggressorFlag == AggressorFlag.Sell ? PrintTaker.Seller
+            : PrintTaker.Between;
+        this.candle.Add(now, last.Price, last.Size, taker);
         if (last.Price > 0)
             this.brightness.Add(now, last.Size);
 
@@ -200,8 +208,9 @@ internal sealed class RollingCandleView
         Rectangle area = window.ClientRectangle;
         float barWidth = Math.Max(1f, (float)chart.BarsWidth);
 
-        // An odd width, so the wick sits in the body's middle.
-        int body = Math.Max(3, (int)MathF.Round(barWidth * 0.7f)) | 1;
+        // The chart's own candles are about 0.7 of a bar wide; this one's widthScale times that, an odd width so the
+        // wick sits in the body's middle.
+        int body = Math.Max(5, (int)MathF.Round(barWidth * 0.7f * this.widthScale)) | 1;
 
         // Two bar widths right of the latest bar, kept inside the chart when it's scrolled back or tight on the right.
         float x = this.latestBarTime() is DateTime latest ? (float)converter.GetChartX(latest) + barWidth * 2 : area.Right - body * 2;
@@ -268,25 +277,27 @@ internal sealed class RollingCandleView
     }
 
     /// <summary>
-    /// A brush shading top to bottom through the stops, in the candle's hue at each stop's alpha; in a burst, stops
-    /// near the candle's brightest (top) lifted toward white by up to half the heat.
+    /// A brush shading top to bottom through the stops, each at its alpha, green as far as its shares were bought
+    /// and red as far as sold (the candle's hue where that isn't known); in a burst, stops near the candle's brightest
+    /// (top) lifted toward white by up to half the heat.
     /// </summary>
     private static Brush Gradient(List<ShadeStop> stops, int top, int bottom, Color hue, float heat, int brightest)
     {
         Color At(ShadeStop stop)
         {
+            var colour = double.IsNaN(stop.Buying) ? hue : Mix(Down, Up, stop.Buying);
             if (heat <= 0)
-                return Color.FromArgb(stop.Alpha, hue);
+                return Color.FromArgb(stop.Alpha, colour);
             int floor = VolumeBrightness.Alpha(0);
             float hot = 0.5f * heat * Math.Clamp((stop.Alpha - floor) / (float)Math.Max(1, brightest - floor), 0f, 1f);
             int Lift(int c) => (int)Math.Round(c + ((255 - c) * hot));
-            return Color.FromArgb(stop.Alpha, Lift(hue.R), Lift(hue.G), Lift(hue.B));
+            return Color.FromArgb(stop.Alpha, Lift(colour.R), Lift(colour.G), Lift(colour.B));
         }
 
         if (stops.Count < 2 || bottom - top < 2)
         {
             int alpha = 0;
-            ShadeStop most = stops.Count > 0 ? stops[0] : new ShadeStop(top, VolumeBrightness.Alpha(0));
+            ShadeStop most = stops.Count > 0 ? stops[0] : new ShadeStop(top, VolumeBrightness.Alpha(0), double.NaN);
             foreach (var stop in stops)
             {
                 if (stop.Alpha > alpha)
@@ -326,6 +337,14 @@ internal sealed class RollingCandleView
             WrapMode = WrapMode.TileFlipXY,
         };
         return brush;
+    }
+
+    /// <summary>From a (at 0) to b (at 1), channel by channel.</summary>
+    private static Color Mix(Color a, Color b, double t)
+    {
+        t = Math.Clamp(t, 0, 1);
+        int Channel(int from, int to) => (int)Math.Round(from + ((to - from) * t));
+        return Color.FromArgb(Channel(a.R, b.R), Channel(a.G, b.G), Channel(a.B, b.B));
     }
 
     /// <summary>A rectangle with corners rounded by radius, for a glow that hugs the body rather than boxing it.</summary>

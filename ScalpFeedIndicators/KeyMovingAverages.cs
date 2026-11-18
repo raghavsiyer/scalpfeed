@@ -97,6 +97,9 @@ public sealed class KeyMovingAverages : Indicator
     [InputParameter("Rolling candle lowest intensity under (shares at a price, or in the window)", 85, 0, 1_000_000, 100, 0)]
     public int RollingCandleMinShares = 1000;
 
+    [InputParameter("Rolling candle width (times the chart's candles)", 86, 0.5, 5, 0.1, 1)]
+    public double RollingCandleWidth = 1.5;
+
     private RollingCandleView rollingCandle;
 
     // One per moving average line, in the order the lines were added.
@@ -205,7 +208,7 @@ public sealed class KeyMovingAverages : Indicator
         {
             this.rollingCandle ??= new RollingCandleView(this, () => this.Count > 0 ? this.Time() : null);
             this.rollingCandle.Start(this.Symbol, this.RollingCandleSeconds, this.RollingCandleTypicalMinutes,
-                this.RollingCandleFullMultiple, this.RollingCandleGlowMultiple, this.RollingCandleMinShares);
+                this.RollingCandleFullMultiple, this.RollingCandleGlowMultiple, this.RollingCandleMinShares, this.RollingCandleWidth);
             shown.Add($"{Math.Max(1, this.RollingCandleSeconds)}s candle");
         }
 

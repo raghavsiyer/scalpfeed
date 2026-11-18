@@ -24,6 +24,9 @@ public sealed class RollingCandleIndicator : Indicator
     [InputParameter("Lowest intensity under (shares at a price, or in the window)", 50, 0, 1_000_000, 100, 0)]
     public int MinShares = 1000;
 
+    [InputParameter("Width (times the chart's candles)", 60, 0.5, 5, 0.1, 1)]
+    public double Width = 1.5;
+
     private readonly RollingCandleView view;
 
     public RollingCandleIndicator()
@@ -36,7 +39,7 @@ public sealed class RollingCandleIndicator : Indicator
 
     public override string ShortName => $"Rolling {this.WindowSeconds}s";
 
-    protected override void OnInit() => this.view.Start(this.Symbol, this.WindowSeconds, this.TypicalMinutes, this.FullMultiple, this.GlowMultiple, this.MinShares);
+    protected override void OnInit() => this.view.Start(this.Symbol, this.WindowSeconds, this.TypicalMinutes, this.FullMultiple, this.GlowMultiple, this.MinShares, this.Width);
 
     protected override void OnClear() => this.view.Stop();
 

@@ -1527,6 +1527,23 @@ void RunRolling()
     Check(stops.All(st => st.Alpha == 200) && stops[0].Y == 50 && stops[^1].Y == 51, "a candle that never moved is one colour, the candle's");
     stops = VolumeAtPrice.Stops([], price => (3.50 - price) * 1000, 50, 51, 1000, 200);
     Check(stops.All(st => st.Alpha == 64) && stops[0].Y == 50 && stops[^1].Y == 51, "with nothing to go on, the lowest intensity throughout");
+
+    // Who took each price, as the tape colours it: green where bought, red where sold.
+    var sides = new RollingCandle(TimeSpan.FromSeconds(10));
+    sides.Add(T(0), 3.45, 3000, PrintTaker.Buyer);
+    sides.Add(T(1), 3.45, 1000, PrintTaker.Seller);
+    sides.Add(T(2), 3.44, 2000, PrintTaker.Seller);
+    sides.Add(T(3), 3.44, 500);
+    sides.Add(T(4), 3.43, 800, PrintTaker.Seller);
+    sides.At(T(4.5), levels);
+    Check(levels.SequenceEqual([new PriceLevel(3.45, 4000, 3000, 1000), new PriceLevel(3.44, 2500, 0, 2000), new PriceLevel(3.43, 800, 0, 800)]),
+        $"each price's shares, bought and sold, a print between the bid and ask in neither ({string.Join(", ", levels)})");
+    string Buying(List<ShadeStop> st) => string.Join(",", st.Select(x => double.IsNaN(x.Buying) ? "-" : x.Buying.ToString("0.##")));
+    stops = VolumeAtPrice.Stops(levels, price => Math.Round((3.50 - price) * 1000, 6), 50, 71, 1000, 255);
+    Check(Buying(stops) == "0.75,0.75,0,-,-",
+        $"3.45 three-quarters bought, 3.44 all sold (its 500 between aside); 3.43 under 1,000 and the quiet tick past it keep the candle's colour ({Buying(stops)} at {Ys(stops)})");
+    stops = VolumeAtPrice.Stops(levels, price => Math.Round((3.50 - price) * 10, 6), 0, 1, 1000, 255);
+    Check(Buying(stops) == "0.5,0.5,0.5", $"zoomed out, prices sharing a row pool their buying and selling: 3,000 bought, 3,000 sold ({Buying(stops)})");
 }
 
 // The slow-update diagnostics: off by default, and slow work matched against garbage collection pauses.
