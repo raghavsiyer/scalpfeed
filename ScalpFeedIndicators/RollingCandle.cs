@@ -9,6 +9,12 @@ public readonly record struct RollingBar(double Open, double High, double Low, d
 }
 
 /// <summary>
+/// A price a wick reaches, and how fresh the latest trade at or beyond it is: 1 just traded, 0 about to leave the
+/// window. The wick is drawn faded by this, so a high or low ages out smoothly rather than vanishing at once.
+/// </summary>
+public readonly record struct WickLevel(double Price, double Fresh);
+
+/// <summary>
 /// A single candle over a rolling window of the last N seconds (your idea, 2026-11-18), built like a normal candle
 /// from the trades inside it: open the first trade in the window, high and low the extremes, close the latest
 /// trade, volume their shares. As time passes, trades older than the window drop out, so it rolls rather than
@@ -49,29 +55,74 @@ public sealed class RollingCandle
     public RollingBar At(long nowUtcTicks)
     {
         lock (this.gate)
+            return this.AtLocked(nowUtcTicks);
+    }
+
+    /// <summary>
+    /// The candle at nowUtcTicks with its wicks' levels (your report, 2026-11-18: highs and lows jumped rather than
+    /// rolled, as a high snaps down the moment its trade leaves the window). Upper: each price traded above the body,
+    /// highest first, with the freshness of the latest trade at or above it; Lower: likewise below the body, lowest
+    /// first. Drawn faded by freshness, the wick's tip fades as its trade ages instead of vanishing at once.
+    /// </summary>
+    public (RollingBar Bar, List<WickLevel> Upper, List<WickLevel> Lower) WithWicks(long nowUtcTicks)
+    {
+        lock (this.gate)
         {
-            long start = nowUtcTicks - Volatile.Read(ref this.window);
-            while (this.trades.Count > 0 && this.trades.Peek().Ticks <= start)
-                this.trades.Dequeue();
+            var bar = this.AtLocked(nowUtcTicks);
+            var upper = new List<WickLevel>();
+            var lower = new List<WickLevel>();
+            if (bar.IsEmpty || this.trades.Count == 0)
+                return (bar, upper, lower);
 
-            if (this.trades.Count == 0)
-                return double.IsNaN(this.last) ? RollingBar.None : new RollingBar(this.last, this.last, this.last, this.last, 0, 0);
+            long span = Volatile.Read(ref this.window);
+            double top = Math.Max(bar.Open, bar.Close);
+            double bottom = Math.Min(bar.Open, bar.Close);
+            var fresh = this.trades.Select(t => (t.Price, Fresh: Math.Clamp(1 - ((double)(nowUtcTicks - t.Ticks) / span), 0, 1))).ToList();
 
-            double open = this.trades.Peek().Price;
-            double high = open;
-            double low = open;
-            double volume = 0;
-            foreach (var (_, price, size) in this.trades)
+            double best = 0;
+            foreach (var level in fresh.Where(t => t.Price > top).GroupBy(t => t.Price).OrderByDescending(g => g.Key))
             {
-                if (price > high)
-                    high = price;
-                if (price < low)
-                    low = price;
-                volume += size;
+                best = Math.Max(best, level.Max(t => t.Fresh));
+                upper.Add(new WickLevel(level.Key, best));
             }
 
-            return new RollingBar(open, high, low, this.last, volume, this.trades.Count);
+            best = 0;
+            foreach (var level in fresh.Where(t => t.Price < bottom).GroupBy(t => t.Price).OrderBy(g => g.Key))
+            {
+                best = Math.Max(best, level.Max(t => t.Fresh));
+                lower.Add(new WickLevel(level.Key, best));
+            }
+
+            return (bar, upper, lower);
         }
+    }
+
+    /// <summary>How visible a wick level is for its freshness: fully for the first half of its time in the window, then fading to nothing.</summary>
+    public static double WickVisibility(double fresh) => Math.Clamp(2 * fresh, 0, 1);
+
+    private RollingBar AtLocked(long nowUtcTicks)
+    {
+        long start = nowUtcTicks - Volatile.Read(ref this.window);
+        while (this.trades.Count > 0 && this.trades.Peek().Ticks <= start)
+            this.trades.Dequeue();
+
+        if (this.trades.Count == 0)
+            return double.IsNaN(this.last) ? RollingBar.None : new RollingBar(this.last, this.last, this.last, this.last, 0, 0);
+
+        double open = this.trades.Peek().Price;
+        double high = open;
+        double low = open;
+        double volume = 0;
+        foreach (var (_, price, size) in this.trades)
+        {
+            if (price > high)
+                high = price;
+            if (price < low)
+                low = price;
+            volume += size;
+        }
+
+        return new RollingBar(open, high, low, this.last, volume, this.trades.Count);
     }
 
     public void Clear()

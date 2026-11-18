@@ -10,14 +10,17 @@ namespace ScalpFeedIndicators;
 /// window's volume under it. Its colour is as strong as its volume against the stock's typical volume for a window
 /// that long (VolumeBrightness): half at typical, full at twice typical, a quarter's opacity when quiet, and in a
 /// burst (over 4 times typical) more than that: a glow hugging the body and the wick (not the whole high-low range)
-/// that grows with the burst, with a white edge once it's well past. It takes the chart symbol's prints as they arrive (Symbol.NewLast) and, four times a
-/// second, asks the chart to redraw when the candle has changed, so trades roll out of the window even when nothing
-/// trades. Used by the Rolling Candle indicator and by Key Moving Averages, so a Free licence's two indicators a
-/// chart can still have it.
+/// that grows with the burst, with a white edge once it's well past. The wick fades by age: each part of it is as
+/// visible as the freshest trade that reached it (RollingCandle.WithWicks), so a high or low fades out over its last
+/// 5 seconds in the window instead of snapping off when it leaves. It takes the chart symbol's prints as they arrive
+/// (Symbol.NewLast) and, about 7 times a second, asks the chart to redraw while trades are in the window, so the
+/// wick fades and trades roll out even when nothing trades. Used by the Rolling Candle indicator and by Key Moving
+/// Averages, so a Free licence's two indicators a chart can still have it.
 /// </summary>
 internal sealed class RollingCandleView
 {
-    private const int RedrawEveryMs = 250;
+    // About 7 times a second: often enough that a fading wick looks smooth.
+    private const int RedrawEveryMs = 150;
     private static readonly Color Up = Color.FromArgb(38, 166, 154);
     private static readonly Color Down = Color.FromArgb(239, 83, 80);
     private static readonly Color Label = Color.FromArgb(200, 200, 200);
@@ -110,11 +113,12 @@ internal sealed class RollingCandleView
 
     private void OnTimer()
     {
+        // While trades are in the window the wick is fading, so it redraws even when the candle's numbers haven't moved.
         var now = this.TakeLook();
         Look shown;
         lock (this.gate)
             shown = this.painted;
-        if (now == shown)
+        if (now == shown && now.Bar.Trades == 0)
             return;
 
         try
@@ -158,13 +162,29 @@ internal sealed class RollingCandleView
         float yLow = (float)converter.GetChartY(bar.Low);
         float yClose = (float)converter.GetChartY(bar.Close);
 
+        // The wick in segments, each as visible as the freshest trade that reached it, so a high or low fades out as its
+        // trade ages instead of snapping off when it leaves the window.
+        float top = Math.Min(yOpen, yClose);
+        float height = Math.Max(1f, Math.Abs(yClose - yOpen));
+        var (_, upper, lower) = this.candle.WithWicks(DateTime.UtcNow.Ticks);
+        var wick = new List<(float From, float To, float Seen)>();
+        for (int i = 0; i < upper.Count; i++)
+        {
+            float to = i + 1 < upper.Count ? (float)converter.GetChartY(upper[i + 1].Price) : top;
+            wick.Add(((float)converter.GetChartY(upper[i].Price), to, (float)RollingCandle.WickVisibility(upper[i].Fresh)));
+        }
+
+        for (int i = 0; i < lower.Count; i++)
+        {
+            float to = i + 1 < lower.Count ? (float)converter.GetChartY(lower[i + 1].Price) : top + height;
+            wick.Add(((float)converter.GetChartY(lower[i].Price), to, (float)RollingCandle.WickVisibility(lower[i].Fresh)));
+        }
+
         var state = graphics.Save();
         try
         {
             graphics.SetClip(area);
             var hue = bar.Close >= bar.Open ? Up : Down;
-            float top = Math.Min(yOpen, yClose);
-            float height = Math.Max(1f, Math.Abs(yClose - yOpen));
 
             // A burst: a glow that follows the candle itself (a rounded halo hugging the body, a thin one along the
             // wick, not a box over the whole range), wider and stronger the bigger the burst, then a white edge on
@@ -176,9 +196,16 @@ internal sealed class RollingCandleView
                 for (int layer = 3; layer >= 1; layer--)
                 {
                     float spread = (1.5f + (4.5f * heat)) * layer / 3f;
-                    var glow = Color.FromArgb((int)((30 + (80 * heat)) / layer), hue);
-                    using var wickGlow = new Pen(glow, 1 + spread) { StartCap = LineCap.Round, EndCap = LineCap.Round };
-                    graphics.DrawLine(wickGlow, x, yHigh, x, yLow);
+                    int glowAlpha = (int)((30 + (80 * heat)) / layer);
+                    var glow = Color.FromArgb(glowAlpha, hue);
+                    foreach (var (from, to, seen) in wick)
+                    {
+                        if ((int)(glowAlpha * seen) < 2)
+                            continue;
+                        using var wickGlow = new Pen(Color.FromArgb((int)(glowAlpha * seen), hue), 1 + spread) { StartCap = LineCap.Round, EndCap = LineCap.Round };
+                        graphics.DrawLine(wickGlow, x, from, x, to);
+                    }
+
                     using var bodyGlow = new SolidBrush(glow);
                     using var halo = Rounded(x - (body / 2) - spread, top - spread, body + (2 * spread), height + (2 * spread), spread);
                     graphics.FillPath(bodyGlow, halo);
@@ -188,9 +215,16 @@ internal sealed class RollingCandleView
             }
 
             var colour = Color.FromArgb(look.Alpha, hue);
-            using var pen = new Pen(colour, heat > 0 ? 2 : 1);
+            foreach (var (from, to, seen) in wick)
+            {
+                int alpha = (int)(look.Alpha * seen);
+                if (alpha < 2)
+                    continue;
+                using var wickPen = new Pen(Color.FromArgb(alpha, hue), heat > 0 ? 2 : 1);
+                graphics.DrawLine(wickPen, x, from, x, to);
+            }
+
             using var fill = new SolidBrush(colour);
-            graphics.DrawLine(pen, x, yHigh, x, yLow);
             graphics.FillRectangle(fill, x - body / 2, top, body, height);
             if (heat >= 0.5f)
             {

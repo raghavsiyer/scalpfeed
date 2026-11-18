@@ -1439,6 +1439,26 @@ void RunRolling()
           && RollingCandle.FormatVolume(1_250_000) == "1.25M", "the volume label reads 850, 1.23K, 12.3K, 1.25M");
     Check(RollingBar.None == RollingBar.None, "an empty candle equals itself, so the redraw timer can tell nothing changed");
 
+    // Wicks faded by age, so a high or low ages out instead of snapping off when its trade leaves.
+    var aged = new RollingCandle(TimeSpan.FromSeconds(10));
+    aged.Add(T(0), 3.40, 100);
+    aged.Add(T(1), 3.60, 100);
+    aged.Add(T(5), 3.50, 100);
+    aged.Add(T(8), 3.30, 100);
+    aged.Add(T(9), 3.42, 100);
+    var (agedBar, up, down) = aged.WithWicks(T(9));
+    Check(agedBar == new RollingBar(3.40, 3.60, 3.30, 3.42, 500, 5) && up.Select(l => l.Price).SequenceEqual(new[] { 3.60, 3.50 }),
+        "upper wick levels: each price above the body (3.40-3.42), highest first");
+    Check(Math.Abs(up[0].Fresh - 0.2) < 1e-9 && Math.Abs(up[1].Fresh - 0.6) < 1e-9,
+        "the tip is as fresh as its trade (8 s old is 0.2); lower down, the freshest trade reaching it (4 s old, 0.6)");
+    Check(down.Count == 1 && down[0].Price == 3.30 && Math.Abs(down[0].Fresh - 0.9) < 1e-9, "the lower wick likewise: 3.30, 1 s old");
+    Check(RollingCandle.WickVisibility(1) == 1 && RollingCandle.WickVisibility(0.5) == 1 && RollingCandle.WickVisibility(0.25) == 0.5 && RollingCandle.WickVisibility(0) == 0,
+        "a level shows fully for the first half of its time in the window, then fades to nothing");
+    var (_, fading, _) = aged.WithWicks(T(9.9));
+    Check(fading[0].Price == 3.60 && RollingCandle.WickVisibility(fading[0].Fresh) < 0.25, "at 8.9 s old the spike is nearly faded");
+    var (gone, none, _) = aged.WithWicks(T(11.1));
+    Check(none.Count == 0 && gone.High == 3.50, "and once it leaves, the high is the next one down, with nothing left to snap off");
+
     // The colour against the stock's typical 10 s volume over the last 5 minutes: half at typical, full at 2x,
     // and beyond 4x a glow that's strongest at 16x.
     var vb = new VolumeBrightness(TimeSpan.FromMinutes(5), TimeSpan.FromSeconds(10));
