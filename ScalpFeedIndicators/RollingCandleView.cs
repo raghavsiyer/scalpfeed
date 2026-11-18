@@ -1,4 +1,5 @@
 using System.Drawing;
+using System.Drawing.Drawing2D;
 using TradingPlatform.BusinessLayer;
 
 namespace ScalpFeedIndicators;
@@ -8,8 +9,8 @@ namespace ScalpFeedIndicators;
 /// chart's bars, green with the close at or above the open and red below, its window over it ("10s") and the
 /// window's volume under it. Its colour is as strong as its volume against the stock's typical volume for a window
 /// that long (VolumeBrightness): half at typical, full at twice typical, a quarter's opacity when quiet, and in a
-/// burst (over 4 times typical) more than that: a glow around it that grows with the burst, with a white edge once
-/// it's well past. It takes the chart symbol's prints as they arrive (Symbol.NewLast) and, four times a
+/// burst (over 4 times typical) more than that: a glow hugging the body and the wick (not the whole high-low range)
+/// that grows with the burst, with a white edge once it's well past. It takes the chart symbol's prints as they arrive (Symbol.NewLast) and, four times a
 /// second, asks the chart to redraw when the candle has changed, so trades roll out of the window even when nothing
 /// trades. Used by the Rolling Candle indicator and by Key Moving Averages, so a Free licence's two indicators a
 /// chart can still have it.
@@ -165,17 +166,25 @@ internal sealed class RollingCandleView
             float top = Math.Min(yOpen, yClose);
             float height = Math.Max(1f, Math.Abs(yClose - yOpen));
 
-            // A burst: a glow around the whole candle in its colour, wider and stronger the bigger the burst, then a
-            // white edge on the body once it's well past.
+            // A burst: a glow that follows the candle itself (a rounded halo hugging the body, a thin one along the
+            // wick, not a box over the whole range), wider and stronger the bigger the burst, then a white edge on
+            // the body once it's well past. Faintest and widest layer first.
             float heat = look.Heat / 20f;
             if (heat > 0)
             {
+                graphics.SmoothingMode = SmoothingMode.AntiAlias;
                 for (int layer = 3; layer >= 1; layer--)
                 {
-                    float spread = (2 + (7 * heat)) * layer / 3f;
-                    using var halo = new SolidBrush(Color.FromArgb((int)((25 + (75 * heat)) / layer), hue));
-                    graphics.FillRectangle(halo, x - (body / 2) - spread, yHigh - spread, body + (2 * spread), Math.Max(1f, yLow - yHigh) + (2 * spread));
+                    float spread = (1.5f + (4.5f * heat)) * layer / 3f;
+                    var glow = Color.FromArgb((int)((30 + (80 * heat)) / layer), hue);
+                    using var wickGlow = new Pen(glow, 1 + spread) { StartCap = LineCap.Round, EndCap = LineCap.Round };
+                    graphics.DrawLine(wickGlow, x, yHigh, x, yLow);
+                    using var bodyGlow = new SolidBrush(glow);
+                    using var halo = Rounded(x - (body / 2) - spread, top - spread, body + (2 * spread), height + (2 * spread), spread);
+                    graphics.FillPath(bodyGlow, halo);
                 }
+
+                graphics.SmoothingMode = SmoothingMode.None;
             }
 
             var colour = Color.FromArgb(look.Alpha, hue);
@@ -203,5 +212,24 @@ internal sealed class RollingCandleView
         {
             graphics.Restore(state);
         }
+    }
+
+    /// <summary>A rectangle with corners rounded by radius, for a glow that hugs the body rather than boxing it.</summary>
+    private static GraphicsPath Rounded(float left, float top, float width, float height, float radius)
+    {
+        var path = new GraphicsPath();
+        float d = Math.Min(Math.Min(width, height), radius * 2);
+        if (d < 1)
+        {
+            path.AddRectangle(new RectangleF(left, top, width, height));
+            return path;
+        }
+
+        path.AddArc(left, top, d, d, 180, 90);
+        path.AddArc(left + width - d, top, d, d, 270, 90);
+        path.AddArc(left + width - d, top + height - d, d, d, 0, 90);
+        path.AddArc(left, top + height - d, d, d, 90, 90);
+        path.CloseFigure();
+        return path;
     }
 }
