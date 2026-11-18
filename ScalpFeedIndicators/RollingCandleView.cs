@@ -34,6 +34,12 @@ internal sealed class RollingCandleView
     private double fullMultiple = 2;
     private double glowMultiple = 4;
 
+    // What the chart's Symbol.NewLast delivered in the current minute, logged once a minute to Quantower's log, to
+    // check against the prints the connection sent for the symbol (your report, 2026-11-18: highs and lows jumped
+    // more than a full tape's window would; replaying captures says a full tape steps little).
+    private long printsSeen;
+    private double sharesSeen;
+    private long nextReportTicks;
     /// <summary>The candle as drawn: its bar, colour alpha, and glow heat in twentieths (so a redraw waits for a visible change).</summary>
     private readonly record struct Look(RollingBar Bar, int Alpha, int Heat);
 
@@ -92,6 +98,43 @@ internal sealed class RollingCandleView
         this.candle.Add(now, last.Price, last.Size);
         if (last.Price > 0)
             this.brightness.Add(now, last.Size);
+
+        lock (this.gate)
+        {
+            this.printsSeen++;
+            this.sharesSeen += last.Size;
+        }
+    }
+
+    /// <summary>Once a minute: how many prints and shares Symbol.NewLast brought, into Quantower's log.</summary>
+    private void ReportPrints(long nowTicks)
+    {
+        long prints;
+        double shares;
+        string name;
+        lock (this.gate)
+        {
+            if (this.nextReportTicks == 0)
+                this.nextReportTicks = nowTicks + TimeSpan.TicksPerMinute;
+            if (nowTicks < this.nextReportTicks)
+                return;
+
+            this.nextReportTicks = nowTicks + TimeSpan.TicksPerMinute;
+            prints = this.printsSeen;
+            shares = this.sharesSeen;
+            this.printsSeen = 0;
+            this.sharesSeen = 0;
+            name = this.symbol?.Name;
+        }
+
+        try
+        {
+            Core.Instance.Loggers.Log($"Rolling candle {name}: {prints} prints, {shares:0} shares from NewLast in the last minute", LoggingLevel.System);
+        }
+        catch
+        {
+            // The count must never stop the candle.
+        }
     }
 
     /// <summary>The candle now, its colour's alpha, and its glow.</summary>
@@ -110,6 +153,7 @@ internal sealed class RollingCandleView
 
     private void OnTimer()
     {
+        this.ReportPrints(DateTime.UtcNow.Ticks);
         var now = this.TakeLook();
         Look shown;
         lock (this.gate)
