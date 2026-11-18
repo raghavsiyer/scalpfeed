@@ -29,7 +29,7 @@ internal sealed record OrderHotkey(string Keys, bool Buy, double Shares, double 
     };
 
     public string Describe() =>
-        $"{(this.Buy ? "buy" : "sell")} {this.Size()}, {this.Tif} limit at the {(this.Buy ? "ask plus" : "bid minus")} {this.Offset}";
+        $"{(this.Buy ? "buy" : "sell")} {this.Size()}, {this.Tif}{(this.Tif == "IOC" ? " (DAY outside 9:30-16:00 ET)" : "")} limit at the {(this.Buy ? "ask plus" : "bid minus")} {this.Offset}";
 }
 
 /// <summary>
@@ -46,14 +46,32 @@ internal readonly record struct HotkeyQuote(string Symbol, double Bid, double As
 /// The stock is the one with a market depth open, since your DOM follows the stock you've picked; with none or
 /// several it sends nothing and says why. The price is IBKR's NBBO, at the moment of the key, rounded to IBKR's
 /// tick for the price: a cent from a dollar, a hundredth of a cent below. The order is a limit with the key's time in
-/// force (all three keys' is IOC: what doesn't fill at once is cancelled), which IbkrTrader sends with outsideRth for
-/// premarket and after hours. A position key takes its share of the position as IBKR last said it, never more than
-/// the shares not already in working orders on its side, so presses while earlier ones are working can't go past it.
+/// force, which IbkrTrader sends with outsideRth for premarket and after hours. All three keys are IOC (what doesn't
+/// fill at once is cancelled) from 9:30 to 16:00 ET on weekdays, and DAY outside it (your choice, 2026-11-18): IBKR
+/// ignores outsideRth on an IOC sent to SMART (warning 2109 on every hotkey order that morning), so an IOC wouldn't
+/// work premarket, while a DAY limit does and stays working until it fills or you cancel it. A position key takes its
+/// share of the position as IBKR last said it, never more than the shares not already in working orders on its side,
+/// so presses while earlier ones are working can't go past it.
 /// </summary>
 internal static class OrderHotkeys
 {
-    /// <summary>The order for this key on these depth symbols, or why there's none.</summary>
-    public static (IbkrOrderTicket Ticket, double Quote, string Problem) Decide(OrderHotkey hotkey, IReadOnlyList<HotkeyQuote> depth)
+    private static readonly TimeZoneInfo Eastern = TimeZoneInfo.FindSystemTimeZoneById("Eastern Standard Time");
+    private static readonly TimeSpan RegularOpen = new(9, 30, 0);
+    private static readonly TimeSpan RegularClose = new(16, 0, 0);
+
+    /// <summary>Whether this moment is in the regular session, 9:30 to 16:00 ET on a weekday.</summary>
+    public static bool InRegularHours(DateTime utc)
+    {
+        var et = TimeZoneInfo.ConvertTimeFromUtc(DateTime.SpecifyKind(utc, DateTimeKind.Utc), Eastern);
+        return et.DayOfWeek is not (DayOfWeek.Saturday or DayOfWeek.Sunday) && et.TimeOfDay >= RegularOpen && et.TimeOfDay < RegularClose;
+    }
+
+    /// <summary>The key's time in force at this moment: an IOC key's order is DAY outside regular hours.</summary>
+    public static string TifAt(OrderHotkey hotkey, DateTime utc) =>
+        hotkey.Tif == "IOC" && !InRegularHours(utc) ? "DAY" : hotkey.Tif;
+
+    /// <summary>The order for this key on these depth symbols at this moment (now when not given), or why there's none.</summary>
+    public static (IbkrOrderTicket Ticket, double Quote, string Problem) Decide(OrderHotkey hotkey, IReadOnlyList<HotkeyQuote> depth, DateTime? utc = null)
     {
         if (depth.Count == 0)
             return (null, double.NaN, "no market depth is open, so there's no stock to send it for");
@@ -88,7 +106,8 @@ internal static class OrderHotkeys
         if (!(limit > 0))
             return (null, quote, $"{target.Symbol}'s limit would be {limit}");
 
-        return (new IbkrOrderTicket(target.Symbol, hotkey.Buy, shares, "LMT", limit, double.NaN, hotkey.Tif), quote, null);
+        string tif = TifAt(hotkey, utc ?? DateTime.UtcNow);
+        return (new IbkrOrderTicket(target.Symbol, hotkey.Buy, shares, "LMT", limit, double.NaN, tif), quote, null);
     }
 
     /// <summary>The quote plus the offset, on IBKR's tick for stocks: $0.01 from a dollar, $0.0001 below.</summary>
