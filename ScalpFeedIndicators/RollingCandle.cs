@@ -94,58 +94,124 @@ public sealed class RollingCandle
 }
 
 /// <summary>
-/// How strongly the rolling candle is coloured (your idea, 2026-11-18): its window's volume relative to the busiest
-/// window seen in the last few minutes, so it reads the same on any stock and any chart timeframe. 1 is as busy as
-/// anything in the lookback, 0 nothing traded. Each look at the candle (four a second, and each paint) is one sample;
-/// the busiest sample still inside the lookback is the peak, kept in a queue of falling volumes so finding it is
-/// cheap. Right after the chart opens the first samples are their own peak, so it starts at full colour. This
-/// depends on nothing in Quantower, so the harness can test it.
+/// How the rolling candle shows its volume (your ideas, 2026-11-18): against the stock's typical volume for a window
+/// that long, so the look means "unusual", not just "the most lately". Typical is the average over the last few
+/// minutes: the shares traded in them, spread evenly over windows of the candle's length. The window's volume over
+/// typical is its ratio. Opacity goes by the ratio on a log scale: typical is half, the full multiple (2 by default)
+/// full colour, its inverse (a half) or less a quarter's opacity. Above the glow multiple (4 by default) it's more
+/// than full colour: a glow whose heat rises on the same log scale to its most at the glow multiple squared (16).
+/// Until it has seen two windows' worth of time there's no telling what's typical, and the ratio is unknown. Sizes
+/// are added as trades arrive, on this PC's clock like the candle. This depends on nothing in Quantower, so the
+/// harness can test it.
 /// </summary>
 public sealed class VolumeBrightness
 {
-    /// <summary>The candle's opacity with nothing in the window: dim, but still there.</summary>
+    /// <summary>The candle's opacity at no strength: dim, but still there.</summary>
     public const double MinOpacity = 0.25;
 
     private readonly object gate = new();
-    private readonly LinkedList<(long Ticks, double Volume)> falling = new();
+    private readonly Queue<(long Ticks, double Size)> trades = new();
+    private double sum;
+    private long firstTicks = long.MinValue;
     private long lookback;
+    private long window;
 
-    public VolumeBrightness(TimeSpan lookback) => this.Lookback = lookback;
+    public VolumeBrightness(TimeSpan lookback, TimeSpan window)
+    {
+        this.Lookback = lookback;
+        this.Window = window;
+    }
 
+    /// <summary>How far back typical volume is averaged.</summary>
     public TimeSpan Lookback
     {
         get => TimeSpan.FromTicks(Volatile.Read(ref this.lookback));
         set => Volatile.Write(ref this.lookback, Math.Max(TimeSpan.TicksPerSecond, value.Ticks));
     }
 
-    /// <summary>Takes the window's volume at utcTicks and returns it relative to the busiest in the lookback, 0 to 1.</summary>
-    public double Observe(long utcTicks, double volume)
+    /// <summary>The candle's window, the length typical volume is given for.</summary>
+    public TimeSpan Window
     {
-        if (!(volume >= 0))
-            volume = 0;
+        get => TimeSpan.FromTicks(Volatile.Read(ref this.window));
+        set => Volatile.Write(ref this.window, Math.Max(TimeSpan.TicksPerMillisecond, value.Ticks));
+    }
+
+    /// <summary>A trade's shares, as it arrives.</summary>
+    public void Add(long utcTicks, double size)
+    {
+        if (!(size > 0))
+            return;
 
         lock (this.gate)
         {
-            while (this.falling.Count > 0 && this.falling.Last.Value.Volume <= volume)
-                this.falling.RemoveLast();
-            this.falling.AddLast((utcTicks, volume));
-
-            long start = utcTicks - Volatile.Read(ref this.lookback);
-            while (this.falling.First.Value.Ticks <= start)
-                this.falling.RemoveFirst();
-
-            double peak = this.falling.First.Value.Volume;
-            return peak > 0 ? Math.Min(1, volume / peak) : 0;
+            if (this.firstTicks == long.MinValue)
+                this.firstTicks = utcTicks;
+            this.trades.Enqueue((utcTicks, size));
+            this.sum += size;
         }
+    }
+
+    /// <summary>Typical volume for one window at utcTicks, or NaN until two windows' worth of time has been seen.</summary>
+    public double Typical(long utcTicks)
+    {
+        lock (this.gate)
+        {
+            long back = Volatile.Read(ref this.lookback);
+            long length = Volatile.Read(ref this.window);
+            while (this.trades.Count > 0 && this.trades.Peek().Ticks <= utcTicks - back)
+                this.sum -= this.trades.Dequeue().Size;
+            if (this.trades.Count == 0)
+                this.sum = 0;
+
+            if (this.firstTicks == long.MinValue)
+                return double.NaN;
+            long seen = Math.Min(back, utcTicks - this.firstTicks);
+            return seen < 2 * length ? double.NaN : this.sum / seen * length;
+        }
+    }
+
+    /// <summary>The window's volume over typical: 1 is typical; NaN while typical isn't known yet.</summary>
+    public double Ratio(long utcTicks, double windowVolume)
+    {
+        double typical = this.Typical(utcTicks);
+        if (double.IsNaN(typical))
+            return double.NaN;
+        if (!(windowVolume > 0))
+            return 0;
+        return typical > 0 ? windowVolume / typical : double.PositiveInfinity;
+    }
+
+    /// <summary>Colour strength for a ratio, 0 to 1: a half at typical, full at fullMultiple, none at its inverse; a half while unknown.</summary>
+    public static double Strength(double ratio, double fullMultiple)
+    {
+        if (double.IsNaN(ratio))
+            return 0.5;
+        if (!(ratio > 0))
+            return 0;
+        double full = Math.Max(1.1, fullMultiple);
+        return Math.Clamp(0.5 + (0.5 * Math.Log(ratio) / Math.Log(full)), 0, 1);
+    }
+
+    /// <summary>A burst's glow for a ratio, 0 to 1: none up to glowMultiple, most at glowMultiple squared.</summary>
+    public static double Heat(double ratio, double glowMultiple)
+    {
+        double glow = Math.Max(1.1, glowMultiple);
+        if (double.IsNaN(ratio) || !(ratio > glow))
+            return 0;
+        return Math.Clamp(Math.Log(ratio / glow) / Math.Log(glow), 0, 1);
     }
 
     public void Clear()
     {
         lock (this.gate)
-            this.falling.Clear();
+        {
+            this.trades.Clear();
+            this.sum = 0;
+            this.firstTicks = long.MinValue;
+        }
     }
 
-    /// <summary>The colour's alpha for a brightness: a quarter with no volume, full at the peak.</summary>
-    public static int Alpha(double brightness) =>
-        (int)Math.Round(255 * (MinOpacity + ((1 - MinOpacity) * Math.Clamp(double.IsNaN(brightness) ? 0 : brightness, 0, 1))));
+    /// <summary>The colour's alpha for a strength: a quarter at none, full at full strength.</summary>
+    public static int Alpha(double strength) =>
+        (int)Math.Round(255 * (MinOpacity + ((1 - MinOpacity) * Math.Clamp(double.IsNaN(strength) ? 0 : strength, 0, 1))));
 }

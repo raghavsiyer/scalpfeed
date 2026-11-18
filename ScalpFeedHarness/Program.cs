@@ -1439,22 +1439,35 @@ void RunRolling()
           && RollingCandle.FormatVolume(1_250_000) == "1.25M", "the volume label reads 850, 1.23K, 12.3K, 1.25M");
     Check(RollingBar.None == RollingBar.None, "an empty candle equals itself, so the redraw timer can tell nothing changed");
 
-    // The colour's strength: the window's volume relative to the busiest window of the last 5 minutes.
-    var b = new VolumeBrightness(TimeSpan.FromMinutes(5));
-    Check(b.Observe(T(0), 1000) == 1, "the first look is its own peak: full colour");
-    Check(b.Observe(T(10), 500) == 0.5 && b.Observe(T(20), 0) == 0, "half the busiest window's volume is half strength, none is none");
-    Check(b.Observe(T(60), 2000) == 1 && b.Observe(T(70), 1000) == 0.5, "a busier window becomes the peak");
-    Check(b.Observe(T(359), 1000) == 0.5, "the peak counts for the whole 5 minutes");
-    Check(b.Observe(T(361), 1000) == 1, "and then drops out, and the busiest left takes over");
-    var falling = new VolumeBrightness(TimeSpan.FromMinutes(5));
-    falling.Observe(T(0), 1000);
-    falling.Observe(T(60), 800);
-    falling.Observe(T(240), 200);
-    Check(falling.Observe(T(301), 200) == 0.25, "with the 1,000 gone, the 800 a minute later is the peak: 200 is a quarter");
-    Check(new VolumeBrightness(TimeSpan.FromMinutes(5)).Observe(T(0), 0) == 0 && new VolumeBrightness(TimeSpan.FromMinutes(5)).Observe(T(0), double.NaN) == 0,
-        "no volume, or none known, is no strength");
+    // The colour against the stock's typical 10 s volume over the last 5 minutes: half at typical, full at 2x,
+    // and beyond 4x a glow that's strongest at 16x.
+    var vb = new VolumeBrightness(TimeSpan.FromMinutes(5), TimeSpan.FromSeconds(10));
+    Check(double.IsNaN(vb.Ratio(T(0), 100)), "nothing seen yet: typical isn't known");
+    for (int i = 0; i < 300; i++)
+        vb.Add(T(i), 60);
+    double steady = vb.Typical(T(299.5));
+    Check(Math.Abs(steady - 600) < 6, $"60 shares a second for 5 minutes is a typical 10 s window of about 600 ({steady:0.#}), measured from the first trade");
+    Check(Math.Abs(vb.Ratio(T(299.5), 1200) - 2) < 0.02 && Math.Abs(vb.Ratio(T(299.5), 600) - 1) < 0.01 && vb.Ratio(T(299.5), 0) == 0,
+        "a window of 1,200 is about twice typical, 600 about typical, none none");
+
+    var young = new VolumeBrightness(TimeSpan.FromMinutes(5), TimeSpan.FromSeconds(10));
+    young.Add(T(0), 100);
+    Check(double.IsNaN(young.Ratio(T(19.9), 100)) && young.Ratio(T(20), 100) == 2,
+        "typical needs two windows of time first; then 100 shares in 20 s is 50 a window");
+    var dead = new VolumeBrightness(TimeSpan.FromMinutes(5), TimeSpan.FromSeconds(10));
+    dead.Add(T(5), 600);
+    Check(double.IsPositiveInfinity(dead.Ratio(T(400), 100)) && VolumeBrightness.Heat(dead.Ratio(T(400), 100), 4) == 1,
+        "after 5 minutes with nothing, any trade is a burst at its hottest");
+
+    Check(VolumeBrightness.Strength(1, 2) == 0.5 && VolumeBrightness.Strength(2, 2) == 1 && VolumeBrightness.Strength(0.5, 2) == 0,
+        "strength: typical is half, twice typical full, half typical none");
+    Check(VolumeBrightness.Strength(10, 2) == 1 && VolumeBrightness.Strength(0, 2) == 0 && VolumeBrightness.Strength(double.NaN, 2) == 0.5,
+        "past twice typical stays full; no volume none; unknown typical half");
+    Check(VolumeBrightness.Heat(3, 4) == 0 && VolumeBrightness.Heat(4, 4) == 0 && VolumeBrightness.Heat(8, 4) == 0.5 && VolumeBrightness.Heat(16, 4) == 1,
+        "glow: none up to 4x typical, half at 8x, most at 16x");
+    Check(VolumeBrightness.Heat(100, 4) == 1 && VolumeBrightness.Heat(double.NaN, 4) == 0, "and no more past 16x; none while typical isn't known");
     Check(VolumeBrightness.Alpha(0) == 64 && VolumeBrightness.Alpha(0.5) == 159 && VolumeBrightness.Alpha(1) == 255 && VolumeBrightness.Alpha(2) == 255,
-        $"opacity runs from a quarter (64) to full (255) ({VolumeBrightness.Alpha(0)}, {VolumeBrightness.Alpha(0.5)}, {VolumeBrightness.Alpha(1)})");
+        $"opacity runs from a quarter (64) through half strength (159) to full (255) ({VolumeBrightness.Alpha(0)}, {VolumeBrightness.Alpha(0.5)}, {VolumeBrightness.Alpha(1)})");
 }
 
 // The slow-update diagnostics: off by default, and slow work matched against garbage collection pauses.
