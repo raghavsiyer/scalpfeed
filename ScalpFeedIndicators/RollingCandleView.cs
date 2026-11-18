@@ -6,7 +6,9 @@ namespace ScalpFeedIndicators;
 /// <summary>
 /// Puts a RollingCandle on its indicator's price chart: one candle just right of the latest bar, as wide as the
 /// chart's bars, green with the close at or above the open and red below, its window over it ("10s") and the
-/// window's volume under it. It takes the chart symbol's prints as they arrive (Symbol.NewLast) and, four times a
+/// window's volume under it. Its colour is as strong as its volume relative to the busiest window of the last few
+/// minutes (VolumeBrightness): full at the busiest, a quarter with nothing traded. It takes the chart symbol's
+/// prints as they arrive (Symbol.NewLast) and, four times a
 /// second, asks the chart to redraw when the candle has changed, so trades roll out of the window even when nothing
 /// trades. Used by the Rolling Candle indicator and by Key Moving Averages, so a Free licence's two indicators a
 /// chart can still have it.
@@ -21,10 +23,11 @@ internal sealed class RollingCandleView
     private readonly Indicator owner;
     private readonly Func<DateTime?> latestBarTime;
     private readonly RollingCandle candle = new(TimeSpan.FromSeconds(10));
+    private readonly VolumeBrightness brightness = new(TimeSpan.FromMinutes(5));
     private readonly object gate = new();
     private Symbol symbol;
     private Timer timer;
-    private RollingBar painted = RollingBar.None;
+    private (RollingBar Bar, int Alpha) painted = (RollingBar.None, 0);
     private int seconds = 10;
 
     /// <param name="owner">The indicator whose chart it draws on.</param>
@@ -35,13 +38,18 @@ internal sealed class RollingCandleView
         this.latestBarTime = latestBarTime;
     }
 
-    /// <summary>Starts over on this symbol with a window of this many seconds.</summary>
-    public void Start(Symbol chartSymbol, int windowSeconds)
+    /// <summary>
+    /// Starts over on this symbol with a window of this many seconds, its colour's strength judged against the
+    /// busiest window of this many minutes.
+    /// </summary>
+    public void Start(Symbol chartSymbol, int windowSeconds, int brightnessMinutes)
     {
         this.Stop();
         this.seconds = Math.Max(1, windowSeconds);
         this.candle.Window = TimeSpan.FromSeconds(this.seconds);
         this.candle.Clear();
+        this.brightness.Lookback = TimeSpan.FromMinutes(Math.Max(1, brightnessMinutes));
+        this.brightness.Clear();
         if (chartSymbol == null)
             return;
 
@@ -65,14 +73,23 @@ internal sealed class RollingCandleView
         }
 
         this.candle.Clear();
+        this.brightness.Clear();
     }
 
     private void OnNewLast(Symbol from, Last last) => this.candle.Add(DateTime.UtcNow.Ticks, last.Price, last.Size);
 
+    /// <summary>The candle now, and its colour's alpha, with this look counted as a brightness sample.</summary>
+    private (RollingBar Bar, int Alpha) Look()
+    {
+        long now = DateTime.UtcNow.Ticks;
+        var bar = this.candle.At(now);
+        return (bar, bar.IsEmpty ? 0 : VolumeBrightness.Alpha(this.brightness.Observe(now, bar.Volume)));
+    }
+
     private void OnTimer()
     {
-        var now = this.candle.At(DateTime.UtcNow.Ticks);
-        RollingBar shown;
+        var now = this.Look();
+        (RollingBar Bar, int Alpha) shown;
         lock (this.gate)
             shown = this.painted;
         if (now == shown)
@@ -96,9 +113,10 @@ internal sealed class RollingCandleView
         if (window == null || graphics == null)
             return;
 
-        var bar = this.candle.At(DateTime.UtcNow.Ticks);
+        var look = this.Look();
+        var bar = look.Bar;
         lock (this.gate)
-            this.painted = bar;
+            this.painted = look;
         if (bar.IsEmpty)
             return;
 
@@ -122,7 +140,7 @@ internal sealed class RollingCandleView
         try
         {
             graphics.SetClip(area);
-            var colour = bar.Close >= bar.Open ? Up : Down;
+            var colour = Color.FromArgb(look.Alpha, bar.Close >= bar.Open ? Up : Down);
             using var pen = new Pen(colour, 1);
             using var fill = new SolidBrush(colour);
             graphics.DrawLine(pen, x, yHigh, x, yLow);

@@ -12,6 +12,9 @@ public sealed class RollingCandleIndicator : Indicator
     [InputParameter("Window (seconds)", 10, 1, 600, 1, 0)]
     public int WindowSeconds = 10;
 
+    [InputParameter("Full colour at the busiest window of the last (minutes)", 20, 1, 240, 1, 0)]
+    public int BrightnessMinutes = 5;
+
     private readonly RollingCandleView view;
 
     public RollingCandleIndicator()
@@ -24,7 +27,7 @@ public sealed class RollingCandleIndicator : Indicator
 
     public override string ShortName => $"Rolling {this.WindowSeconds}s";
 
-    protected override void OnInit() => this.view.Start(this.Symbol, this.WindowSeconds);
+    protected override void OnInit() => this.view.Start(this.Symbol, this.WindowSeconds, this.BrightnessMinutes);
 
     protected override void OnClear() => this.view.Stop();
 

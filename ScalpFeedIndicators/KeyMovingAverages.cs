@@ -85,6 +85,9 @@ public sealed class KeyMovingAverages : Indicator
     [InputParameter("Rolling candle window (seconds)", 81, 1, 600, 1, 0)]
     public int RollingCandleSeconds = 10;
 
+    [InputParameter("Rolling candle full colour at the busiest window of the last (minutes)", 82, 1, 240, 1, 0)]
+    public int RollingCandleBrightnessMinutes = 5;
+
     private RollingCandleView rollingCandle;
 
     // One per moving average line, in the order the lines were added.
@@ -192,7 +195,7 @@ public sealed class KeyMovingAverages : Indicator
         if (this.ShowRollingCandle)
         {
             this.rollingCandle ??= new RollingCandleView(this, () => this.Count > 0 ? this.Time() : null);
-            this.rollingCandle.Start(this.Symbol, this.RollingCandleSeconds);
+            this.rollingCandle.Start(this.Symbol, this.RollingCandleSeconds, this.RollingCandleBrightnessMinutes);
             shown.Add($"{Math.Max(1, this.RollingCandleSeconds)}s candle");
         }
 

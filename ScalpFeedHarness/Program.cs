@@ -1438,6 +1438,23 @@ void RunRolling()
     Check(RollingCandle.FormatVolume(850) == "850" && RollingCandle.FormatVolume(1234) == "1.23K" && RollingCandle.FormatVolume(12_345) == "12.3K"
           && RollingCandle.FormatVolume(1_250_000) == "1.25M", "the volume label reads 850, 1.23K, 12.3K, 1.25M");
     Check(RollingBar.None == RollingBar.None, "an empty candle equals itself, so the redraw timer can tell nothing changed");
+
+    // The colour's strength: the window's volume relative to the busiest window of the last 5 minutes.
+    var b = new VolumeBrightness(TimeSpan.FromMinutes(5));
+    Check(b.Observe(T(0), 1000) == 1, "the first look is its own peak: full colour");
+    Check(b.Observe(T(10), 500) == 0.5 && b.Observe(T(20), 0) == 0, "half the busiest window's volume is half strength, none is none");
+    Check(b.Observe(T(60), 2000) == 1 && b.Observe(T(70), 1000) == 0.5, "a busier window becomes the peak");
+    Check(b.Observe(T(359), 1000) == 0.5, "the peak counts for the whole 5 minutes");
+    Check(b.Observe(T(361), 1000) == 1, "and then drops out, and the busiest left takes over");
+    var falling = new VolumeBrightness(TimeSpan.FromMinutes(5));
+    falling.Observe(T(0), 1000);
+    falling.Observe(T(60), 800);
+    falling.Observe(T(240), 200);
+    Check(falling.Observe(T(301), 200) == 0.25, "with the 1,000 gone, the 800 a minute later is the peak: 200 is a quarter");
+    Check(new VolumeBrightness(TimeSpan.FromMinutes(5)).Observe(T(0), 0) == 0 && new VolumeBrightness(TimeSpan.FromMinutes(5)).Observe(T(0), double.NaN) == 0,
+        "no volume, or none known, is no strength");
+    Check(VolumeBrightness.Alpha(0) == 64 && VolumeBrightness.Alpha(0.5) == 159 && VolumeBrightness.Alpha(1) == 255 && VolumeBrightness.Alpha(2) == 255,
+        $"opacity runs from a quarter (64) to full (255) ({VolumeBrightness.Alpha(0)}, {VolumeBrightness.Alpha(0.5)}, {VolumeBrightness.Alpha(1)})");
 }
 
 // The slow-update diagnostics: off by default, and slow work matched against garbage collection pauses.

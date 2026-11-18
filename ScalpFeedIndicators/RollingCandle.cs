@@ -92,3 +92,60 @@ public sealed class RollingCandle
         _ => $"{shares:0}",
     };
 }
+
+/// <summary>
+/// How strongly the rolling candle is coloured (your idea, 2026-11-18): its window's volume relative to the busiest
+/// window seen in the last few minutes, so it reads the same on any stock and any chart timeframe. 1 is as busy as
+/// anything in the lookback, 0 nothing traded. Each look at the candle (four a second, and each paint) is one sample;
+/// the busiest sample still inside the lookback is the peak, kept in a queue of falling volumes so finding it is
+/// cheap. Right after the chart opens the first samples are their own peak, so it starts at full colour. This
+/// depends on nothing in Quantower, so the harness can test it.
+/// </summary>
+public sealed class VolumeBrightness
+{
+    /// <summary>The candle's opacity with nothing in the window: dim, but still there.</summary>
+    public const double MinOpacity = 0.25;
+
+    private readonly object gate = new();
+    private readonly LinkedList<(long Ticks, double Volume)> falling = new();
+    private long lookback;
+
+    public VolumeBrightness(TimeSpan lookback) => this.Lookback = lookback;
+
+    public TimeSpan Lookback
+    {
+        get => TimeSpan.FromTicks(Volatile.Read(ref this.lookback));
+        set => Volatile.Write(ref this.lookback, Math.Max(TimeSpan.TicksPerSecond, value.Ticks));
+    }
+
+    /// <summary>Takes the window's volume at utcTicks and returns it relative to the busiest in the lookback, 0 to 1.</summary>
+    public double Observe(long utcTicks, double volume)
+    {
+        if (!(volume >= 0))
+            volume = 0;
+
+        lock (this.gate)
+        {
+            while (this.falling.Count > 0 && this.falling.Last.Value.Volume <= volume)
+                this.falling.RemoveLast();
+            this.falling.AddLast((utcTicks, volume));
+
+            long start = utcTicks - Volatile.Read(ref this.lookback);
+            while (this.falling.First.Value.Ticks <= start)
+                this.falling.RemoveFirst();
+
+            double peak = this.falling.First.Value.Volume;
+            return peak > 0 ? Math.Min(1, volume / peak) : 0;
+        }
+    }
+
+    public void Clear()
+    {
+        lock (this.gate)
+            this.falling.Clear();
+    }
+
+    /// <summary>The colour's alpha for a brightness: a quarter with no volume, full at the peak.</summary>
+    public static int Alpha(double brightness) =>
+        (int)Math.Round(255 * (MinOpacity + ((1 - MinOpacity) * Math.Clamp(double.IsNaN(brightness) ? 0 : brightness, 0, 1))));
+}
