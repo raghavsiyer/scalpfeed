@@ -8,15 +8,15 @@ namespace ScalpFeedIndicators;
 /// Puts a RollingCandle on its indicator's price chart: one candle just right of the latest bar, as wide as the
 /// chart's bars, green with the close at or above the open and red below, its window over it ("10s") and the
 /// window's volume under it. Its colour is as strong as its volume against the stock's typical volume for a window
-/// that long (VolumeBrightness): half at typical, full at twice typical, a quarter's opacity when quiet, and in a
-/// burst (over 4 times typical) more than that: a glow hugging the body and the wick (not the whole high-low range)
-/// that grows with the burst, with a white edge once it's well past. That colour is the candle's brightest; down its
-/// body and wick each price is shaded by the shares traded there (VolumeAtPrice), the busiest price brightest and
-/// prices under the least shares (1,000) or with none at a quarter's opacity, so it shows where volume was and
-/// wasn't traded. A window under the least shares is all at a quarter, with no glow. It takes the chart symbol's
-/// prints as they arrive (Symbol.NewLast) and, four times a
-/// second, asks the chart to redraw when the candle has changed, so trades roll out of the window even when nothing
-/// trades. Used by the Rolling Candle indicator and by Key Moving Averages, so a Free licence's two indicators a
+/// that long (VolumeBrightness): half at typical, full at twice typical, a quarter's opacity when quiet. That colour
+/// is the candle's brightest; down it each price is shaded by the shares traded there (VolumeAtPrice), in one smooth
+/// gradient: the busiest price brightest, prices under the least shares (1,000) or with none at a quarter's opacity,
+/// so it shows where volume was and wasn't traded. The wick is a 1-pixel line, as on the chart's own candles. In a
+/// burst (over 4 times typical) it's more than full colour: a soft glow around the body only (your feedback,
+/// 2026-11-18: never over the wick), and its busiest prices run hot, toward white. A window under the least shares
+/// is all at a quarter, with no glow. It takes the chart symbol's prints as they arrive (Symbol.NewLast) and, four
+/// times a second, asks the chart to redraw when the candle has changed, so trades roll out of the window even when
+/// nothing trades. Used by the Rolling Candle indicator and by Key Moving Averages, so a Free licence's two indicators a
 /// chart can still have it.
 /// </summary>
 internal sealed class RollingCandleView
@@ -199,98 +199,133 @@ internal sealed class RollingCandleView
         var converter = window.CoordinatesConverter;
         Rectangle area = window.ClientRectangle;
         float barWidth = Math.Max(1f, (float)chart.BarsWidth);
-        float body = Math.Max(3f, MathF.Round(barWidth * 0.7f));
+
+        // An odd width, so the wick sits in the body's middle.
+        int body = Math.Max(3, (int)MathF.Round(barWidth * 0.7f)) | 1;
 
         // Two bar widths right of the latest bar, kept inside the chart when it's scrolled back or tight on the right.
         float x = this.latestBarTime() is DateTime latest ? (float)converter.GetChartX(latest) + barWidth * 2 : area.Right - body * 2;
         float left = area.Left + body;
         float right = area.Right - body - 2;
-        x = MathF.Round(right > left ? Math.Clamp(x, left, right) : area.Right - body);
+        int centre = (int)MathF.Round(right > left ? Math.Clamp(x, left, right) : area.Right - body);
+        int bodyLeft = centre - (body / 2);
 
-        // Whole pixel rows, from the one the high is on to the one the low is on, so the shading's slices tile.
+        // Whole pixel rows, from the one the high is on to the one the low is on.
         int Row(double price) => (int)Math.Clamp(Math.Floor(converter.GetChartY(price)), area.Top - 1, area.Bottom + 1);
         int rowHigh = Row(bar.High);
         int rowLow = Math.Max(rowHigh, Row(bar.Low));
         int bodyTop = Math.Clamp(Math.Min(Row(bar.Open), Row(bar.Close)), rowHigh, rowLow);
         int bodyBottom = Math.Clamp(Math.Max(Row(bar.Open), Row(bar.Close)), bodyTop, rowLow);
-        int[] rows = VolumeAtPrice.RowAlphas(levels, price => converter.GetChartY(price), rowHigh, rowLow, this.minShares, look.Alpha);
+        var stops = VolumeAtPrice.Stops(levels, price => converter.GetChartY(price), rowHigh, rowLow + 1, this.minShares, look.Alpha);
 
         var state = graphics.Save();
         try
         {
             graphics.SetClip(area);
-            graphics.SmoothingMode = SmoothingMode.None;
             var hue = bar.Close >= bar.Open ? Up : Down;
-            float bodyLeft = x - MathF.Round(body / 2);
             float heat = look.Heat / 20f;
-            float wick = Math.Clamp(MathF.Round(body / 4), 1f, 3f) + (heat > 0 ? 1 : 0);
-            float wickLeft = x - MathF.Floor(wick / 2);
 
-            // A burst: a glow that follows the candle itself (a rounded halo hugging the body, a thin one along the
-            // wick, not a box over the whole range), wider and stronger the bigger the burst. Faintest and widest
-            // layer first.
+            // A burst: a soft glow around the body only, wider and stronger the bigger the burst, faintest and
+            // widest layer first.
             if (heat > 0)
             {
                 graphics.SmoothingMode = SmoothingMode.AntiAlias;
-                for (int layer = 3; layer >= 1; layer--)
+                const int Layers = 5;
+                for (int layer = Layers; layer >= 1; layer--)
                 {
-                    float spread = (1.5f + (4.5f * heat)) * layer / 3f;
-                    var glow = Color.FromArgb((int)((30 + (80 * heat)) / layer), hue);
-                    using var wickGlow = new Pen(glow, wick + spread) { StartCap = LineCap.Round, EndCap = LineCap.Round };
-                    graphics.DrawLine(wickGlow, x, rowHigh, x, rowLow + 1);
-                    using var bodyGlow = new SolidBrush(glow);
-                    using var halo = Rounded(bodyLeft - spread, bodyTop - spread, body + (2 * spread), bodyBottom + 1 - bodyTop + (2 * spread), spread);
-                    graphics.FillPath(bodyGlow, halo);
+                    float spread = (1.5f + (5f * heat)) * layer / Layers;
+                    using var glow = new SolidBrush(Color.FromArgb((int)((14 + (36 * heat)) * (Layers + 1 - layer) / Layers), hue));
+                    using var halo = Rounded(bodyLeft - spread, bodyTop - spread, body + (2 * spread), bodyBottom + 1 - bodyTop + (2 * spread), spread + 1);
+                    graphics.FillPath(glow, halo);
                 }
-
-                graphics.SmoothingMode = SmoothingMode.None;
             }
 
-            // The candle in slices of equal shade: the body's width between the open and the close, the wick's
-            // outside them, so the wick doesn't show through the body.
-            int start = 0;
-            for (int i = 1; i <= rows.Length; i++)
-            {
-                if (i < rows.Length && rows[i] == rows[start])
-                    continue;
-
-                int y0 = rowHigh + start;
-                int y1 = rowHigh + i;
-                using var fill = new SolidBrush(Color.FromArgb(rows[start], hue));
-                int inTop = Math.Max(y0, bodyTop);
-                int inBottom = Math.Min(y1, bodyBottom + 1);
-                if (inBottom > inTop)
-                    graphics.FillRectangle(fill, bodyLeft, inTop, body, inBottom - inTop);
-                int above = Math.Min(y1, bodyTop);
-                if (above > y0)
-                    graphics.FillRectangle(fill, wickLeft, y0, wick, above - y0);
-                int below = Math.Max(y0, bodyBottom + 1);
-                if (y1 > below)
-                    graphics.FillRectangle(fill, wickLeft, below, wick, y1 - below);
-                start = i;
-            }
-
-            // Well into a burst, a white edge on the body.
-            if (heat >= 0.5f)
-            {
-                using var edge = new Pen(Color.FromArgb(220, Color.White), 1);
-                graphics.DrawRectangle(edge, bodyLeft, bodyTop, body - 1, bodyBottom - bodyTop);
-            }
+            // The candle: one gradient top to bottom, a 1-pixel wick outside the body and the body between the
+            // open and the close. In a burst the busiest prices run hot, toward white.
+            graphics.SmoothingMode = SmoothingMode.None;
+            using var shade = Gradient(stops, rowHigh, rowLow + 1, hue, heat, look.Alpha);
+            if (bodyTop > rowHigh)
+                graphics.FillRectangle(shade, centre, rowHigh, 1, bodyTop - rowHigh);
+            if (rowLow > bodyBottom)
+                graphics.FillRectangle(shade, centre, bodyBottom + 1, 1, rowLow - bodyBottom);
+            graphics.FillRectangle(shade, bodyLeft, bodyTop, body, bodyBottom + 1 - bodyTop);
 
             // In a burst the volume reads in the candle's colour, in bold.
+            graphics.SmoothingMode = SmoothingMode.AntiAlias;
             using var font = new Font("Segoe UI", 8f, heat > 0 ? FontStyle.Bold : FontStyle.Regular);
             using var text = new SolidBrush(heat > 0 ? hue : Label);
             string over = $"{this.seconds}s";
             var size = graphics.MeasureString(over, font);
-            graphics.DrawString(over, font, text, x - size.Width / 2, rowHigh - size.Height - 1);
+            graphics.DrawString(over, font, text, centre + 0.5f - size.Width / 2, rowHigh - size.Height - 1);
             string under = RollingCandle.FormatVolume(bar.Volume);
             size = graphics.MeasureString(under, font);
-            graphics.DrawString(under, font, text, x - size.Width / 2, rowLow + 2);
+            graphics.DrawString(under, font, text, centre + 0.5f - size.Width / 2, rowLow + 2);
         }
         finally
         {
             graphics.Restore(state);
         }
+    }
+
+    /// <summary>
+    /// A brush shading top to bottom through the stops, in the candle's hue at each stop's alpha; in a burst, stops
+    /// near the candle's brightest (top) lifted toward white by up to half the heat.
+    /// </summary>
+    private static Brush Gradient(List<ShadeStop> stops, int top, int bottom, Color hue, float heat, int brightest)
+    {
+        Color At(ShadeStop stop)
+        {
+            if (heat <= 0)
+                return Color.FromArgb(stop.Alpha, hue);
+            int floor = VolumeBrightness.Alpha(0);
+            float hot = 0.5f * heat * Math.Clamp((stop.Alpha - floor) / (float)Math.Max(1, brightest - floor), 0f, 1f);
+            int Lift(int c) => (int)Math.Round(c + ((255 - c) * hot));
+            return Color.FromArgb(stop.Alpha, Lift(hue.R), Lift(hue.G), Lift(hue.B));
+        }
+
+        if (stops.Count < 2 || bottom - top < 2)
+        {
+            int alpha = 0;
+            ShadeStop most = stops.Count > 0 ? stops[0] : new ShadeStop(top, VolumeBrightness.Alpha(0));
+            foreach (var stop in stops)
+            {
+                if (stop.Alpha > alpha)
+                    (alpha, most) = (stop.Alpha, stop);
+            }
+
+            return new SolidBrush(At(most));
+        }
+
+        // A pixel of margin each end, past the candle, so GDI+'s tiling never shows at its edges.
+        float from = top - 1;
+        float to = bottom + 1;
+        var colours = new Color[stops.Count + 2];
+        var positions = new float[stops.Count + 2];
+        colours[0] = At(stops[0]);
+        positions[0] = 0;
+        for (int i = 0; i < stops.Count; i++)
+        {
+            colours[i + 1] = At(stops[i]);
+            positions[i + 1] = Math.Clamp(((float)stops[i].Y - from) / (to - from), 0f, 1f);
+        }
+
+        colours[^1] = At(stops[^1]);
+        positions[^1] = 1;
+
+        // Positions must climb; any that don't (rounding at the ends) nudge up a hair.
+        for (int i = 1; i < positions.Length; i++)
+        {
+            if (positions[i] <= positions[i - 1])
+                positions[i] = Math.Min(1, positions[i - 1] + 1e-5f);
+        }
+
+        positions[^1] = 1;
+        var brush = new LinearGradientBrush(new PointF(0, from), new PointF(0, to), colours[0], colours[^1])
+        {
+            InterpolationColors = new ColorBlend { Colors = colours, Positions = positions },
+            WrapMode = WrapMode.TileFlipXY,
+        };
+        return brush;
     }
 
     /// <summary>A rectangle with corners rounded by radius, for a glow that hugs the body rather than boxing it.</summary>

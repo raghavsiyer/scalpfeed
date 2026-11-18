@@ -18,8 +18,9 @@ public readonly record struct PriceLevel(double Price, double Shares);
 /// price with fewer than the least shares (1,000 by default) is at the lowest intensity, as are prices nothing
 /// traded at; above it, the busiest price gets the candle's colour (its strength against typical volume) and the
 /// rest fall between by the square root of their shares over the busiest's, so a price with a quarter of the
-/// busiest's shares is half way. A whole window under the least shares is all at the lowest intensity. This depends
-/// on nothing in Quantower, so the harness can test it.
+/// busiest's shares is half way. A whole window under the least shares is all at the lowest intensity. The prices
+/// are stops of one smooth gradient down the candle (your feedback, 2026-11-18: slices of shade looked boxy). This
+/// depends on nothing in Quantower, so the harness can test it.
 /// </summary>
 public static class VolumeAtPrice
 {
@@ -50,53 +51,64 @@ public static class VolumeAtPrice
     }
 
     /// <summary>
-    /// The alpha of each pixel row of a candle drawn from row yHigh down to row yLow (row y is the pixels from y to
-    /// y + 1; toY gives a price's y): each price lights the rows whose middles are within half a tick of it, or the
-    /// row it's on when that's none, within the candle; a row two prices share takes the brighter; rows no price
-    /// lights are at the lowest intensity.
+    /// The gradient down a candle drawn from yTop (its high) to yBottom (its low), toY giving a price's y: a stop at
+    /// each traded price with its alpha, and one at the lowest intensity a tick either side where nothing traded, so a
+    /// busy price fades into quiet ones over a tick instead of ending in a hard edge. Stops are merged a pixel row at a
+    /// time (the row's middle, the brightest of them), so zoomed out, where many prices share a row, there's one stop
+    /// a row; ones past the candle's ends count at the end. The first stop is at yTop and the last at yBottom, top
+    /// to bottom in between. With nothing to go on, the whole candle is at the lowest intensity.
     /// </summary>
-    public static int[] RowAlphas(IReadOnlyList<PriceLevel> levels, Func<double, double> toY, int yHigh, int yLow, double minShares, int top)
+    public static List<ShadeStop> Stops(IReadOnlyList<PriceLevel> levels, Func<double, double> toY, double yTop, double yBottom, double minShares, int top)
     {
         int floor = VolumeBrightness.Alpha(0);
-        var rows = new int[Math.Max(1, yLow - yHigh + 1)];
-        Array.Fill(rows, floor);
+        if (yBottom < yTop)
+            (yTop, yBottom) = (yBottom, yTop);
+
         double busiest = 0;
+        var traded = new HashSet<double>();
         foreach (var level in levels)
+        {
             busiest = Math.Max(busiest, level.Shares);
+            traded.Add(level.Price);
+        }
+
+        // Pixel row -> brightest alpha on it.
+        var byRow = new SortedDictionary<long, int>();
+        void Put(double price, int alpha)
+        {
+            double y = toY(price);
+            if (double.IsNaN(y))
+                return;
+            long row = (long)Math.Floor(Math.Clamp(y, yTop, Math.Max(yTop, yBottom - 1e-6)));
+            byRow[row] = byRow.TryGetValue(row, out int seen) ? Math.Max(seen, alpha) : alpha;
+        }
 
         foreach (var level in levels)
         {
-            int alpha = Alpha(level.Shares, busiest, minShares, top);
-            if (alpha <= floor)
-                continue;
-
-            double half = TickAt(level.Price) / 2;
-            double a = toY(level.Price + half);
-            double b = toY(level.Price - half);
-            if (double.IsNaN(a) || double.IsNaN(b))
-                continue;
-
-            double centre = toY(level.Price);
-            int first = (int)Math.Ceiling(Math.Min(a, b) - 0.5);
-            int last = (int)Math.Floor(Math.Max(a, b) - 0.5);
-            if (last < first)
-                first = last = (int)Math.Floor(centre);
-            first = Math.Max(first, yHigh) - yHigh;
-            last = Math.Min(last, yLow) - yHigh;
-            if (last < first)
+            Put(level.Price, Alpha(level.Shares, busiest, minShares, top));
+            double tick = TickAt(level.Price);
+            foreach (double next in new[] { Level(level.Price + tick), Level(level.Price - tick) })
             {
-                // A price at the candle's edge whose band falls just outside it: its nearest row.
-                int nearest = Math.Clamp((int)Math.Floor(centre), yHigh, yLow) - yHigh;
-                first = last = nearest;
+                if (!traded.Contains(next))
+                    Put(next, floor);
             }
-
-            for (int row = first; row <= last; row++)
-                rows[row] = Math.Max(rows[row], alpha);
         }
 
-        return rows;
+        var stops = new List<ShadeStop>(byRow.Count + 2);
+        foreach (var (row, alpha) in byRow)
+            stops.Add(new ShadeStop(Math.Clamp(row + 0.5, yTop, yBottom), alpha));
+        if (stops.Count == 0)
+            stops.Add(new ShadeStop(yTop, floor));
+        if (stops[0].Y > yTop)
+            stops.Insert(0, stops[0] with { Y = yTop });
+        if (stops[^1].Y < yBottom)
+            stops.Add(stops[^1] with { Y = yBottom });
+        return stops;
     }
 }
+
+/// <summary>One stop of a rolling candle's gradient: its y on the chart and its alpha there.</summary>
+public readonly record struct ShadeStop(double Y, int Alpha);
 
 /// <summary>
 /// A single candle over a rolling window of the last N seconds (your idea, 2026-11-18), built like a normal candle

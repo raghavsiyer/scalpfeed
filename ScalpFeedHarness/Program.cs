@@ -1509,23 +1509,24 @@ void RunRolling()
     Check(VolumeAtPrice.Alpha(5000, 5000, 1000, 160) == 160 && VolumeAtPrice.Alpha(0, 5000, 0, 255) == 64 && VolumeAtPrice.Alpha(5000, 5000, 1000, 10) == 64,
         "the busiest is only as bright as the candle; nothing traded is the lowest; never under the lowest");
 
-    // 1 cent = 10 pixels, the high (3.45) at row 50 and the low (3.40) at row 100.
-    var at = new List<PriceLevel> { new(3.45, 5000), new(3.41, 500), new(3.40, 100) };
-    int[] rows = VolumeAtPrice.RowAlphas(at, price => (3.50 - price) * 1000, 50, 100, 1000, 255);
-    Check(rows.Length == 51 && rows[..5].All(a => a == 255) && rows[5..].All(a => a == 64),
-        $"zoomed in, 3.45's half-cent band lights rows 50-54 (the half below the high) and the prices under 1,000 stay at the lowest ({string.Join(",", rows[..8])})");
+    // The gradient's stops. 1 cent = 10 pixels: the high (3.45) at y 50, the low (3.40) at y 100, the candle down to 101.
+    string Alphas(List<ShadeStop> stops) => string.Join(",", stops.Select(st => st.Alpha));
+    string Ys(List<ShadeStop> stops) => string.Join(",", stops.Select(st => st.Y));
     var spread = new List<PriceLevel> { new(3.45, 4000), new(3.44, 1000), new(3.40, 2000) };
-    rows = VolumeAtPrice.RowAlphas(spread, price => (3.50 - price) * 1000, 50, 100, 1000, 255);
-    Check(rows[0] == 255 && rows[10] == 160 && rows[30] == 64 && rows[50] == (int)Math.Round(64 + (191 * Math.Sqrt(0.5))),
-        $"each price as bright as its shares: 4,000 full, 1,000 half way, none the lowest, 2,000 between ({rows[0]}, {rows[10]}, {rows[30]}, {rows[50]})");
-    // Zoomed out, 1 cent = 0.1 pixel: the candle is two rows and prices share them.
-    rows = VolumeAtPrice.RowAlphas(spread, price => (3.50 - price) * 10, 0, 1, 1000, 255);
-    Check(rows.SequenceEqual([255, 199]), $"zoomed out, a row two prices share takes the brighter ({string.Join(",", rows)})");
+    // (Rounded, so 3.43 lands on y 70 rather than binary's 69.99999.)
+    var stops = VolumeAtPrice.Stops(spread, price => Math.Round((3.50 - price) * 1000, 6), 50, 101, 1000, 255);
+    Check(Alphas(stops) == "255,255,160,64,64,199,199" && Ys(stops) == "50,50.5,60.5,70.5,90.5,100.5,101",
+        $"zoomed in: each traded price a stop as bright as its shares (4,000 full, 1,000 half way, 2,000 between), the lowest a tick past them where nothing traded (3.43, 3.41) so they fade over a tick, from the candle's top to its bottom ({Alphas(stops)} at {Ys(stops)})");
+    stops = VolumeAtPrice.Stops(spread, price => (3.50 - price) * 10, 0, 2, 1000, 255);
+    Check(Alphas(stops) == "255,255,199,199" && Ys(stops) == "0,0.5,1.5,2",
+        $"zoomed out, 1 cent = 0.1 pixel: one stop a row, the brightest on it ({Alphas(stops)} at {Ys(stops)})");
     var quiet = new List<PriceLevel> { new(3.45, 600), new(3.44, 300) };
-    rows = VolumeAtPrice.RowAlphas(quiet, price => (3.50 - price) * 1000, 50, 60, 1000, 255);
-    Check(rows.All(a => a == 64), "a window under 1,000 shares is all at the lowest intensity");
-    rows = VolumeAtPrice.RowAlphas([new PriceLevel(3.45, 5000)], price => (3.50 - price) * 1000, 50, 50, 1000, 200);
-    Check(rows.SequenceEqual([200]), "a candle that never moved is one row, at the candle's colour");
+    stops = VolumeAtPrice.Stops(quiet, price => (3.50 - price) * 1000, 50, 61, 1000, 255);
+    Check(stops.All(st => st.Alpha == 64), "a window under 1,000 shares is all at the lowest intensity");
+    stops = VolumeAtPrice.Stops([new PriceLevel(3.45, 5000)], price => (3.50 - price) * 1000, 50, 51, 1000, 200);
+    Check(stops.All(st => st.Alpha == 200) && stops[0].Y == 50 && stops[^1].Y == 51, "a candle that never moved is one colour, the candle's");
+    stops = VolumeAtPrice.Stops([], price => (3.50 - price) * 1000, 50, 51, 1000, 200);
+    Check(stops.All(st => st.Alpha == 64) && stops[0].Y == 50 && stops[^1].Y == 51, "with nothing to go on, the lowest intensity throughout");
 }
 
 // The slow-update diagnostics: off by default, and slow work matched against garbage collection pauses.
