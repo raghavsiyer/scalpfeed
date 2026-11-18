@@ -98,6 +98,10 @@ internal sealed class PaperTrading : ITraderSink
             : TradingOperationResult.CreateError(p.RequestId, error);
     }
 
+    /// <summary>An order hotkey's order (OrderHotkeys), sent like one from the order entry, to the paper account only.</summary>
+    public (int Id, string Error) PlaceFromHotkey(IbkrOrderTicket ticket) =>
+        this.trader == null ? (0, "IBKR is turned off in ibkr.json") : this.trader.Place(ticket);
+
     public TradingOperationResult ModifyOrder(ModifyOrderRequestParameters p)
     {
         if (this.trader == null || !int.TryParse(p.OrderId, NumberStyles.Integer, CultureInfo.InvariantCulture, out int id))

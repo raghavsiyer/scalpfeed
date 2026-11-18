@@ -86,6 +86,9 @@ switch (args[0])
     case "luld":
         await RunLuld();
         break;
+    case "hotkey":
+        await RunHotkey();
+        break;
     case "trader":
         await RunTrader();
         break;
@@ -1248,6 +1251,62 @@ async Task RunLuld()
     Check(PauseClock.EstimatedLeft(lastMs, lastMs + 421_000) == 180, "7 minutes in, an extension is 3 minutes from the 10-minute mark");
     Check(PauseClock.EstimatedLeft(lastMs, lastMs - 400) == 300, "a last trade a moment ahead of this PC's clock reads as the start");
     Check(PauseClock.EstimatedLeft(0, lastMs) == null && PauseClock.EstimatedLeft(lastMs, lastMs + 3_600_001) == null, "no estimate with no last trade, or one over an hour old");
+}
+
+// Order hotkeys: the price, the keys, which stock, then the listener with a stand-in press. No order goes anywhere.
+async Task RunHotkey()
+{
+    var alt1 = OrderHotkey.BuyAskPlusTen;
+    Check(alt1 is { Keys: "Alt+1", Buy: true, Shares: 1000, Offset: 0.10, Tif: "IOC" }, "Alt+1 buys 1,000 shares at the ask plus 10 cents, immediate or cancel");
+    Check(OrderHotkeys.LimitPrice(0.8804, 0.10) == 0.9804 && OrderHotkeys.LimitPrice(5.23, 0.10) == 5.33 && OrderHotkeys.LimitPrice(0.95, 0.10) == 1.05,
+        "the limit is the ask plus 10 cents: 0.8804 makes 0.9804, 5.23 makes 5.33, 0.95 makes 1.05");
+    Check(OrderHotkeys.LimitPrice(0.99995, 0.10) == 1.10 && OrderHotkeys.LimitPrice(0.123456, 0.10) == 0.2235,
+        "rounded to IBKR's tick: a cent from a dollar, a hundredth of a cent below");
+
+    Check(OrderHotkeys.TryParseKeys("Alt+1", out uint m, out uint vk) && m == (HotkeyListener.Alt | HotkeyListener.NoRepeat) && vk == '1', $"Alt+1 is Alt with no repeat, and the 1 key ({m:X}, {vk:X})");
+    Check(OrderHotkeys.TryParseKeys("Ctrl+Shift+F2", out m, out vk) && m == (HotkeyListener.Control | HotkeyListener.Shift | HotkeyListener.NoRepeat) && vk == 0x71, "Ctrl+Shift+F2 parses too");
+    Check(!OrderHotkeys.TryParseKeys("1", out _, out _) && !OrderHotkeys.TryParseKeys("Alt+Ctrl", out _, out _) && !OrderHotkeys.TryParseKeys("Alt+1+2", out _, out _) && !OrderHotkeys.TryParseKeys("Alt+F13", out _, out _),
+        "a key needs a modifier and exactly one known key");
+
+    var svre = new HotkeyQuote("SVRE", 0.8803, 0.8804, false);
+    var (ticket, quote, problem) = OrderHotkeys.Decide(alt1, [svre]);
+    Check(problem == null && ticket == new IbkrOrderTicket("SVRE", true, 1000, "LMT", 0.9804, double.NaN, "IOC") && quote == 0.8804,
+        $"one depth open: buy 1,000 SVRE, IOC limit 0.9804 ({ticket})");
+    Check(OrderHotkeys.Decide(alt1, []).Problem?.Contains("no market depth") == true, "no depth open: nothing, and says so");
+    var two = OrderHotkeys.Decide(alt1, [svre, new HotkeyQuote("CRMN", 1.20, 1.21, false)]);
+    Check(two.Ticket == null && two.Problem.Contains("SVRE, CRMN"), $"two depths open: nothing, naming them ({two.Problem})");
+    Check(OrderHotkeys.Decide(alt1, [svre with { Halted = true }]).Problem?.Contains("halted") == true, "a halted stock: nothing");
+    Check(OrderHotkeys.Decide(alt1, [svre with { Ask = -1 }]).Ticket == null && OrderHotkeys.Decide(alt1, [svre with { Ask = double.NaN }]).Ticket == null,
+        "no IBKR ask (a side with no market, or IBKR not quoting): nothing");
+    var sell = OrderHotkeys.Decide(alt1 with { Buy = false }, [svre]);
+    Check(sell.Ticket is { Buy: false, LimitPrice: 0.7803 }, "a sell key goes from the bid, minus the offset");
+
+    // The listener, on a key nothing uses, pressed by posting Windows' own message to it.
+    var listener = new HotkeyListener();
+    bool front = true;
+    listener.InFront = () => front;
+    FeedAlarm.TestPlayer = _ => { };
+    var pressed = new System.Collections.Concurrent.ConcurrentQueue<OrderHotkey>();
+    Action<OrderHotkey> onPress = pressed.Enqueue;
+    var rare = new OrderHotkey("Ctrl+Alt+Shift+F12", true, 1, 0.01, "IOC");
+    listener.Start([rare], onPress);
+    Check(listener.Press(0), "the listener's thread takes messages");
+    await Task.Delay(300);
+    Check(pressed.Count == 1 && pressed.First() == rare, "a press with Quantower in front reaches the handler");
+    front = false;
+    listener.Press(0);
+    await Task.Delay(300);
+    Check(pressed.Count == 1, "with another program in front, nothing");
+    front = true;
+    listener.Release(onPress);
+    listener.Press(0);
+    await Task.Delay(300);
+    Check(pressed.Count == 1, "after the connection lets go, nothing (and a warning sound)");
+    listener.Start([rare], onPress);
+    listener.Press(0);
+    await Task.Delay(300);
+    Check(pressed.Count == 2, "a reconnect's new handler takes over without registering again");
+    listener.Stop();
 }
 
 // The slow-update diagnostics: off by default, and slow work matched against garbage collection pauses.

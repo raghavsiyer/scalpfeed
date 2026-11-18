@@ -406,6 +406,16 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
             this.PushDayBar(state, FeedClock.UtcNowTicks);
     }
 
+    /// <summary>
+    /// The symbols with a market depth open, for the order hotkeys (OrderHotkeys), with IBKR's NBBO only: a symbol
+    /// IBKR isn't quoting has no bid or ask here, never tastytrade's, which isn't the NBBO.
+    /// </summary>
+    public IReadOnlyList<HotkeyQuote> DepthQuotes() =>
+        this.statesByStreamer.Values
+            .Where(s => s.DepthOn)
+            .Select(s => new HotkeyQuote(IbkrClient.ToIbkrSymbol(s.Streamer), s.IbkrQuotes ? s.IbkrBid : double.NaN, s.IbkrQuotes ? s.IbkrAsk : double.NaN, s.IbkrHalted > 0))
+            .ToList();
+
     private static List<VariableTick> ToVariableTicks(IReadOnlyList<TickBand> bands) =>
         PriceBands.ForDisplay(bands).Select(b => new VariableTick(b.Low, b.High, true, b.TickSize, 1, b.Decimals)).ToList();
 

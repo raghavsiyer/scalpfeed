@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using System.Threading;
+using ScalpFeedVendor.Feed;
 using ScalpFeedVendor.Ibkr;
 using ScalpFeedVendor.Tastytrade;
 using TradingPlatform.BusinessLayer;
@@ -18,9 +19,14 @@ public sealed class ScalpFeedVendor : MultiVendor
 {
     public const string VendorName = "ScalpFeed";
     private const string TastytradeKey = "tasty";
+    private const string HotkeyHeader = "ScalpFeed hotkey";
+
+    /// <summary>The order hotkeys (OrderHotkeys): Alt+1 buys 1,000 shares at the ask plus 10 cents.</summary>
+    private static readonly IReadOnlyList<OrderHotkey> Hotkeys = [OrderHotkey.BuyAskPlusTen];
 
     private TastytradeMarketVendor marketData;
     private PaperTrading trading;
+    private Action<OrderHotkey> onHotkey;
 
     public static VendorMetaData GetVendorMetaData() => new()
     {
@@ -51,14 +57,45 @@ public sealed class ScalpFeedVendor : MultiVendor
             this.trading.Start();
         }
 
+        this.onHotkey ??= this.OnOrderHotkey;
+        HotkeyListener.Shared.Start(Hotkeys, this.onHotkey);
         return result;
     }
 
     public override void Disconnect()
     {
+        if (this.onHotkey != null)
+            HotkeyListener.Shared.Release(this.onHotkey);
         this.trading?.Stop();
         this.trading = null;
         base.Disconnect();
+    }
+
+    /// <summary>An order hotkey was pressed with Quantower in front: its order goes, or a warning sound says why not.</summary>
+    private void OnOrderHotkey(OrderHotkey hotkey)
+    {
+        var market = this.marketData;
+        var paper = this.trading;
+        var (ticket, quote, problem) = market == null
+            ? (null, double.NaN, "market data isn't connected")
+            : OrderHotkeys.Decide(hotkey, market.DepthQuotes());
+
+        int id = 0;
+        if (problem == null)
+            (id, problem) = paper == null ? (0, "trading isn't connected") : paper.PlaceFromHotkey(ticket);
+
+        if (problem == null)
+        {
+            string what = $"{(ticket.Buy ? "buy" : "sell")} {ticket.Quantity:#,0} {ticket.Symbol} {ticket.Tif} limit {ticket.LimitPrice} ({(ticket.Buy ? "ask" : "bid")} {quote} {(ticket.Buy ? "+" : "-")} {hotkey.Offset})";
+            Log.Info($"[hotkey] {hotkey.Keys}: order {id}, {what}");
+            this.PushMessage(MessageDealTicket.CreateInfoDealTicket(HotkeyHeader, $"{hotkey.Keys}: {what}"));
+        }
+        else
+        {
+            Log.Info($"[hotkey] {hotkey.Keys}: nothing sent, {problem}");
+            FeedAlarm.PlayWarning();
+            this.PushMessage(MessageDealTicket.CreateRefuseDealTicket(HotkeyHeader, $"{hotkey.Keys}: nothing sent, {problem}."));
+        }
     }
 
     public override IList<MessageAccount> GetAccounts(CancellationToken token) => this.trading?.GetAccounts() ?? new List<MessageAccount>();
