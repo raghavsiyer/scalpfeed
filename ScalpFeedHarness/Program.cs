@@ -1253,59 +1253,98 @@ async Task RunLuld()
     Check(PauseClock.EstimatedLeft(0, lastMs) == null && PauseClock.EstimatedLeft(lastMs, lastMs + 3_600_001) == null, "no estimate with no last trade, or one over an hour old");
 }
 
-// Order hotkeys: the price, the keys, which stock, then the listener with a stand-in press. No order goes anywhere.
+// Order hotkeys: the price, the keys, which stock and size, what a key-down does, then the listener with stand-in
+// presses. No order goes anywhere.
 async Task RunHotkey()
 {
     var alt1 = OrderHotkey.BuyAskPlusTen;
-    Check(alt1 is { Keys: "Alt+1", Buy: true, Shares: 1000, Offset: 0.10, Tif: "IOC" }, "Alt+1 buys 1,000 shares at the ask plus 10 cents, immediate or cancel");
+    var shiftZ = OrderHotkey.SellAllBidMinusTen;
+    Check(alt1 is { Keys: "Alt+1", Buy: true, Shares: 1000, Offset: 0.10, Tif: "IOC", WholePosition: false }, "Alt+1 buys 1,000 shares at the ask plus 10 cents, immediate or cancel");
+    Check(shiftZ is { Keys: "Shift+Z", Buy: false, Offset: 0.10, Tif: "IOC", WholePosition: true }, "Shift+Z sells the whole position at the bid minus 10 cents, immediate or cancel");
     Check(OrderHotkeys.LimitPrice(0.8804, 0.10) == 0.9804 && OrderHotkeys.LimitPrice(5.23, 0.10) == 5.33 && OrderHotkeys.LimitPrice(0.95, 0.10) == 1.05,
         "the limit is the ask plus 10 cents: 0.8804 makes 0.9804, 5.23 makes 5.33, 0.95 makes 1.05");
-    Check(OrderHotkeys.LimitPrice(0.99995, 0.10) == 1.10 && OrderHotkeys.LimitPrice(0.123456, 0.10) == 0.2235,
-        "rounded to IBKR's tick: a cent from a dollar, a hundredth of a cent below");
+    Check(OrderHotkeys.LimitPrice(0.99995, 0.10) == 1.10 && OrderHotkeys.LimitPrice(0.123456, 0.10) == 0.2235 && OrderHotkeys.LimitPrice(5.23, -0.10) == 5.13,
+        "rounded to IBKR's tick: a cent from a dollar, a hundredth of a cent below; and minus for a sell");
 
-    Check(OrderHotkeys.TryParseKeys("Alt+1", out uint m, out uint vk) && m == (HotkeyListener.Alt | HotkeyListener.NoRepeat) && vk == '1', $"Alt+1 is Alt with no repeat, and the 1 key ({m:X}, {vk:X})");
-    Check(OrderHotkeys.TryParseKeys("Ctrl+Shift+F2", out m, out vk) && m == (HotkeyListener.Control | HotkeyListener.Shift | HotkeyListener.NoRepeat) && vk == 0x71, "Ctrl+Shift+F2 parses too");
+    Check(OrderHotkeys.TryParseKeys("Alt+1", out uint m, out uint vk) && m == HotkeyListener.Alt && vk == '1', $"Alt+1 is Alt and the 1 key ({m:X}, {vk:X})");
+    Check(OrderHotkeys.TryParseKeys("Shift+Z", out m, out vk) && m == HotkeyListener.Shift && vk == 'Z', "Shift+Z is Shift and the Z key");
+    Check(OrderHotkeys.TryParseKeys("Ctrl+Shift+F2", out m, out vk) && m == (HotkeyListener.Control | HotkeyListener.Shift) && vk == 0x71, "Ctrl+Shift+F2 parses too");
     Check(!OrderHotkeys.TryParseKeys("1", out _, out _) && !OrderHotkeys.TryParseKeys("Alt+Ctrl", out _, out _) && !OrderHotkeys.TryParseKeys("Alt+1+2", out _, out _) && !OrderHotkeys.TryParseKeys("Alt+F13", out _, out _),
         "a key needs a modifier and exactly one known key");
 
     var svre = new HotkeyQuote("SVRE", 0.8803, 0.8804, false);
     var (ticket, quote, problem) = OrderHotkeys.Decide(alt1, [svre]);
     Check(problem == null && ticket == new IbkrOrderTicket("SVRE", true, 1000, "LMT", 0.9804, double.NaN, "IOC") && quote == 0.8804,
-        $"one depth open: buy 1,000 SVRE, IOC limit 0.9804 ({ticket})");
+        $"Alt+1, one depth open: buy 1,000 SVRE, IOC limit 0.9804 ({ticket})");
     Check(OrderHotkeys.Decide(alt1, []).Problem?.Contains("no market depth") == true, "no depth open: nothing, and says so");
     var two = OrderHotkeys.Decide(alt1, [svre, new HotkeyQuote("CRMN", 1.20, 1.21, false)]);
     Check(two.Ticket == null && two.Problem.Contains("SVRE, CRMN"), $"two depths open: nothing, naming them ({two.Problem})");
     Check(OrderHotkeys.Decide(alt1, [svre with { Halted = true }]).Problem?.Contains("halted") == true, "a halted stock: nothing");
     Check(OrderHotkeys.Decide(alt1, [svre with { Ask = -1 }]).Ticket == null && OrderHotkeys.Decide(alt1, [svre with { Ask = double.NaN }]).Ticket == null,
         "no IBKR ask (a side with no market, or IBKR not quoting): nothing");
-    var sell = OrderHotkeys.Decide(alt1 with { Buy = false }, [svre]);
-    Check(sell.Ticket is { Buy: false, LimitPrice: 0.7803 }, "a sell key goes from the bid, minus the offset");
 
-    // The listener, on a key nothing uses, pressed by posting Windows' own message to it.
+    var held = svre with { Position = 1500 };
+    var all = OrderHotkeys.Decide(shiftZ, [held]);
+    Check(all.Problem == null && all.Ticket == new IbkrOrderTicket("SVRE", false, 1500, "LMT", 0.7803, double.NaN, "IOC") && all.Quote == 0.8803,
+        $"Shift+Z holding 1,500: sell 1,500 SVRE, IOC limit at the bid 0.8803 minus 10 cents ({all.Ticket})");
+    Check(OrderHotkeys.Decide(shiftZ, [held with { WorkingSells = 500 }]).Ticket?.Quantity == 1000, "shares already in working sells are left out");
+    Check(OrderHotkeys.Decide(shiftZ, [held with { WorkingSells = 1500 }]).Problem?.Contains("already in working sell orders") == true,
+        "with the whole position already in working sells: nothing, so a second press can't go short");
+    Check(OrderHotkeys.Decide(shiftZ, [svre]).Problem?.Contains("no long position") == true && OrderHotkeys.Decide(shiftZ, [svre with { Position = -300 }]).Problem?.Contains("no long position") == true,
+        "flat or short: nothing to sell");
+    Check(OrderHotkeys.Decide(shiftZ, [held with { WorkingBuys = 1000 }]).Ticket?.Quantity == 1500, "working buys don't change what's sold");
+    Check(OrderHotkeys.Decide(shiftZ, [held with { Bid = -1 }]).Problem?.Contains("no IBKR bid") == true && OrderHotkeys.Decide(shiftZ, [held with { Halted = true }]).Ticket == null,
+        "no bid, or halted: nothing");
+    Check(OrderHotkeys.Decide(shiftZ, [held with { Bid = 0.05 }]).Problem != null, "a bid under the offset would make a limit of 0 or less: nothing");
+
+    // What a key-down does, for Alt+1 (0) and Shift+Z (1).
+    var keys = new List<(uint, uint)> { (HotkeyListener.Alt, '1'), (HotkeyListener.Shift, 'Z') };
+    Check(OrderHotkeys.OnKeyDown(keys, 'Z', HotkeyListener.Shift, false, true, false) == (1, true), "Shift+Z with Quantower in front fires, and Quantower doesn't get the Z");
+    Check(OrderHotkeys.OnKeyDown(keys, 'Z', HotkeyListener.Shift, false, false, false) == (-1, false), "with another program in front, it's just a capital Z there");
+    Check(OrderHotkeys.OnKeyDown(keys, 'Z', HotkeyListener.Shift, false, true, true) == (-1, false), "with a text cursor in Quantower, it types the Z");
+    Check(OrderHotkeys.OnKeyDown(keys, '1', HotkeyListener.Alt, false, true, true) == (0, true), "Alt+1 types nothing, so it fires even with a text cursor");
+    Check(OrderHotkeys.OnKeyDown(keys, 'Z', HotkeyListener.Shift, true, true, false) == (-1, true), "held down, the repeats send nothing more");
+    Check(OrderHotkeys.OnKeyDown(keys, 'Z', 0, false, true, false) == (-1, false) && OrderHotkeys.OnKeyDown(keys, 'Z', HotkeyListener.Shift | HotkeyListener.Alt, false, true, false) == (-1, false),
+        "Z alone (or with Caps Lock), or Shift+Alt+Z, isn't Shift+Z");
+
+    // The listener, with the real keyboard hook in, and presses posted to its thread as stand-ins.
     var listener = new HotkeyListener();
-    bool front = true;
+    bool front = true, typing = false;
     listener.InFront = () => front;
+    listener.Typing = () => typing;
     FeedAlarm.TestPlayer = _ => { };
     var pressed = new System.Collections.Concurrent.ConcurrentQueue<OrderHotkey>();
     Action<OrderHotkey> onPress = pressed.Enqueue;
+    const uint F12 = 0x7B;
+    const uint AllThree = HotkeyListener.Control | HotkeyListener.Alt | HotkeyListener.Shift;
     var rare = new OrderHotkey("Ctrl+Alt+Shift+F12", true, 1, 0.01, "IOC");
-    listener.Start([rare], onPress);
-    Check(listener.Press(0), "the listener's thread takes messages");
+    var rareType = new OrderHotkey("Shift+Q", false, 0, 0.01, "IOC", WholePosition: true);
+    listener.Start([rare, rareType], onPress);
+    Check(listener.Hooked, "the keyboard hook goes in");
+    listener.Press(F12, AllThree);
     await Task.Delay(300);
     Check(pressed.Count == 1 && pressed.First() == rare, "a press with Quantower in front reaches the handler");
     front = false;
-    listener.Press(0);
+    listener.Press(F12, AllThree);
     await Task.Delay(300);
     Check(pressed.Count == 1, "with another program in front, nothing");
     front = true;
+    typing = true;
+    listener.Press('Q', HotkeyListener.Shift);
+    await Task.Delay(300);
+    Check(pressed.Count == 1, "a key that types, with a text cursor, types instead");
+    typing = false;
+    listener.Press('Q', HotkeyListener.Shift);
+    await Task.Delay(300);
+    Check(pressed.Count == 2 && pressed.Last() == rareType, "and without one, it fires");
     listener.Release(onPress);
-    listener.Press(0);
+    listener.Press(F12, AllThree);
     await Task.Delay(300);
-    Check(pressed.Count == 1, "after the connection lets go, nothing (and a warning sound)");
-    listener.Start([rare], onPress);
-    listener.Press(0);
+    Check(pressed.Count == 2, "after the connection lets go, nothing (and a warning sound)");
+    listener.Start([rare, rareType], onPress);
+    listener.Press(F12, AllThree);
     await Task.Delay(300);
-    Check(pressed.Count == 2, "a reconnect's new handler takes over without registering again");
+    Check(pressed.Count == 3, "a reconnect's new handler takes over without hooking again");
     listener.Stop();
 }
 

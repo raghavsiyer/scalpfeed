@@ -21,8 +21,8 @@ public sealed class ScalpFeedVendor : MultiVendor
     private const string TastytradeKey = "tasty";
     private const string HotkeyHeader = "ScalpFeed hotkey";
 
-    /// <summary>The order hotkeys (OrderHotkeys): Alt+1 buys 1,000 shares at the ask plus 10 cents.</summary>
-    private static readonly IReadOnlyList<OrderHotkey> Hotkeys = [OrderHotkey.BuyAskPlusTen];
+    /// <summary>The order hotkeys (OrderHotkeys): Alt+1 buys 1,000 shares at the ask plus 10 cents, Shift+Z sells the whole position at the bid minus 10.</summary>
+    private static readonly IReadOnlyList<OrderHotkey> Hotkeys = [OrderHotkey.BuyAskPlusTen, OrderHotkey.SellAllBidMinusTen];
 
     private TastytradeMarketVendor marketData;
     private PaperTrading trading;
@@ -76,9 +76,15 @@ public sealed class ScalpFeedVendor : MultiVendor
     {
         var market = this.marketData;
         var paper = this.trading;
-        var (ticket, quote, problem) = market == null
+        // Each depth symbol with the paper account's position and working orders, for a whole-position key.
+        var depth = market?.DepthQuotes().Select(q =>
+        {
+            var (position, buys, sells) = paper?.Exposure(q.Symbol) ?? (0, 0, 0);
+            return q with { Position = position, WorkingBuys = buys, WorkingSells = sells };
+        }).ToList();
+        var (ticket, quote, problem) = depth == null
             ? (null, double.NaN, "market data isn't connected")
-            : OrderHotkeys.Decide(hotkey, market.DepthQuotes());
+            : OrderHotkeys.Decide(hotkey, depth);
 
         int id = 0;
         if (problem == null)

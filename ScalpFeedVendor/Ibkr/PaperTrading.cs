@@ -102,6 +102,22 @@ internal sealed class PaperTrading : ITraderSink
     public (int Id, string Error) PlaceFromHotkey(IbkrOrderTicket ticket) =>
         this.trader == null ? (0, "IBKR is turned off in ibkr.json") : this.trader.Place(ticket);
 
+    /// <summary>
+    /// For a whole-position hotkey: the paper account's position in an IBKR symbol (negative when short), as IBKR's
+    /// position stream last said, and the shares still to fill in its working buy and sell orders.
+    /// </summary>
+    public (double Position, double WorkingBuys, double WorkingSells) Exposure(string ibkrSymbol)
+    {
+        if (this.trader == null)
+            return (0, 0, 0);
+
+        double position = this.trader.Positions().Where(p => p.Symbol == ibkrSymbol).Sum(p => p.Quantity);
+        var working = this.trader.OpenOrders().Where(o => o.Symbol == ibkrSymbol).ToList();
+        return (position,
+            working.Where(o => o.Buy).Sum(o => Math.Max(0, o.Quantity - o.Filled)),
+            working.Where(o => !o.Buy).Sum(o => Math.Max(0, o.Quantity - o.Filled)));
+    }
+
     public TradingOperationResult ModifyOrder(ModifyOrderRequestParameters p)
     {
         if (this.trader == null || !int.TryParse(p.OrderId, NumberStyles.Integer, CultureInfo.InvariantCulture, out int id))
