@@ -9,7 +9,8 @@ namespace ScalpFeedIndicators;
 /// Each has its own on/off switch in the indicator's inputs; colour, width and style are in its line
 /// settings. The averages are Quantower's built-in EMA and SMA. The VWAP is worked out here from the
 /// chart's own bars and by default starts over at each session, 4:00, 9:30 and 16:00 ET, with a break
-/// in its line at each restart (SessionVwap says why Quantower's own wasn't used).
+/// in its line at each restart (SessionVwap says why Quantower's own wasn't used). It can also draw the rolling
+/// candle (RollingCandleView), on by default, so a Free licence's two indicators a chart can still have it.
 /// </summary>
 public sealed class KeyMovingAverages : Indicator
 {
@@ -76,6 +77,16 @@ public sealed class KeyMovingAverages : Indicator
     private const int VwapFrom4 = 1;
     private const int VwapFrom930 = 2;
 
+    // The rolling candle (RollingCandleView), here as well as on its own so a Free licence's two indicators a chart
+    // can still have it (your request, 2026-11-18).
+    [InputParameter("Show rolling candle", 80)]
+    public bool ShowRollingCandle = true;
+
+    [InputParameter("Rolling candle window (seconds)", 81, 1, 600, 1, 0)]
+    public int RollingCandleSeconds = 10;
+
+    private RollingCandleView rollingCandle;
+
     // One per moving average line, in the order the lines were added.
     private readonly Indicator[] averages = new Indicator[5];
     private readonly int[] periods = new int[5];
@@ -92,7 +103,7 @@ public sealed class KeyMovingAverages : Indicator
     public KeyMovingAverages()
     {
         this.Name = "Key Moving Averages";
-        this.Description = "EMA 9, 20 and 200, simple MA 50 and 200, and a session VWAP, each on or off, with its own colour, width and style";
+        this.Description = "EMA 9, 20 and 200, simple MA 50 and 200, and a session VWAP, each on or off, with its own colour, width and style; and a live rolling candle of the last N seconds";
 
         this.AddLineSeries("EMA 9", Color.Gold, 1, LineStyle.Solid);
         this.AddLineSeries("EMA 20", Color.DeepSkyBlue, 1, LineStyle.Solid);
@@ -178,9 +189,23 @@ public sealed class KeyMovingAverages : Indicator
             shown.Add(label);
         }
 
+        if (this.ShowRollingCandle)
+        {
+            this.rollingCandle ??= new RollingCandleView(this, () => this.Count > 0 ? this.Time() : null);
+            this.rollingCandle.Start(this.Symbol, this.RollingCandleSeconds);
+            shown.Add($"{Math.Max(1, this.RollingCandleSeconds)}s candle");
+        }
+
         this.shortName = shown.Count > 0 ? $"MAs ({string.Join(", ", shown)})" : "MAs (none)";
         this.Trace("init done", this.LineColours());
         this.seenColours = this.LinesSeries.Select(l => l.Color).ToArray();
+    }
+
+    public override void OnPaintChart(PaintChartEventArgs args)
+    {
+        base.OnPaintChart(args);
+        if (this.ShowRollingCandle)
+            this.rollingCandle?.Paint(args);
     }
 
     protected override void OnUpdate(UpdateArgs args)
@@ -293,6 +318,7 @@ public sealed class KeyMovingAverages : Indicator
         this.vwap?.Clear();
         this.vwap = null;
         this.vwapStartsLogged.Clear();
+        this.rollingCandle?.Stop();
         this.seenColours = null;
         this.Trace("clear", this.LineColours());
     }

@@ -89,6 +89,9 @@ switch (args[0])
     case "hotkey":
         await RunHotkey();
         break;
+    case "rolling":
+        RunRolling();
+        break;
     case "trader":
         await RunTrader();
         break;
@@ -1396,6 +1399,45 @@ async Task RunHotkey()
     await Task.Delay(300);
     Check(pressed.Count == 3, "a reconnect's new handler takes over without hooking again");
     listener.Stop();
+}
+
+// The rolling candle: open, high, low, close and volume of the trades in the last N seconds, rolling with time.
+void RunRolling()
+{
+    long T(double s) => new DateTime(2026, 11, 18, 15, 0, 0, DateTimeKind.Utc).Ticks + (long)(s * TimeSpan.TicksPerSecond);
+    var c = new RollingCandle(TimeSpan.FromSeconds(10));
+    Check(c.At(T(0)).IsEmpty, "nothing traded yet: no candle");
+    c.Add(T(0), 3.40, 100);
+    c.Add(T(2), 3.45, 300);
+    c.Add(T(4), 3.38, 200);
+    c.Add(T(6), 3.42, 500);
+    Check(c.At(T(6.5)) == new RollingBar(3.40, 3.45, 3.38, 3.42, 1100, 4), $"open the first trade, high and low the extremes, close the latest, volume the sum ({c.At(T(6.5))})");
+    Check(c.At(T(10.5)) == new RollingBar(3.45, 3.45, 3.38, 3.42, 1000, 3), "10 s after it, the first trade has rolled out and the open is the next one");
+    Check(c.At(T(14.5)) == new RollingBar(3.42, 3.42, 3.42, 3.42, 500, 1), "by 14.5 s only the last trade is left");
+    Check(c.At(T(16.5)) == new RollingBar(3.42, 3.42, 3.42, 3.42, 0, 0), "with nothing in the window: flat at the last trade, no volume");
+    c.Add(T(17), 3.50, 1000);
+    Check(c.At(T(17)) == new RollingBar(3.50, 3.50, 3.50, 3.50, 1000, 1), "the next trade starts it again");
+
+    var edge = new RollingCandle(TimeSpan.FromSeconds(10));
+    edge.Add(T(0), 1.00, 100);
+    Check(edge.At(T(9.99)).Volume == 100 && edge.At(T(10)).Volume == 0, "a trade stays in until exactly the window's length has passed");
+
+    var five = new RollingCandle(TimeSpan.FromSeconds(5));
+    five.Add(T(0), 2.00, 100);
+    five.Add(T(4), 2.10, 100);
+    Check(five.At(T(6)) == new RollingBar(2.10, 2.10, 2.10, 2.10, 100, 1), "the window is settable: 5 s drops a trade 6 s old");
+
+    var junk = new RollingCandle(TimeSpan.FromSeconds(10));
+    junk.Add(T(0), 0, 100);
+    junk.Add(T(0), -1, 100);
+    junk.Add(T(0), 2.00, -5);
+    Check(junk.At(T(1)).IsEmpty, "a price of 0 or less, or a negative size, isn't a trade");
+    junk.Add(T(1), 2.00, 0);
+    Check(junk.At(T(1)) == new RollingBar(2.00, 2.00, 2.00, 2.00, 0, 1), "a trade of 0 shares still moves the price");
+
+    Check(RollingCandle.FormatVolume(850) == "850" && RollingCandle.FormatVolume(1234) == "1.23K" && RollingCandle.FormatVolume(12_345) == "12.3K"
+          && RollingCandle.FormatVolume(1_250_000) == "1.25M", "the volume label reads 850, 1.23K, 12.3K, 1.25M");
+    Check(RollingBar.None == RollingBar.None, "an empty candle equals itself, so the redraw timer can tell nothing changed");
 }
 
 // The slow-update diagnostics: off by default, and slow work matched against garbage collection pauses.

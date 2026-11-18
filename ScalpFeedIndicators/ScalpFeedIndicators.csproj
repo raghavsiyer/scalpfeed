@@ -1,8 +1,9 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <!-- Same as the connection plugin: Quantower v1.147.11 runs on .NET 10. -->
-    <TargetFramework>net10.0</TargetFramework>
+    <!-- Quantower v1.147.11 runs on .NET 10 with the Windows Desktop runtime (Starter.runtimeconfig.json), which is
+         where the System.Drawing.Graphics a chart paints with comes from; the rolling candle draws with it. -->
+    <TargetFramework>net10.0-windows</TargetFramework>
     <LangVersion>latest</LangVersion>
     <Nullable>disable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
@@ -16,6 +17,10 @@
     <!-- The float cache's format and RVOL's arithmetic, shared with the connection. -->
     <Compile Include="..\ScalpFeedVendor\Feed\FloatFacts.cs" LinkBase="Shared" />
     <Compile Include="..\ScalpFeedVendor\Feed\RelativeVolumeMath.cs" LinkBase="Shared" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.WindowsDesktop.App" />
   </ItemGroup>
 
   <ItemGroup>

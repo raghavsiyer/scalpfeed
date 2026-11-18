@@ -11,5 +11,6 @@
     <Compile Include="..\ScalpFeedVendor\Feed\*.cs" LinkBase="Feed" />
     <!-- The indicators' Quantower-free maths. -->
     <Compile Include="..\ScalpFeedIndicators\SessionVwap.cs" LinkBase="Indicators" />
+    <Compile Include="..\ScalpFeedIndicators\RollingCandle.cs" LinkBase="Indicators" />
   </ItemGroup>
 </Project>
