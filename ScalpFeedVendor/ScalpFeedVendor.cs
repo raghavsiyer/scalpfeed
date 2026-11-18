@@ -21,8 +21,11 @@ public sealed class ScalpFeedVendor : MultiVendor
     private const string TastytradeKey = "tasty";
     private const string HotkeyHeader = "ScalpFeed hotkey";
 
-    /// <summary>The order hotkeys (OrderHotkeys): Alt+1 buys 1,000 shares at the ask plus 10 cents, Shift+Z sells the whole position at the bid minus 10.</summary>
-    private static readonly IReadOnlyList<OrderHotkey> Hotkeys = [OrderHotkey.BuyAskPlusTen, OrderHotkey.SellAllBidMinusTen];
+    /// <summary>
+    /// The order hotkeys (OrderHotkeys): Alt+1 buys 1,000 shares at the ask plus 10 cents; Shift+Z sells the whole
+    /// position and Shift+X half of it, at the bid minus 10.
+    /// </summary>
+    private static readonly IReadOnlyList<OrderHotkey> Hotkeys = [OrderHotkey.BuyAskPlusTen, OrderHotkey.SellAllBidMinusTen, OrderHotkey.SellHalfBidMinusTen];
 
     private TastytradeMarketVendor marketData;
     private PaperTrading trading;
@@ -76,7 +79,7 @@ public sealed class ScalpFeedVendor : MultiVendor
     {
         var market = this.marketData;
         var paper = this.trading;
-        // Each depth symbol with the paper account's position and working orders, for a whole-position key.
+        // Each depth symbol with the paper account's position and working orders, for a position key.
         var depth = market?.DepthQuotes().Select(q =>
         {
             var (position, buys, sells) = paper?.Exposure(q.Symbol) ?? (0, 0, 0);

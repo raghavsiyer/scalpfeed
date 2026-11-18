@@ -5,19 +5,31 @@ namespace ScalpFeedVendor.Feed;
 
 /// <summary>
 /// An order a key sends: buy or sell, limit at the ask (buy) or bid (sell) plus or minus the offset, with this time in
-/// force (DAY, GTC or IOC). The size is the shares given, or with WholePosition the whole position it closes: a sell
-/// the long position, a buy a short one.
+/// force (DAY, GTC or IOC). The size is the shares given, or with OfPosition that share of the position it closes
+/// (1 the whole position, 0.5 half), whole shares rounded down: a sell the long position, a buy a short one.
 /// </summary>
-internal sealed record OrderHotkey(string Keys, bool Buy, double Shares, double Offset, string Tif, bool WholePosition = false)
+internal sealed record OrderHotkey(string Keys, bool Buy, double Shares, double Offset, string Tif, double OfPosition = 0)
 {
     /// <summary>Alt+1: buy 1,000 shares, limit at the ask plus 10 cents, immediate or cancel (your requests, 2026-11-18).</summary>
     public static OrderHotkey BuyAskPlusTen { get; } = new("Alt+1", true, 1000, 0.10, "IOC");
 
     /// <summary>Shift+Z: sell the whole position, limit at the bid minus 10 cents, immediate or cancel (your request, 2026-11-18).</summary>
-    public static OrderHotkey SellAllBidMinusTen { get; } = new("Shift+Z", false, 0, 0.10, "IOC", WholePosition: true);
+    public static OrderHotkey SellAllBidMinusTen { get; } = new("Shift+Z", false, 0, 0.10, "IOC", OfPosition: 1);
+
+    /// <summary>Shift+X: sell half the position, limit at the bid minus 10 cents, immediate or cancel (your request, 2026-11-18).</summary>
+    public static OrderHotkey SellHalfBidMinusTen { get; } = new("Shift+X", false, 0, 0.10, "IOC", OfPosition: 0.5);
+
+    /// <summary>"the whole position", "half the position", or the shares.</summary>
+    public string Size() => this.OfPosition switch
+    {
+        <= 0 => $"{this.Shares:#,0} shares",
+        1 => "the whole position",
+        0.5 => "half the position",
+        _ => $"{this.OfPosition:P0} of the position",
+    };
 
     public string Describe() =>
-        $"{(this.Buy ? "buy" : "sell")} {(this.WholePosition ? "the whole position" : $"{this.Shares:#,0} shares")}, {this.Tif} limit at the {(this.Buy ? "ask plus" : "bid minus")} {this.Offset}";
+        $"{(this.Buy ? "buy" : "sell")} {this.Size()}, {this.Tif} limit at the {(this.Buy ? "ask plus" : "bid minus")} {this.Offset}";
 }
 
 /// <summary>
@@ -34,9 +46,9 @@ internal readonly record struct HotkeyQuote(string Symbol, double Bid, double As
 /// The stock is the one with a market depth open, since your DOM follows the stock you've picked; with none or
 /// several it sends nothing and says why. The price is IBKR's NBBO, at the moment of the key, rounded to IBKR's
 /// tick for the price: a cent from a dollar, a hundredth of a cent below. The order is a limit with the key's time in
-/// force (both keys' is IOC: what doesn't fill at once is cancelled), which IbkrTrader sends with outsideRth for
-/// premarket and after hours. A whole-position key leaves out shares already in working orders on its side, so a
-/// second press while the first is working can't go past the position.
+/// force (all three keys' is IOC: what doesn't fill at once is cancelled), which IbkrTrader sends with outsideRth for
+/// premarket and after hours. A position key takes its share of the position as IBKR last said it, never more than
+/// the shares not already in working orders on its side, so presses while earlier ones are working can't go past it.
 /// </summary>
 internal static class OrderHotkeys
 {
@@ -51,16 +63,20 @@ internal static class OrderHotkeys
         var target = depth[0];
         double quote = hotkey.Buy ? target.Ask : target.Bid;
         double shares = hotkey.Shares;
-        if (hotkey.WholePosition)
+        if (hotkey.OfPosition > 0)
         {
             double held = hotkey.Buy ? -target.Position : target.Position;
             double working = hotkey.Buy ? target.WorkingBuys : target.WorkingSells;
             if (!(held > 0))
                 return (null, quote, $"there's no {(hotkey.Buy ? "short" : "long")} position in {target.Symbol}");
 
-            shares = held - working;
-            if (!(shares > 0))
+            double free = held - working;
+            if (!(free > 0))
                 return (null, quote, $"all {held:#,0} shares of {target.Symbol} are already in working {(hotkey.Buy ? "buy" : "sell")} orders");
+
+            shares = Math.Min(Math.Floor(held * Math.Min(hotkey.OfPosition, 1)), free);
+            if (!(shares >= 1))
+                return (null, quote, $"{hotkey.Size()} of {held:#,0} shares of {target.Symbol} is under one share");
         }
 
         if (target.Halted)

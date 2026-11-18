@@ -1259,8 +1259,12 @@ async Task RunHotkey()
 {
     var alt1 = OrderHotkey.BuyAskPlusTen;
     var shiftZ = OrderHotkey.SellAllBidMinusTen;
-    Check(alt1 is { Keys: "Alt+1", Buy: true, Shares: 1000, Offset: 0.10, Tif: "IOC", WholePosition: false }, "Alt+1 buys 1,000 shares at the ask plus 10 cents, immediate or cancel");
-    Check(shiftZ is { Keys: "Shift+Z", Buy: false, Offset: 0.10, Tif: "IOC", WholePosition: true }, "Shift+Z sells the whole position at the bid minus 10 cents, immediate or cancel");
+    var shiftX = OrderHotkey.SellHalfBidMinusTen;
+    Check(alt1 is { Keys: "Alt+1", Buy: true, Shares: 1000, Offset: 0.10, Tif: "IOC", OfPosition: 0 }, "Alt+1 buys 1,000 shares at the ask plus 10 cents, immediate or cancel");
+    Check(shiftZ is { Keys: "Shift+Z", Buy: false, Offset: 0.10, Tif: "IOC", OfPosition: 1 }, "Shift+Z sells the whole position at the bid minus 10 cents, immediate or cancel");
+    Check(shiftX is { Keys: "Shift+X", Buy: false, Offset: 0.10, Tif: "IOC", OfPosition: 0.5 }, "Shift+X sells half the position at the bid minus 10 cents, immediate or cancel");
+    Check(alt1.Describe() == "buy 1,000 shares, IOC limit at the ask plus 0.1" && shiftZ.Size() == "the whole position" && shiftX.Size() == "half the position",
+        $"each says what it does ({alt1.Describe()}; {shiftZ.Describe()}; {shiftX.Describe()})");
     Check(OrderHotkeys.LimitPrice(0.8804, 0.10) == 0.9804 && OrderHotkeys.LimitPrice(5.23, 0.10) == 5.33 && OrderHotkeys.LimitPrice(0.95, 0.10) == 1.05,
         "the limit is the ask plus 10 cents: 0.8804 makes 0.9804, 5.23 makes 5.33, 0.95 makes 1.05");
     Check(OrderHotkeys.LimitPrice(0.99995, 0.10) == 1.10 && OrderHotkeys.LimitPrice(0.123456, 0.10) == 0.2235 && OrderHotkeys.LimitPrice(5.23, -0.10) == 5.13,
@@ -1297,8 +1301,22 @@ async Task RunHotkey()
         "no bid, or halted: nothing");
     Check(OrderHotkeys.Decide(shiftZ, [held with { Bid = 0.05 }]).Problem != null, "a bid under the offset would make a limit of 0 or less: nothing");
 
-    // What a key-down does, for Alt+1 (0) and Shift+Z (1).
-    var keys = new List<(uint, uint)> { (HotkeyListener.Alt, '1'), (HotkeyListener.Shift, 'Z') };
+    var half = OrderHotkeys.Decide(shiftX, [held]);
+    Check(half.Problem == null && half.Ticket == new IbkrOrderTicket("SVRE", false, 750, "LMT", 0.7803, double.NaN, "IOC"),
+        $"Shift+X holding 1,500: sell 750 SVRE, IOC limit at the bid minus 10 cents ({half.Ticket})");
+    Check(OrderHotkeys.Decide(shiftX, [svre with { Position = 1001 }]).Ticket?.Quantity == 500, "half of an odd position rounds down: 1,001 sells 500");
+    Check(OrderHotkeys.Decide(shiftX, [held with { WorkingSells = 1000 }]).Ticket?.Quantity == 500,
+        "never more than the shares not already being sold: 1,500 held with 1,000 in working sells sells 500");
+    Check(OrderHotkeys.Decide(shiftX, [held with { WorkingSells = 500 }]).Ticket?.Quantity == 750, "with enough left free, still half");
+    Check(OrderHotkeys.Decide(shiftX, [held with { WorkingSells = 1500 }]).Problem?.Contains("already in working sell orders") == true, "with it all being sold already: nothing");
+    Check(OrderHotkeys.Decide(shiftX, [svre with { Position = 1 }]).Problem?.Contains("under one share") == true, "half of 1 share is under a share: nothing");
+    Check(OrderHotkeys.Decide(shiftX, [svre]).Problem?.Contains("no long position") == true, "flat: nothing to sell");
+
+    // What a key-down does, for Alt+1 (0), Shift+Z (1) and Shift+X (2).
+    var keys = new List<(uint, uint)> { (HotkeyListener.Alt, '1'), (HotkeyListener.Shift, 'Z'), (HotkeyListener.Shift, 'X') };
+    Check(OrderHotkeys.TryParseKeys("Shift+X", out m, out vk) && m == HotkeyListener.Shift && vk == 'X', "Shift+X is Shift and the X key");
+    Check(OrderHotkeys.OnKeyDown(keys, 'X', HotkeyListener.Shift, false, true, false) == (2, true) && OrderHotkeys.OnKeyDown(keys, 'X', HotkeyListener.Shift, false, true, true) == (-1, false),
+        "Shift+X fires with Quantower in front, and types an X while a text box has the cursor");
     Check(OrderHotkeys.OnKeyDown(keys, 'Z', HotkeyListener.Shift, false, true, false) == (1, true), "Shift+Z with Quantower in front fires, and Quantower doesn't get the Z");
     Check(OrderHotkeys.OnKeyDown(keys, 'Z', HotkeyListener.Shift, false, false, false) == (-1, false), "with another program in front, it's just a capital Z there");
     Check(OrderHotkeys.OnKeyDown(keys, 'Z', HotkeyListener.Shift, false, true, true) == (-1, false), "with a text cursor in Quantower, it types the Z");
@@ -1318,7 +1336,7 @@ async Task RunHotkey()
     const uint F12 = 0x7B;
     const uint AllThree = HotkeyListener.Control | HotkeyListener.Alt | HotkeyListener.Shift;
     var rare = new OrderHotkey("Ctrl+Alt+Shift+F12", true, 1, 0.01, "IOC");
-    var rareType = new OrderHotkey("Shift+Q", false, 0, 0.01, "IOC", WholePosition: true);
+    var rareType = new OrderHotkey("Shift+Q", false, 0, 0.01, "IOC", OfPosition: 1);
     listener.Start([rare, rareType], onPress);
     Check(listener.Hooked, "the keyboard hook goes in");
     listener.Press(F12, AllThree);

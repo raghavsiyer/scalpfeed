@@ -103,7 +103,7 @@ internal sealed class PaperTrading : ITraderSink
         this.trader == null ? (0, "IBKR is turned off in ibkr.json") : this.trader.Place(ticket);
 
     /// <summary>
-    /// For a whole-position hotkey: the paper account's position in an IBKR symbol (negative when short), as IBKR's
+    /// For a position hotkey: the paper account's position in an IBKR symbol (negative when short), as IBKR's
     /// position stream last said, and the shares still to fill in its working buy and sell orders.
     /// </summary>
     public (double Position, double WorkingBuys, double WorkingSells) Exposure(string ibkrSymbol)
