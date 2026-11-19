@@ -672,24 +672,26 @@ void RunCharted()
     Check(!charted.Add(" ", "2026-11-20") && !charted.Add(null, "2026-11-20"), "a blank symbol is ignored");
 }
 
-// How far each stock climbed or dropped in the gainers scan over the last minute.
+// Each stock's last move in the gainers scan, the moment its place changes.
 void RunRanks()
 {
     var ranks = new ScanRanks();
-    long Sec(double s) => new DateTime(2026, 11, 19, 15, 0, 0, DateTimeKind.Utc).Ticks + (long)(s * TimeSpan.TicksPerSecond);
-    ranks.Record(new[] { "SEAT", "VIVS", "CHSN", "INHD" }, Sec(0));
-    Check(double.IsNaN(ranks.Change("SEAT", Sec(0))) && double.IsNaN(ranks.Change("SEAT", Sec(59))), "blank until the scan has run a minute");
-    for (int t = 2; t < 60; t += 2)
-        ranks.Record(new[] { "SEAT", "VIVS", "CHSN", "INHD" }, Sec(t));
-    ranks.Record(new[] { "CHSN", "SEAT", "NEWZ", "VIVS" }, Sec(60));
-    Check(ranks.Change("CHSN", Sec(60)) == 2 && ranks.Change("SEAT", Sec(60)) == -1 && ranks.Change("VIVS", Sec(60)) == -2,
-        $"a minute on: CHSN up 2, SEAT down 1, VIVS down 2 ({ranks.Change("CHSN", Sec(60))}, {ranks.Change("SEAT", Sec(60))}, {ranks.Change("VIVS", Sec(60))})");
-    Check(ranks.Change("NEWZ", Sec(60)) == 2, $"new to the list at 3rd of 4 counts from 5th: up 2 ({ranks.Change("NEWZ", Sec(60))})");
-    Check(double.IsNaN(ranks.Change("INHD", Sec(60))) && double.IsNaN(ranks.Change("POAS", Sec(60))), "off the list now: blank");
-    for (int t = 62; t <= 120; t += 2)
-        ranks.Record(new[] { "CHSN", "SEAT", "NEWZ", "VIVS" }, Sec(t));
-    Check(ranks.Change("CHSN", Sec(120)) == 0 && ranks.Change("NEWZ", Sec(120)) == 0, "a minute of the same list: 0");
-    Check(ranks.Change("chsn", Sec(120)) == 0, "whatever the case");
+    ranks.Record(new[] { "SEAT", "VIVS", "CHSN", "INHD" });
+    Check(double.IsNaN(ranks.Change("SEAT")), "the first scan: nothing has moved yet");
+    ranks.Record(new[] { "SEAT", "VIVS", "CHSN", "INHD" });
+    Check(double.IsNaN(ranks.Change("SEAT")) && double.IsNaN(ranks.Change("CHSN")), "the same order again: still nothing, not 0");
+    ranks.Record(new[] { "CHSN", "SEAT", "NEWZ", "VIVS" });
+    Check(ranks.Change("CHSN") == 2 && ranks.Change("SEAT") == -1 && ranks.Change("VIVS") == -2,
+        $"the next scan with a new order: CHSN up 2, SEAT down 1, VIVS down 2 ({ranks.Change("CHSN")}, {ranks.Change("SEAT")}, {ranks.Change("VIVS")})");
+    Check(ranks.Change("NEWZ") == 2, $"new to the list at 3rd of 4 moved from 5th: up 2 ({ranks.Change("NEWZ")})");
+    Check(double.IsNaN(ranks.Change("INHD")) && double.IsNaN(ranks.Change("POAS")), "off the list: blank");
+    ranks.Record(new[] { "CHSN", "SEAT", "NEWZ", "VIVS" });
+    Check(ranks.Change("CHSN") == 2 && ranks.Change("VIVS") == -2, "unchanged since: each keeps its last move");
+    ranks.Record(new[] { "SEAT", "CHSN", "NEWZ", "VIVS" });
+    Check(ranks.Change("SEAT") == 1 && ranks.Change("CHSN") == -1 && ranks.Change("NEWZ") == 2, "a new swap replaces the moves of the two that swapped, and only theirs");
+    Check(ranks.Change("chsn") == -1, "whatever the case");
+    ranks.Record(new[] { "SEAT", "CHSN", "VIVS" });
+    Check(double.IsNaN(ranks.Change("NEWZ")) && ranks.Change("VIVS") == 1, "a stock that leaves is forgotten; the one below it moves up");
 }
 
 // Depth pacing against a stand-in for Gateway, so it takes no real slots and can't disturb Quantower.

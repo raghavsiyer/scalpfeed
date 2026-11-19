@@ -453,7 +453,7 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
     /// <summary>Each gainers scan's answer, from IBKR's thread: its ranks kept for the climb column, then the list.</summary>
     private void OnTopGainers(IReadOnlyList<string> names)
     {
-        this.gainerRanks.Record(names, FeedClock.UtcNowTicks);
+        this.gainerRanks.Record(names);
         this.topGainers.Offer(names);
     }
 
@@ -857,10 +857,10 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
         if (state.DayTurnover > 0)
             bar.QuoteAssetVolume = Math.Round(state.DayTurnover / Million, 3);
 
-        // Places climbed in the gainers scan over the last minute (ScanRanks), in the Funding rate column, which
-        // stocks leave empty: up positive, down negative. Blank off the list or in its first minute. The column
-        // shows a funding rate as a percentage, times 100 (seen 2026-11-19: 1 read 100.00000), so it's sent over 100.
-        double climbed = this.gainerRanks.Change(state.Id, nowTicks);
+        // The stock's last move in the gainers scan (ScanRanks), in the Funding rate column, which stocks leave
+        // empty: up positive, down negative. Blank off the list or before it has moved. The column shows a funding
+        // rate as a percentage, times 100 (seen 2026-11-19: 1 read 100.00000), so it's sent over 100.
+        double climbed = this.gainerRanks.Change(state.Id);
         if (!double.IsNaN(climbed))
             bar.FundingRate = climbed / 100;
 
