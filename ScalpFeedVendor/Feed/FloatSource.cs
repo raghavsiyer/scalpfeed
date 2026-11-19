@@ -12,7 +12,9 @@ namespace ScalpFeedVendor.Feed;
 /// tastytrade has no float, and its share counts are stale. Each fetch costs 5 Firecrawl credits and the free plan
 /// has 1,000 a month, so a float is kept for a week (your choice, same day): floats change slowly, apart from
 /// offerings. A symbol the site doesn't have costs nothing and is asked about again the next day. The key is
-/// yours, in firecrawl.json, and stays out of the log.
+/// yours, in firecrawl.json, and stays out of the log. momo-algo looks floats up the same way and shares the file
+/// (2026-11-18, its market_data/firecrawl_float.py), so the cache is read again when the file changes, and each
+/// write merges with what's on disk, newest per symbol, rather than dropping the bot's.
 /// </summary>
 internal sealed class FloatSource : IDisposable
 {
@@ -36,9 +38,12 @@ internal sealed class FloatSource : IDisposable
     private readonly Func<DateTime> utcNow;
     private readonly string cachePath;
     private readonly Action<string> arrived;
+    private readonly object fileGate = new();
     private DateTime pausedUntilUtc;
     private bool keyMissingLogged;
     private int working;
+    private DateTime fileTimeUtc;
+    private long fileCheckedMs = long.MinValue;
 
     /// <param name="arrived">Called from the background with a symbol whose facts just came in.</param>
     public FloatSource(Action<string> arrived, string cachePath = null, Send send = null, Func<string> readKey = null, Func<DateTime> utcNow = null)
@@ -46,6 +51,7 @@ internal sealed class FloatSource : IDisposable
         this.arrived = arrived;
         this.cachePath = cachePath ?? FloatFacts.CachePath;
         this.cache = new(FloatFacts.ReadCache(this.cachePath), StringComparer.OrdinalIgnoreCase);
+        this.fileTimeUtc = File.Exists(this.cachePath) ? File.GetLastWriteTimeUtc(this.cachePath) : default;
         this.utcNow = utcNow ?? (() => DateTime.UtcNow);
         this.readKey = readKey ?? ReadKeyFile;
         if (send == null)
@@ -58,7 +64,37 @@ internal sealed class FloatSource : IDisposable
     }
 
     /// <summary>The facts kept for the symbol, however old, or null.</summary>
-    public FloatFacts Get(string symbol) => this.cache.GetValueOrDefault(symbol);
+    public FloatFacts Get(string symbol)
+    {
+        this.Reload(force: false);
+        return this.cache.GetValueOrDefault(symbol);
+    }
+
+    /// <summary>
+    /// Takes in what another process (momo-algo) wrote to the file since it was last read: entries newer than ours.
+    /// Looks at the file's time no more than every 2 seconds unless forced.
+    /// </summary>
+    private void Reload(bool force)
+    {
+        lock (this.fileGate)
+        {
+            long nowMs = Environment.TickCount64;
+            if (!force && nowMs - this.fileCheckedMs < 2000)
+                return;
+
+            this.fileCheckedMs = nowMs;
+            var time = File.Exists(this.cachePath) ? File.GetLastWriteTimeUtc(this.cachePath) : default;
+            if (time == this.fileTimeUtc)
+                return;
+
+            this.fileTimeUtc = time;
+            foreach (var (symbol, facts) in FloatFacts.ReadCache(this.cachePath))
+            {
+                if (!this.cache.TryGetValue(symbol, out var ours) || facts.FetchedMs > ours.FetchedMs)
+                    this.cache[symbol] = facts;
+            }
+        }
+    }
 
     /// <summary>How long a float found is kept before it's fetched again.</summary>
     public static readonly TimeSpan KeepFound = TimeSpan.FromDays(7);
@@ -70,6 +106,7 @@ internal sealed class FloatSource : IDisposable
             return;
 
         var now = this.utcNow();
+        this.Reload(force: false);
         if (this.cache.TryGetValue(symbol, out var facts) && Fresh(facts, now))
             return;
         if (now < this.pausedUntilUtc || (this.retryAtUtc.TryGetValue(symbol, out var at) && now < at))
@@ -194,9 +231,16 @@ internal sealed class FloatSource : IDisposable
             return;
         }
 
-        this.cache[symbol] = facts;
         this.retryAtUtc.TryRemove(symbol, out _);
-        FloatFacts.WriteCache(this.cachePath, this.cache);
+        lock (this.fileGate)
+        {
+            // Anything the bot wrote since we last looked goes into the file too, not over it.
+            this.fileCheckedMs = long.MinValue;
+            this.Reload(force: true);
+            this.cache[symbol] = facts;
+            FloatFacts.WriteCache(this.cachePath, this.cache);
+            this.fileTimeUtc = File.GetLastWriteTimeUtc(this.cachePath);
+        }
         Log.Info($"[float] {symbol} {facts.Describe()}" + (facts.Known
             ? $", shares outstanding {FloatFacts.Shares(facts.SharesOut)}, 20-day volume {FloatFacts.Shares(facts.AverageVolume)}, {(int?)result?["creditsCost"] ?? 0} credits"
             : ""));

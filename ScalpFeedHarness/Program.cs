@@ -558,6 +558,25 @@ async Task RunFloat()
         Check(sent.IsEmpty && reopened.Get("GDHG")?.Float == 29_519_326, "nor after a restart: the file is read back");
     }
 
+    // momo-algo shares the file: what it writes shows up here, and a fetch here keeps its entries.
+    var shared = FloatFacts.ReadCache(cachePath);
+    long botMs = new DateTimeOffset(now).ToUnixTimeMilliseconds() + 1;
+    shared["BOTX"] = new FloatFacts(FloatFacts.DayOf(now), 3_300_000, 4_000_000, double.NaN, botMs);
+    FloatFacts.WriteCache(cachePath, shared);
+    await Task.Delay(2100);
+    floats.Want("BOTX");
+    await floats.IdleAsync();
+    Check(sent.IsEmpty && floats.Get("BOTX")?.Float == 3_300_000, "a float the bot wrote to the file is used, not fetched again");
+    shared = FloatFacts.ReadCache(cachePath);
+    shared["BOTY"] = new FloatFacts(FloatFacts.DayOf(now), 7_700_000, 9_000_000, double.NaN, botMs);
+    FloatFacts.WriteCache(cachePath, shared);
+    floats.Want("NEWZ");
+    await floats.IdleAsync();
+    var afterFetch = FloatFacts.ReadCache(cachePath);
+    Check(sent.SequenceEqual(new[] { "NEWZ" }) && afterFetch.ContainsKey("BOTY") && afterFetch.ContainsKey("NEWZ"),
+        "a fetch here merges with the file, keeping what the bot wrote a moment ago");
+    sent.Clear();
+
     now = now.AddDays(1);
     floats.Want("GDHG");
     floats.Want("ZQZQX");
