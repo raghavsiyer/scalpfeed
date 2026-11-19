@@ -236,14 +236,24 @@ internal sealed class PaperTrading : ITraderSink
     }
 
     /// <summary>
-    /// Only what ended an order pops up, and not a cancel (202), which an IOC's unfilled rest always gets: every order
-    /// popped up IBKR's 2109 warning (outside regular hours is ignored) and every IOC a 202 (your request, 2026-11-19:
-    /// no extra notifications on a hotkey order). IbkrTrader has logged each already.
+    /// Only a refusal pops up (your request, 2026-11-19: no extra notifications on a hotkey order): what ended an order,
+    /// and a cancel (202) that gives a reason. Every order popped up IBKR's 2109 warning (outside regular hours is
+    /// ignored), and every IOC a 202 with no reason for its unfilled rest; those are only logged, as IbkrTrader has.
+    /// A 202 with a reason is IBKR refusing the order: the same morning VIVS at $0.25 got "We cannot accept an order at
+    /// a limit price at or more aggressive than 0.2752686" for the ask plus 10 cents.
     /// </summary>
     public void OnTraderOrderMessage(int orderId, int code, string text, bool endedOrder)
     {
-        if (endedOrder && code != 202)
-            this.push(MessageDealTicket.CreateRefuseDealTicket(Header, $"IBKR order {orderId}: {text} ({code})"));
+        string reason = CancelReason(text);
+        if (code == 202 ? reason.Length > 0 : endedOrder)
+            this.push(MessageDealTicket.CreateRefuseDealTicket(Header, $"IBKR order {orderId}: {(code == 202 ? reason : text)} ({code})"));
+    }
+
+    /// <summary>What follows "reason:" in IBKR's cancel message, without its HTML line breaks; empty when there's none.</summary>
+    public static string CancelReason(string text)
+    {
+        int at = text?.IndexOf("reason:", StringComparison.OrdinalIgnoreCase) ?? -1;
+        return at < 0 ? "" : text[(at + "reason:".Length)..].Replace("<br>", " ", StringComparison.OrdinalIgnoreCase).Trim();
     }
 
     #endregion IBKR says
