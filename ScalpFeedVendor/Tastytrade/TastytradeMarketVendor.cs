@@ -75,9 +75,12 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
     private readonly ScanList halts = new("IBKR Halts", logEachChange: true);
 
     /// <summary>
-    /// The Volume and Quote asset volume columns show the day's shares and dollars in millions, to 3 decimals (your
-    /// choice, 2026-11-19): 700,000 shares reads 0.700, $15.0M reads 15.013. A Watchlist column takes only numbers.
+    /// A Watchlist column takes only numbers, so the Volume column shows the day's shares in thousands (700,000 reads
+    /// 700) and Quote asset volume its dollars in millions ($15.0M reads 15.01) (your choices, 2026-11-19). Volume is
+    /// in thousands rather than millions because Quantower shows it as a whole number, as it does every share count.
     /// </summary>
+    private const double Thousand = 1e3;
+
     private const double Million = 1e6;
     private System.Threading.Timer flushTimer;
     private System.Threading.Timer housekeepingTimer;
@@ -812,7 +815,7 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
         if (!double.IsNaN(state.PrevClose))
             bar.PreviousClose = state.PrevClose;
         if (!double.IsNaN(state.DayVolume))
-            bar.Volume = Math.Round(state.DayVolume / Million, 3);
+            bar.Volume = Math.Round(state.DayVolume / Thousand);
 
         if (!double.IsNaN(state.LastPrice))
         {
