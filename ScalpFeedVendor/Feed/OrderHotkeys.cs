@@ -17,6 +17,9 @@ internal sealed record OrderHotkey(string Keys, bool Buy, double Shares, double 
     /// </summary>
     public const double OffsetShare = 0.05;
 
+    /// <summary>The most the offset goes through the quote, whatever the price: 20 cents (your request, 2026-11-19), so from $4 up.</summary>
+    public const double MaxOffset = 0.20;
+
     /// <summary>Alt+1: buy 1,000 shares, limit at the ask plus 5%, immediate or cancel (your requests, 2026-11-18 and 19).</summary>
     public static OrderHotkey BuyAsk { get; } = new("Alt+1", true, 1000, OffsetShare, "IOC");
 
@@ -39,7 +42,7 @@ internal sealed record OrderHotkey(string Keys, bool Buy, double Shares, double 
     };
 
     public string Describe() =>
-        $"{(this.Buy ? "buy" : "sell")} {this.Size()}, {this.Tif}{(this.Tif == "IOC" ? " (DAY outside 9:30-16:00 ET)" : "")} limit at the {(this.Buy ? "ask plus" : "bid minus")} {this.Offset:0.##%}";
+        $"{(this.Buy ? "buy" : "sell")} {this.Size()}, {this.Tif}{(this.Tif == "IOC" ? " (DAY outside 9:30-16:00 ET)" : "")} limit at the {(this.Buy ? "ask plus" : "bid minus")} {this.Offset:0.##%}, at most {OrderHotkey.MaxOffset:0.00}";
 }
 
 /// <summary>
@@ -120,10 +123,14 @@ internal static class OrderHotkeys
         return (new IbkrOrderTicket(target.Symbol, hotkey.Buy, shares, "LMT", limit, double.NaN, tif), quote, null);
     }
 
-    /// <summary>The quote plus the offset, a share of it (minus for a sell), on IBKR's tick for stocks: $0.01 from a dollar, $0.0001 below.</summary>
+    /// <summary>
+    /// The quote plus the offset, a share of it (minus for a sell) but never more than 20 cents (OrderHotkey.MaxOffset),
+    /// on IBKR's tick for stocks: $0.01 from a dollar, $0.0001 below.
+    /// </summary>
     public static double LimitPrice(double quote, double offset)
     {
-        double price = quote * (1 + offset);
+        double through = Math.Min(Math.Abs(quote * offset), OrderHotkey.MaxOffset);
+        double price = quote + (offset < 0 ? -through : through);
         return Math.Round(price, price >= 1.0 ? 2 : 4, MidpointRounding.AwayFromZero);
     }
 
