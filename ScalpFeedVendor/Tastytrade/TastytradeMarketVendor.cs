@@ -58,6 +58,7 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
     private readonly ConcurrentDictionary<string, SymbolState> statesByStreamer = new();
     private readonly ConcurrentDictionary<string, string> streamerById = new();
     private readonly ConcurrentDictionary<string, EquityInfo> equityBySymbol = new();
+    private readonly ConcurrentDictionary<string, DateTime> noEquityUntilUtc = new();
     private readonly SubscriptionBook book = new();
     private readonly FeedHealth health = new();
     private readonly SemaphoreSlim tokenGate = new(1, 1);
@@ -180,6 +181,8 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
 
             // Gateway being closed mustn't fail the connection: tape and charts still work,
             // and the quote stays on tastytrade until IBKR answers.
+            this.topGainers.Make = this.MakeSymbol;
+            this.halts.Make = this.MakeSymbol;
             this.ibkr = new IbkrBridge(this.TimedPush, this.OnIbkrPrint, this.topGainers.Offer, this.halts.Offer, s => this.PushDayBarNow(s.Streamer));
             this.ibkr.Start();
             this.floats = new FloatSource(this.OnFloatArrived);
@@ -315,6 +318,45 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
         {
             Log.Info($"Symbol lookup '{requestParameters.SymbolId}' failed: {ex.Message}");
             return null;
+        }
+    }
+
+    /// <summary>
+    /// For the scan lists, off IBKR's thread: sends Quantower the symbol from this connection first, as a search does,
+    /// unless it already has been this session. On 2026-11-19 the first gainers list after a restart, looked up
+    /// through Quantower alone, held CHSN, SEAT, MPU and NKLR rows that were never quoted and charted nothing, though
+    /// a search for SEAT worked; this connection had never sent those. False when tastytrade hasn't got the stock,
+    /// which is remembered for 10 minutes so a scan every 2 seconds doesn't ask again.
+    /// </summary>
+    private bool MakeSymbol(string id)
+    {
+        if (this.equityBySymbol.ContainsKey(id))
+            return true;
+        if (this.noEquityUntilUtc.TryGetValue(id, out var until) && DateTime.UtcNow < until)
+            return false;
+
+        var api = this.api;
+        if (api == null)
+            return false;
+
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            var info = api.GetEquityAsync(id, cts.Token).GetAwaiter().GetResult();
+            if (info == null)
+            {
+                this.noEquityUntilUtc[id] = DateTime.UtcNow.AddMinutes(10);
+                return false;
+            }
+
+            this.PushMessage(this.CreateSymbol(info));
+            return true;
+        }
+        catch (Exception ex) when (ex is TastytradeApiException or HttpRequestException or TaskCanceledException)
+        {
+            this.noEquityUntilUtc[id] = DateTime.UtcNow.AddMinutes(10);
+            Log.Info($"[scan] symbol lookup '{id}' failed: {ex.Message}");
+            return false;
         }
     }
 
