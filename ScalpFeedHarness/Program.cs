@@ -1084,6 +1084,14 @@ async Task RunTrader()
     var closing = trader.Fills().First(f => f.ExecId == "0001.02");
     Check(closing is { Buy: false, Shares: 100, Price: 3.60, Commission: 1.0, RealizedPnl: 13.0 }, $"a sell that closed has IBKR's realized P&L, after commissions ({closing})");
     Check(IbkrTrader.Reported(1.7976931348623157E308) is double.NaN && IbkrTrader.Reported(-42.5) == -42.5, "IBKR's 'not set' reads as no number; a loss reads as itself");
+    var day = new DateTime(2026, 11, 19, 15, 0, 0, DateTimeKind.Utc);
+    IbkrFill F(string id, int min, bool buy, double shares, string symbol = "SEAT") => new(id, 1, "DU1", symbol, buy, shares, 1.9, day.AddMinutes(min), 1);
+    var day1 = new[] { F("a", 0, true, 1000), F("b", 1, false, 400), F("c", 2, false, 600), F("d", 3, false, 300), F("e", 4, true, 300), F("f", 5, true, 200, "VIVS") };
+    var closes = IbkrTrader.Closes(day1, new Dictionary<string, double>());
+    Check(!closes["a"] && closes["b"] && closes["c"] && !closes["d"] && closes["e"] && !closes["f"],
+        $"from flat: buy 1,000 opens, selling 400 and 600 close, then selling 300 opens a short that buying 300 closes; each symbol on its own ({string.Join(" ", closes.Select(c => c.Key + (c.Value ? "=close" : "=open")))})");
+    var carried = IbkrTrader.Closes([F("g", 0, false, 500)], new Dictionary<string, double> { [IbkrTrader.PositionKey("DU1", "SEAT")] = 500 });
+    Check(carried["g"], "held overnight: the first sell of the day closes");
     double pct = IbkrTrader.PnlPercent(false, 3.60, 100, 14, 13);
     Check(Math.Abs(pct - (13.0 / 346 * 100)) < 1e-9, $"selling 100 at 3.60 for 14 gross, 13 net: the shares cost 346, so +3.76% ({pct:0.00})");
     double cover = IbkrTrader.PnlPercent(true, 3.40, 100, 9, 8);

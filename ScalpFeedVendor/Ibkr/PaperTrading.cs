@@ -30,6 +30,11 @@ internal sealed class PaperTrading : ITraderSink
     private readonly Action<Message> push;
     private readonly string vendorKey;
     private readonly ConcurrentDictionary<string, DateTime> positionOpened = new();
+
+    // Each position's quantity before the fills IBKR gave, worked out once from its positions and those fills, so a
+    // trade can say whether it opened or closed. A position first traded after that starts flat.
+    private Dictionary<string, double> startQuantity;
+    private readonly object startGate = new();
     private readonly ConcurrentDictionary<int, bool> historyStarted = new();
     private readonly ConcurrentDictionary<string, bool> tradesPushed = new();
     private IbkrTrader trader;
@@ -97,9 +102,10 @@ internal sealed class PaperTrading : ITraderSink
         static DateTime Utc(DateTime d) => d.Kind == DateTimeKind.Local ? d.ToUniversalTime() : DateTime.SpecifyKind(d, DateTimeKind.Utc);
         DateTime from = parameters == null || parameters.From == default ? DateTime.MinValue : Utc(parameters.From);
         DateTime to = parameters == null || parameters.To == default || parameters.To == DateTime.MaxValue ? DateTime.MaxValue : Utc(parameters.To);
+        var closes = this.Closes(fills);
         var trades = fills
             .Where(f => f.TimeUtc >= from && f.TimeUtc <= to)
-            .Select(this.TradeMessage)
+            .Select(f => this.TradeMessage(f, closes))
             .Where(t => symbols.Count == 0 || symbols.Contains(t.SymbolId))
             .ToList();
         if (parameters != null)
@@ -260,7 +266,7 @@ internal sealed class PaperTrading : ITraderSink
             return;
 
         var latest = this.trader?.Fills().FirstOrDefault(f => f.ExecId == fill.ExecId) ?? fill;
-        this.push(this.TradeMessage(latest));
+        this.push(this.TradeMessage(latest, this.Closes(this.trader?.Fills() ?? [])));
     }
 
     /// <summary>
@@ -290,7 +296,31 @@ internal sealed class PaperTrading : ITraderSink
 
     private string SymbolId(string ibkrSymbol) => TradingSymbols.FromIbkr(ibkrSymbol, this.vendorKey);
 
-    private static string PositionId(IbkrPosition p) => p.Account + ":" + p.Symbol;
+    private static string PositionId(IbkrPosition p) => IbkrTrader.PositionKey(p.Account, p.Symbol);
+
+    /// <summary>
+    /// Whether each fill closed shares (IbkrTrader.Closes), from each position's quantity before the fills first
+    /// seen: IBKR's position then, less those fills.
+    /// </summary>
+    private Dictionary<string, bool> Closes(IReadOnlyList<IbkrFill> fills)
+    {
+        lock (this.startGate)
+        {
+            if (this.startQuantity == null)
+            {
+                this.startQuantity = [];
+                foreach (var p in this.trader?.Positions() ?? [])
+                    this.startQuantity[PositionId(p)] = p.Quantity;
+                foreach (var f in fills)
+                {
+                    string key = IbkrTrader.PositionKey(f.Account, f.Symbol);
+                    this.startQuantity[key] = this.startQuantity.GetValueOrDefault(key) - (f.Buy ? f.Shares : -f.Shares);
+                }
+            }
+
+            return IbkrTrader.Closes(fills, this.startQuantity);
+        }
+    }
 
     private static string Describe(IbkrOrderTicket t) => t.Type switch
     {
@@ -347,7 +377,7 @@ internal sealed class PaperTrading : ITraderSink
     /// so the net P&amp;L as a share of what the closed shares cost goes in its comment, "+3.76%" (your request, the
     /// same day).
     /// </summary>
-    private MessageTrade TradeMessage(IbkrFill f)
+    private MessageTrade TradeMessage(IbkrFill f, IReadOnlyDictionary<string, bool> closes)
     {
         double fee = double.IsNaN(f.Commission) ? 0 : f.Commission;
         var trade = new MessageTrade
@@ -361,6 +391,11 @@ internal sealed class PaperTrading : ITraderSink
             Price = f.Price,
             Quantity = f.Shares,
             Fee = new PnLItem { AssetID = Usd, Value = -fee },
+
+            // Which position it changed, and whether it opened or closed it, for Account performance (your report,
+            // 2026-11-19: it showed no trades while the Trades list had 661), which pairs openings with closings.
+            PositionId = IbkrTrader.PositionKey(f.Account, f.Symbol),
+            PositionImpactType = closes.GetValueOrDefault(f.ExecId) ? PositionImpactType.Close : PositionImpactType.Open,
         };
 
         if (!double.IsNaN(f.RealizedPnl))

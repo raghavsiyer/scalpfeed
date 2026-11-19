@@ -829,6 +829,30 @@ internal sealed class IbkrTrader
         return cost > 0 ? net / cost * 100 : double.NaN;
     }
 
+    /// <summary>A fill's position: its account and symbol, as the position it changes is known.</summary>
+    internal static string PositionKey(string account, string symbol) => account + ":" + symbol;
+
+    /// <summary>
+    /// Which fills closed shares, by replaying them in time order from each position's starting quantity (start, by
+    /// PositionKey; none is flat): a fill against the position held before it (selling a long, buying back a short)
+    /// closes, one with it or from flat opens. A fill that goes through flat to the other side counts as closing.
+    /// </summary>
+    internal static Dictionary<string, bool> Closes(IReadOnlyList<IbkrFill> fills, IReadOnlyDictionary<string, double> start)
+    {
+        var held = new Dictionary<string, double>(start);
+        var closes = new Dictionary<string, bool>();
+        foreach (var f in fills.OrderBy(f => f.TimeUtc))
+        {
+            string key = PositionKey(f.Account, f.Symbol);
+            double before = held.GetValueOrDefault(key);
+            double signed = f.Buy ? f.Shares : -f.Shares;
+            closes[f.ExecId] = before != 0 && Math.Sign(before) != Math.Sign(signed);
+            held[key] = before + signed;
+        }
+
+        return closes;
+    }
+
     /// <summary>IBKR's number, or NaN for its "not set" (the largest double, 1.7976931348623157E308).</summary>
     internal static double Reported(double value) => Math.Abs(value) > 1e300 ? double.NaN : value;
 
