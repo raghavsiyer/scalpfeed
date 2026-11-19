@@ -235,12 +235,15 @@ internal sealed class PaperTrading : ITraderSink
         this.push(this.TradeMessage(latest));
     }
 
+    /// <summary>
+    /// Only what ended an order pops up, and not a cancel (202), which an IOC's unfilled rest always gets: every order
+    /// popped up IBKR's 2109 warning (outside regular hours is ignored) and every IOC a 202 (your request, 2026-11-19:
+    /// no extra notifications on a hotkey order). IbkrTrader has logged each already.
+    /// </summary>
     public void OnTraderOrderMessage(int orderId, int code, string text, bool endedOrder)
     {
-        string line = $"IBKR order {orderId}: {text} ({code})";
-        this.push(endedOrder
-            ? MessageDealTicket.CreateRefuseDealTicket(Header, line)
-            : MessageDealTicket.CreateInfoDealTicket(Header, line));
+        if (endedOrder && code != 202)
+            this.push(MessageDealTicket.CreateRefuseDealTicket(Header, $"IBKR order {orderId}: {text} ({code})"));
     }
 
     #endregion IBKR says

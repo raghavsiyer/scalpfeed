@@ -97,8 +97,9 @@ public sealed class ScalpFeedVendor : MultiVendor
         if (problem == null)
         {
             string what = $"{(ticket.Buy ? "buy" : "sell")} {ticket.Quantity:#,0} {ticket.Symbol} {ticket.Tif} limit {ticket.LimitPrice} ({(ticket.Buy ? "ask" : "bid")} {quote} {(ticket.Buy ? "+" : "-")} {hotkey.Offset})";
+            // Logged only: a pop-up for every order sent was noise (your request, 2026-11-19). One that sent
+            // nothing still pops up, with a sound.
             Log.Info($"[hotkey] {hotkey.Keys}: order {id}, {what}");
-            this.PushMessage(MessageDealTicket.CreateInfoDealTicket(HotkeyHeader, $"{hotkey.Keys}: {what}"));
         }
         else
         {
