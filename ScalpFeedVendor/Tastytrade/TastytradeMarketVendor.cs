@@ -858,10 +858,11 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
             bar.QuoteAssetVolume = Math.Round(state.DayTurnover / Million, 3);
 
         // Places climbed in the gainers scan over the last minute (ScanRanks), in the Funding rate column, which
-        // stocks leave empty: up positive, down negative. Blank off the list or in its first minute.
+        // stocks leave empty: up positive, down negative. Blank off the list or in its first minute. The column
+        // shows a funding rate as a percentage, times 100 (seen 2026-11-19: 1 read 100.00000), so it's sent over 100.
         double climbed = this.gainerRanks.Change(state.Id, nowTicks);
         if (!double.IsNaN(climbed))
-            bar.FundingRate = climbed;
+            bar.FundingRate = climbed / 100;
 
         // During a halt, what the depth's Res row shows (your request, 2026-11-17): the reopening auction's price as
         // the mark price and the seconds until the reopening as the mark size, for the IBKR Halts list. Each blank
