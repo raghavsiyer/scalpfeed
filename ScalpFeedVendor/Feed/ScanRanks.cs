@@ -1,22 +1,26 @@
 namespace ScalpFeedVendor.Feed;
 
 /// <summary>
-/// Each stock's last move in IBKR's top gainers scan (your request, 2026-11-19: a red or green arrow for stocks
-/// moving up or down the scanner). A Watchlist column takes only numbers, so it's the places the stock moved the last
-/// time its place changed: +3 up three places, -2 down two. It changes the moment a scan has the stock in a new
-/// place (your feedback, the same day: a minute's comparison mostly showed 0) and stays until the next change. A
-/// stock new to the list moved from one place below the previous scan's last row. Blank for a stock not on the list
-/// now, or that hasn't moved since it's been watched. Thread-safe; nothing here needs Quantower.
+/// How far each stock has climbed or dropped in IBKR's top gainers scan over the last 5 minutes (your request,
+/// 2026-11-19: a red or green arrow for stocks moving up or down the scanner). A Watchlist column takes only numbers,
+/// so it's the places climbed, net: +3 up three places, -2 down two, 0 back where it was. It's the stock's place now
+/// against its place in the newest scan 5 minutes old or more, or in the scanner's first 5 minutes against the first
+/// scan. A stock that wasn't on the list then counts from one place below that scan's last row. Blank for a stock
+/// not on the list now, or before a second scan.
+///
+/// Earlier the same day it compared against a minute before (mostly 0, your feedback), then showed each stock's last
+/// move as it happened; you then chose the total over 5 minutes. Thread-safe; nothing here needs Quantower.
 /// </summary>
 internal sealed class ScanRanks
 {
-    private readonly object gate = new();
-    private Dictionary<string, int> current;
-    private int currentRows;
-    private readonly Dictionary<string, int> lastMove = new(StringComparer.OrdinalIgnoreCase);
+    public static readonly TimeSpan Lookback = TimeSpan.FromMinutes(5);
 
-    /// <summary>A scan's answer, best first.</summary>
-    public void Record(IReadOnlyList<string> names)
+    private readonly object gate = new();
+    private readonly List<(long Ticks, Dictionary<string, int> Ranks, int Rows)> history = [];
+    private Dictionary<string, int> current = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>A scan's answer, best first, at utcTicks.</summary>
+    public void Record(IReadOnlyList<string> names, long utcTicks)
     {
         var ranks = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         for (int i = 0; i < names.Count; i++)
@@ -24,41 +28,50 @@ internal sealed class ScanRanks
 
         lock (this.gate)
         {
-            if (this.current != null)
-            {
-                foreach (var (symbol, now) in ranks)
-                {
-                    int before = this.current.TryGetValue(symbol, out int was) ? was : this.currentRows + 1;
-                    if (before != now)
-                        this.lastMove[symbol] = before - now;
-                }
-
-                foreach (var symbol in this.lastMove.Keys.Where(s => !ranks.ContainsKey(s)).ToList())
-                    this.lastMove.Remove(symbol);
-            }
-
+            this.history.Add((utcTicks, ranks, names.Count));
             this.current = ranks;
-            this.currentRows = names.Count;
+
+            // Keep the newest that's 5 minutes old or more, and everything after it.
+            long cutoff = utcTicks - Lookback.Ticks;
+            while (this.history.Count >= 2 && this.history[1].Ticks <= cutoff)
+                this.history.RemoveAt(0);
         }
     }
 
-    /// <summary>The places the stock moved at its last change: up positive, down negative; NaN when there's none.</summary>
-    public double Change(string symbol)
+    /// <summary>Places climbed, net, over the last 5 minutes: up positive, down negative; NaN when there's nothing to say.</summary>
+    public double Change(string symbol, long utcTicks)
     {
         if (string.IsNullOrEmpty(symbol))
             return double.NaN;
 
         lock (this.gate)
-            return this.lastMove.TryGetValue(symbol, out int moved) ? moved : double.NaN;
+        {
+            if (this.history.Count < 2 || !this.current.TryGetValue(symbol, out int now))
+                return double.NaN;
+
+            // The newest scan 5 minutes old or more; in the first 5 minutes, the first.
+            long cutoff = utcTicks - Lookback.Ticks;
+            var baseline = this.history[0];
+            for (int i = this.history.Count - 1; i >= 0; i--)
+            {
+                if (this.history[i].Ticks <= cutoff)
+                {
+                    baseline = this.history[i];
+                    break;
+                }
+            }
+
+            int before = baseline.Ranks.TryGetValue(symbol, out int was) ? was : baseline.Rows + 1;
+            return before - now;
+        }
     }
 
     public void Clear()
     {
         lock (this.gate)
         {
-            this.current = null;
-            this.currentRows = 0;
-            this.lastMove.Clear();
+            this.history.Clear();
+            this.current = new(StringComparer.OrdinalIgnoreCase);
         }
     }
 }

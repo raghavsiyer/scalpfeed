@@ -453,7 +453,7 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
     /// <summary>Each gainers scan's answer, from IBKR's thread: its ranks kept for the climb column, then the list.</summary>
     private void OnTopGainers(IReadOnlyList<string> names)
     {
-        this.gainerRanks.Record(names);
+        this.gainerRanks.Record(names, FeedClock.UtcNowTicks);
         this.topGainers.Offer(names);
     }
 
@@ -882,13 +882,13 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
             bar.MarkSize = 0;
         }
 
-        // Outside a halt, the Mark size column shows the stock's last move in the gainers scan (ScanRanks): up
-        // positive, down negative, a whole number (your choice, 2026-11-19; the Funding rate column first tried showed
-        // 5 decimals). Blank before it has moved; 0 once, after it leaves the list, in case a blank leaves the last
-        // move up. A halt's countdown takes the column over until the halt ends.
+        // Outside a halt, the Mark size column shows the places the stock climbed in the gainers scan over the last 5
+        // minutes (ScanRanks): up positive, down negative, a whole number (your choices, 2026-11-19; the Funding rate
+        // column first tried showed 5 decimals). Blank before a second scan; 0 once, after it leaves the list, in case
+        // a blank leaves the last value up. A halt's countdown takes the column over until the halt ends.
         if (state.IbkrHalted <= 0)
         {
-            double climbed = this.gainerRanks.Change(state.Id);
+            double climbed = this.gainerRanks.Change(state.Id, nowTicks);
             if (!double.IsNaN(climbed))
             {
                 bar.MarkSize = climbed;
