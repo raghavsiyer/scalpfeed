@@ -46,7 +46,8 @@ internal sealed record FloatFacts(string Day, double Float, double SharesOut, do
     public static string Shares(double n) =>
         double.IsNaN(n) ? "n/a"
         : n >= 1e9 ? (n / 1e9).ToString("0.00", CultureInfo.InvariantCulture) + "B"
-        : n >= 1e6 ? (n / 1e6).ToString("0.00", CultureInfo.InvariantCulture) + "M"
+        : n >= 999_995 ? (n / 1e6).ToString("0.00", CultureInfo.InvariantCulture) + "M"
+        : n >= 999.95 ? (n / 1e3).ToString("0.0", CultureInfo.InvariantCulture) + "K"
         : n.ToString("#,0", CultureInfo.InvariantCulture);
 
     /// <summary>

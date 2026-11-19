@@ -501,9 +501,9 @@ async Task RunFloat()
     var fgl = FloatFacts.FromStatistics(JsonNode.Parse(Stats("FGL", "8,557", "11,456", "1,565,709"))["data"]["alexandria"][0]["data"], "2026-11-16", ms);
     var fcuv = FloatFacts.FromStatistics(JsonNode.Parse(Stats("FCUV", "546,711", "648,251", "5,977,944"))["data"]["alexandria"][0]["data"], "2026-11-16", ms);
     Check(gdhg.Float == 29_519_326 && gdhg.SharesOut == 47_127_140 && gdhg.AverageVolume == 5_256_126, "the float, share count and 20-day volume come from the exact values");
-    Check(gdhg.Describe() == "29.52M" && fcuv.Describe() == "546,711", $"shown as 29.52M, and under a million in full ({gdhg.Describe()}, {fcuv.Describe()})");
+    Check(gdhg.Describe() == "29.52M" && fcuv.Describe() == "546.7K" && FloatFacts.Shares(950) == "950" && FloatFacts.Shares(999_999) == "1.00M" && FloatFacts.Shares(999.97) == "1.0K", $"shown as 29.52M, under a million as 546.7K, and under a thousand in full ({gdhg.Describe()}, {fcuv.Describe()})");
     Check(fgl.Doubtful && !gdhg.Doubtful && !fcuv.Doubtful, "FGL, trading 183 times its float a day, is doubtful; GDHG and FCUV (11 times) aren't");
-    Check(fgl.Describe() == "8,557 ? (trades 183x that a day, so likely out of date)", $"and says why ({fgl.Describe()})");
+    Check(fgl.Describe() == "8.6K ? (trades 183x that a day, so likely out of date)", $"and says why ({fgl.Describe()})");
     Check(FloatFacts.DayOf(new DateTime(2026, 11, 16, 3, 0, 0, DateTimeKind.Utc)) == "2026-11-15" && FloatFacts.DayOf(new DateTime(2026, 11, 16, 9, 0, 0, DateTimeKind.Utc)) == "2026-11-16", "a day is an Eastern day");
     Check(FloatFacts.SiteSymbol("BRK/B") == "BRK.B", "share classes are asked for with a dot");
 
