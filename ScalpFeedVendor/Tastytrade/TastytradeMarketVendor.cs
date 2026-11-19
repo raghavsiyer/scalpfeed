@@ -953,7 +953,8 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
             // Started first and waited for last, so a slow answer from one doesn't hold up the other.
             var bridge = this.ibkr;
             var fromIbkr = bridge == null || regularHoursBars ? null : bridge.LoadBarsAsync(streamer, time.Period, from, to, ct);
-            IReadOnlyList<BarRow> bars = client.LoadAsync(streamer + "{" + CandleCode(time.Period, regularHoursBars) + "}", from, to, ct).GetAwaiter().GetResult();
+            var length = BarLength(time.Period);
+            IReadOnlyList<BarRow> bars = client.LoadAsync(streamer + "{" + CandleCode(time.Period, regularHoursBars) + "}", from, to, ct, length).GetAwaiter().GetResult();
 
             if (fromIbkr != null)
             {
@@ -968,7 +969,7 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
             Dictionary<long, double> wholeMarketVolume = null;
             if (regularHoursBars)
             {
-                var allHours = client.LoadAsync(streamer + "{" + CandleCode(time.Period, false) + "}", from, to, ct).GetAwaiter().GetResult();
+                var allHours = client.LoadAsync(streamer + "{" + CandleCode(time.Period, false) + "}", from, to, ct, length).GetAwaiter().GetResult();
                 wholeMarketVolume = allHours.ToDictionary(b => b.TimeMs, b => b.Volume);
             }
 
@@ -999,6 +1000,23 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
     }
 
     /// <summary>Daily and longer bars use regular trading hours, the convention traders expect.</summary>
+    /// <summary>How long a bar of the period lasts, at most (a month as 31 days), so the one in progress isn't dropped.</summary>
+    private static TimeSpan BarLength(Period period)
+    {
+        int n = Math.Max(1, period.PeriodMultiplier);
+        return period.BasePeriod switch
+        {
+            BasePeriod.Second => TimeSpan.FromSeconds(n),
+            BasePeriod.Minute => TimeSpan.FromMinutes(n),
+            BasePeriod.Hour => TimeSpan.FromHours(n),
+            BasePeriod.Day => TimeSpan.FromDays(n),
+            BasePeriod.Week => TimeSpan.FromDays(7 * n),
+            BasePeriod.Month => TimeSpan.FromDays(31 * n),
+            BasePeriod.Year => TimeSpan.FromDays(366 * n),
+            _ => TimeSpan.Zero,
+        };
+    }
+
     private static bool UsesRegularHoursBars(Period period) =>
         period.BasePeriod is BasePeriod.Day or BasePeriod.Week or BasePeriod.Month or BasePeriod.Year;
 

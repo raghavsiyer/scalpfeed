@@ -38,6 +38,9 @@ switch (args[0])
     case "history":
         await RunHistory(args[1]);
         break;
+    case "todaybar":
+        await RunTodayBar(args.Length > 1 ? args[1] : "SPY");
+        break;
     case "live":
         await RunLive(args[1].Split(','), int.Parse(args[2]));
         break;
@@ -2075,6 +2078,29 @@ async Task RunRest(string symbol, string search)
     {
         Console.WriteLine($"lookup of a fake ticker failed cleanly: {ex.Message}");
     }
+}
+
+// Today's daily bar when a chart asks for only the current day (2026-11-19: it was dropped, so today's candle had
+// no history). The range checks need nothing; the load at the end asks tastytrade, read-only.
+async Task RunTodayBar(string symbol)
+{
+    const long Hour = 3_600_000, Day = 24 * Hour;
+    long dayStart = 1_795_000_000_000;
+    Check(HistoryClient.InRange(dayStart, Day, dayStart + (14 * Hour), dayStart + (18 * Hour)),
+        "a day's bar starting before the range but running into it is kept");
+    Check(!HistoryClient.InRange(dayStart, Day, dayStart + Day, dayStart + Day + Hour) && !HistoryClient.InRange(dayStart, Day, dayStart - (3 * Hour), dayStart - Hour),
+        "one that ended when the range starts, or starts after it ends, isn't");
+    Check(!HistoryClient.InRange(dayStart, 0, dayStart + 1, dayStart + Hour) && HistoryClient.InRange(dayStart, 0, dayStart, dayStart + Hour),
+        "with no length given, a bar must start in the range, as before");
+
+    using var client = api();
+    var history = new HistoryClient(async (force, ct) => await client.GetQuoteTokenAsync(ct));
+    var now = DateTime.UtcNow;
+    var before = await history.LoadAsync(symbol + "{=1d,tho=true}", now.AddHours(-1), now, CancellationToken.None);
+    var after = await history.LoadAsync(symbol + "{=1d,tho=true}", now.AddHours(-1), now, CancellationToken.None, TimeSpan.FromDays(1));
+    string Bar(IReadOnlyList<BarRow> bars) => bars.Count == 0 ? "none" : $"{DateTimeOffset.FromUnixTimeMilliseconds(bars[^1].TimeMs):MM-dd HH:mm} UTC O {bars[^1].Open} H {bars[^1].High} L {bars[^1].Low} C {bars[^1].Close}";
+    Console.WriteLine($"{symbol} daily bars for the last hour: without a length {before.Count} ({Bar(before)}), with a day's length {after.Count} ({Bar(after)})");
+    Check(after.Count == 1, $"asked for the last hour, today's daily bar comes back with its open, high and low ({Bar(after)})");
 }
 
 async Task RunHistory(string symbol)

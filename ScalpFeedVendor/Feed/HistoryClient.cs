@@ -37,12 +37,28 @@ internal sealed class HistoryClient : IFeedSink
         public string SymbolPrefix;
     }
 
+    /// <summary>
+    /// Whether a bar starting at barMs and lasting lengthMs (0: an instant) belongs in fromMs to toMs: it starts by
+    /// toMs, and ends after fromMs, or with no length starts at or after it.
+    /// </summary>
+    public static bool InRange(long barMs, long lengthMs, long fromMs, long toMs) =>
+        barMs <= toMs && (lengthMs > 0 ? barMs + lengthMs > fromMs : barMs >= fromMs);
+
     public HistoryClient(Func<bool, CancellationToken, Task<QuoteToken>> tokenSource)
     {
         this.link = new DxLinkLink("history", tokenSource, Fields, this);
     }
 
-    public async Task<IReadOnlyList<BarRow>> LoadAsync(string candleSymbol, DateTime fromUtc, DateTime toUtc, CancellationToken ct)
+    /// <summary>Bars that start in the range.</summary>
+    public Task<IReadOnlyList<BarRow>> LoadAsync(string candleSymbol, DateTime fromUtc, DateTime toUtc, CancellationToken ct) =>
+        this.LoadAsync(candleSymbol, fromUtc, toUtc, ct, TimeSpan.Zero);
+
+    /// <param name="barLength">
+    /// The bars' length, so a bar that started before fromUtc but runs into it is kept. Without it a bar must start
+    /// in the range. A chart asking for just the current day dropped today's daily bar, stamped at the day's start
+    /// ("ANT{=1d,tho=true}: 0 bars from 1 rows", 2026-11-19), so today's candle had no history.
+    /// </param>
+    public async Task<IReadOnlyList<BarRow>> LoadAsync(string candleSymbol, DateTime fromUtc, DateTime toUtc, CancellationToken ct, TimeSpan barLength)
     {
         await this.requestGate.WaitAsync(ct).ConfigureAwait(false);
         try
@@ -69,7 +85,11 @@ internal sealed class HistoryClient : IFeedSink
 
             var started = Stopwatch.StartNew();
             long fromMs = new DateTimeOffset(DateTime.SpecifyKind(fromUtc, DateTimeKind.Utc)).ToUnixTimeMilliseconds();
-            await this.link.SendSubscriptionAsync([new FeedKey("Candle", candleSymbol)], null, reset: true, fromMs).ConfigureAwait(false);
+            long lengthMs = (long)barLength.TotalMilliseconds;
+
+            // tastytrade sends only bars that start at or after the time asked from, so the bar already running at
+            // fromUtc (today's daily bar, for a chart asking from an hour ago) needs asking from a bar's length before.
+            await this.link.SendSubscriptionAsync([new FeedKey("Candle", candleSymbol)], null, reset: true, fromMs - Math.Max(0, lengthMs)).ConfigureAwait(false);
 
             string ending = await WaitForEndAsync(collector, started, ct).ConfigureAwait(false);
 
@@ -83,7 +103,7 @@ internal sealed class HistoryClient : IFeedSink
             await this.link.SendSubscriptionAsync(null, null, reset: true).ConfigureAwait(false);
 
             long toMs = new DateTimeOffset(DateTime.SpecifyKind(toUtc, DateTimeKind.Utc)).ToUnixTimeMilliseconds();
-            result.RemoveAll(b => b.TimeMs < fromMs || b.TimeMs > toMs);
+            result.RemoveAll(b => !InRange(b.TimeMs, lengthMs, fromMs, toMs));
             result.Sort((a, b) => a.TimeMs.CompareTo(b.TimeMs));
             Log.Info($"history {candleSymbol}: {result.Count} bars from {collector.Rows} rows in {started.ElapsedMilliseconds} ms ({ending})");
             return result;
