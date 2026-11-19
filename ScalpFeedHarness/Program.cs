@@ -530,14 +530,19 @@ async Task RunFloat()
         return answers.GetValueOrDefault(symbol, (200, Stats(symbol, "1,000,000", "2,000,000", "500,000")));
     }
 
-    using var floats = new FloatSource(arrived.Enqueue, cachePath, Send, () => key, () => now);
+    using var floats = new FloatSource(arrived.Enqueue, cachePath, Send, () => key, () => now, Timeout.InfiniteTimeSpan);
     floats.Want("GDHG");
+    await floats.IdleAsync();
+    floats.RetryHeld();
     await floats.IdleAsync();
     Check(sent.IsEmpty && floats.Get("GDHG") == null, "with no key, nothing is sent");
 
     key = "fc-test";
     answers["GDHG"] = (200, Stats("GDHG", "29,519,326", "47,127,140", "5,256,126"));
     answers["ZQZQX"] = (200, NotFound);
+    floats.RetryHeld();
+    await floats.IdleAsync();
+    Check(sent.SequenceEqual(new[] { "GDHG" }), "a symbol quoted before the key was in is fetched once it is, without being quoted again (SEAT, 2026-11-19)");
     foreach (var s in new[] { "GDHG", "GMM", "ZQZQX", "BRK/B", "GDHG" })
         floats.Want(s);
     await floats.IdleAsync();
@@ -614,6 +619,25 @@ async Task RunFloat()
     floats.Want("OTHER");
     await floats.IdleAsync();
     Check(sent.SequenceEqual(new[] { "BROKE", "OTHER" }), $"out of credits stops all fetches for an hour ({string.Join(" ", sent)})");
+
+    sent.Clear();
+    answers.TryRemove("BROKE", out _);
+    answers["SLOW"] = (429, "");
+    floats.Want("SLOW");
+    floats.Want("NEXT");
+    await floats.IdleAsync();
+    answers.TryRemove("SLOW", out _);
+    floats.RetryHeld();
+    await floats.IdleAsync();
+    Check(sent.SequenceEqual(new[] { "SLOW" }), $"rate limited: nothing more is sent for a minute ({string.Join(" ", sent)})");
+    now = now.AddMinutes(2);
+    floats.RetryHeld();
+    await floats.IdleAsync();
+    Check(floats.Get("SLOW") is { Known: true } && floats.Get("NEXT") is { Known: true } && floats.Get("BROKE") is { Known: true },
+        $"then what was rate limited or queued behind it is fetched without being quoted again ({string.Join(" ", sent)})");
+    var lghl = new FloatFacts("2026-11-19", double.NaN, 46_143, 651_637, ms);
+    Check(lghl.Describe() == "no float on stockanalysis.com" && new FloatFacts("2026-11-19", double.NaN, double.NaN, double.NaN, ms).Describe() == "not on stockanalysis.com",
+        "a stock the site has without a float (LGHL) says so, apart from one the site hasn't got");
 
     Directory.Delete(dir, true);
 }

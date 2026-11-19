@@ -39,7 +39,7 @@ internal sealed record FloatFacts(string Day, double Float, double SharesOut, do
 
     /// <summary>What the Symbol Info panel and the log say: 29.52M, 546,711, or 8,557 with why it's doubtful.</summary>
     public string Describe() =>
-        !this.Known ? "not on stockanalysis.com"
+        !this.Known ? (double.IsNaN(this.SharesOut) ? "not on stockanalysis.com" : "no float on stockanalysis.com")
         : this.Doubtful ? $"{Shares(this.Float)} ? (trades {this.Turnover:0}x that a day, so likely out of date)"
         : Shares(this.Float);
 

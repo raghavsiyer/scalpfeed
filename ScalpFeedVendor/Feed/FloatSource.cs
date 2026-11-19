@@ -15,6 +15,9 @@ namespace ScalpFeedVendor.Feed;
 /// yours, in firecrawl.json, and stays out of the log. momo-algo looks floats up the same way and shares the file
 /// (2026-11-18, its market_data/firecrawl_float.py), so the cache is read again when the file changes, and each
 /// write merges with what's on disk, newest per symbol, rather than dropping the bot's.
+/// A symbol asked for while there's no key, or while fetches are paused (rate limited, out of credits), is held and
+/// asked for again every 30 seconds until it goes through: it's only asked for when first quoted, so on 2026-11-19
+/// SEAT, quoted before the key was in, never got its float, and the rows queued behind a rate limit were dropped.
 /// </summary>
 internal sealed class FloatSource : IDisposable
 {
@@ -31,6 +34,8 @@ internal sealed class FloatSource : IDisposable
     private readonly ConcurrentDictionary<string, DateTime> retryAtUtc = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, byte> queued = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentQueue<string> queue = new();
+    private readonly ConcurrentDictionary<string, byte> held = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Timer retryHeld;
     private readonly CancellationTokenSource stop = new();
     private readonly HttpClient http;
     private readonly Send send;
@@ -45,9 +50,15 @@ internal sealed class FloatSource : IDisposable
     private DateTime fileTimeUtc;
     private long fileCheckedMs = long.MinValue;
 
+    /// <summary>How often symbols held back by a missing key or a pause are asked for again.</summary>
+    public static readonly TimeSpan RetryHeldEvery = TimeSpan.FromSeconds(30);
+
     /// <param name="arrived">Called from the background with a symbol whose facts just came in.</param>
-    public FloatSource(Action<string> arrived, string cachePath = null, Send send = null, Func<string> readKey = null, Func<DateTime> utcNow = null)
+    /// <param name="retryHeldEvery">The harness passes Timeout.InfiniteTimeSpan and calls RetryHeld itself.</param>
+    public FloatSource(Action<string> arrived, string cachePath = null, Send send = null, Func<string> readKey = null, Func<DateTime> utcNow = null, TimeSpan? retryHeldEvery = null)
     {
+        var every = retryHeldEvery ?? RetryHeldEvery;
+        this.retryHeld = new Timer(_ => this.RetryHeld(), null, every, every);
         this.arrived = arrived;
         this.cachePath = cachePath ?? FloatFacts.CachePath;
         this.cache = new(FloatFacts.ReadCache(this.cachePath), StringComparer.OrdinalIgnoreCase);
@@ -109,7 +120,12 @@ internal sealed class FloatSource : IDisposable
         this.Reload(force: false);
         if (this.cache.TryGetValue(symbol, out var facts) && Fresh(facts, now))
             return;
-        if (now < this.pausedUntilUtc || (this.retryAtUtc.TryGetValue(symbol, out var at) && now < at))
+        if (now < this.pausedUntilUtc)
+        {
+            this.held.TryAdd(symbol, 0);
+            return;
+        }
+        if (this.retryAtUtc.TryGetValue(symbol, out var at) && now < at)
             return;
         if (!this.queued.TryAdd(symbol, 0))
             return;
@@ -125,6 +141,26 @@ internal sealed class FloatSource : IDisposable
             ? utc - DateTimeOffset.FromUnixTimeMilliseconds(facts.FetchedMs).UtcDateTime < KeepFound
             : facts.Day == FloatFacts.DayOf(utc);
 
+    /// <summary>Asks again for the symbols held back, once there's a key and fetches aren't paused.</summary>
+    public void RetryHeld()
+    {
+        try
+        {
+            if (this.held.IsEmpty || this.stop.IsCancellationRequested || this.utcNow() < this.pausedUntilUtc || string.IsNullOrWhiteSpace(this.readKey()))
+                return;
+
+            foreach (var symbol in this.held.Keys)
+            {
+                this.held.TryRemove(symbol, out _);
+                this.Want(symbol);
+            }
+        }
+        catch (Exception ex)
+        {
+            Log.Info($"[float] retrying held symbols: {Log.Scrub(ex.GetBaseException().Message)}");
+        }
+    }
+
     /// <summary>For the harness: waits until nothing is queued or being fetched.</summary>
     public async Task IdleAsync()
     {
@@ -135,6 +171,7 @@ internal sealed class FloatSource : IDisposable
     public void Dispose()
     {
         this.stop.Cancel();
+        this.retryHeld.Dispose();
         this.http?.Dispose();
     }
 
@@ -172,7 +209,10 @@ internal sealed class FloatSource : IDisposable
     {
         var now = this.utcNow();
         if (now < this.pausedUntilUtc)
+        {
+            this.held.TryAdd(symbol, 0);
             return;
+        }
 
         string key = this.readKey();
         if (string.IsNullOrWhiteSpace(key))
@@ -180,6 +220,7 @@ internal sealed class FloatSource : IDisposable
             if (!this.keyMissingLogged)
                 Log.Info($"[float] no Firecrawl key yet: paste it as apiKey in {KeyPath}. Nothing is fetched until then.");
             this.keyMissingLogged = true;
+            this.held.TryAdd(symbol, 0);
             return;
         }
 
@@ -199,13 +240,13 @@ internal sealed class FloatSource : IDisposable
         switch (status)
         {
             case 401 or 403:
-                this.Pause(TimeSpan.FromMinutes(30), $"Firecrawl refused the key (HTTP {status}); check apiKey in {KeyPath}");
+                this.Pause(symbol, TimeSpan.FromMinutes(30), $"Firecrawl refused the key (HTTP {status}); check apiKey in {KeyPath}");
                 return;
             case 402:
-                this.Pause(TimeSpan.FromHours(1), "Firecrawl says the account is out of credits (HTTP 402)");
+                this.Pause(symbol, TimeSpan.FromHours(1), "Firecrawl says the account is out of credits (HTTP 402)");
                 return;
             case 429:
-                this.Pause(TimeSpan.FromMinutes(1), "Firecrawl is rate limiting (HTTP 429)");
+                this.Pause(symbol, TimeSpan.FromMinutes(1), "Firecrawl is rate limiting (HTTP 429)");
                 return;
             case < 200 or >= 300:
                 this.Failed(symbol, $"HTTP {status}");
@@ -253,8 +294,9 @@ internal sealed class FloatSource : IDisposable
         Log.Info($"[float] {symbol} not fetched, trying again in {RetryAfterFailure.TotalMinutes:0} minutes: {Log.Scrub(why)}");
     }
 
-    private void Pause(TimeSpan span, string why)
+    private void Pause(string symbol, TimeSpan span, string why)
     {
+        this.held.TryAdd(symbol, 0);
         this.pausedUntilUtc = this.utcNow() + span;
         Log.Info($"[float] {why}. No float fetches for {span.TotalMinutes:0} minutes.");
     }
