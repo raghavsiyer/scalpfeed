@@ -8,13 +8,15 @@ namespace ScalpFeedVendor.Tastytrade;
 /// after hours the after-hours ones, and IBKR Halts (IbkrScan). Looking the symbols up can call back into this
 /// connection (a symbol it hasn't made yet), so it runs off IBKR's thread, one list at a time. A list the same as
 /// the last is left alone, unless the list has gone (deleted in Quantower), when it's made again. Stocks only:
-/// leveraged ETFs (SOXS, UVIX, MSTZ on 11-16) crowd a gainers list.
+/// leveraged ETFs (SOXS, UVIX, MSTZ on 11-16) crowd a gainers list. With <paramref name="charted"/>, the stocks
+/// opened in a chart today follow the scan's rows (ChartedSymbols), ETFs included, since you asked for those.
 /// </summary>
-internal sealed class ScanList(string name, bool logEachChange)
+internal sealed class ScanList(string name, bool logEachChange, ChartedSymbols charted = null)
 {
     private readonly object gate = new();
     private IReadOnlyList<string> sent;
     private IReadOnlyList<string> next;
+    private IReadOnlyList<string> scan = [];
     private bool logged;
 
     public string Name { get; } = name;
@@ -23,11 +25,27 @@ internal sealed class ScanList(string name, bool logEachChange)
     {
         lock (this.gate)
         {
-            bool idle = this.next == null;
-            this.next = symbols;
-            if (idle)
-                _ = Task.Run(this.PublishAll);
+            this.scan = symbols;
+            this.Queue();
         }
+    }
+
+    /// <summary>A symbol just opened in a chart: added to the list now if the scan hasn't got it.</summary>
+    public void Charted(string symbol)
+    {
+        if (charted == null || !charted.Add(symbol, FloatFacts.DayOf(DateTime.UtcNow)))
+            return;
+
+        lock (this.gate)
+            this.Queue();
+    }
+
+    private void Queue()
+    {
+        bool idle = this.next == null;
+        this.next = charted == null ? this.scan : ChartedSymbols.Merge(this.scan, charted.Today(FloatFacts.DayOf(DateTime.UtcNow)));
+        if (idle)
+            _ = Task.Run(this.PublishAll);
     }
 
     private void PublishAll()
@@ -74,7 +92,7 @@ internal sealed class ScanList(string name, bool logEachChange)
         foreach (var name in names)
         {
             var symbol = Core.Instance.GetSymbol(new GetSymbolRequestParameters { SymbolId = name }, connectionId);
-            if (symbol != null && symbol.SymbolType != SymbolType.ETF)
+            if (symbol != null && (symbol.SymbolType != SymbolType.ETF || !this.scan.Contains(name, StringComparer.OrdinalIgnoreCase)))
                 symbols.Add(symbol);
         }
 

@@ -70,7 +70,7 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
     private VolumeAverages averages;
     private DateTime nextAveragesUtc;
 
-    private readonly ScanList topGainers = new("IBKR Top Gainers", logEachChange: false);
+    private readonly ScanList topGainers = new("IBKR Top Gainers", logEachChange: false, new ChartedSymbols());
     private readonly ScanList halts = new("IBKR Halts", logEachChange: true);
 
     /// <summary>The Quote asset volume column shows the day's dollar volume in hundreds: $15.0M reads 150,126.</summary>
@@ -862,6 +862,10 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
         var id = requestParameters.SymbolId;
         var streamer = this.streamerById.GetValueOrDefault(id, id);
         bool regularHoursBars = UsesRegularHoursBars(time.Period);
+
+        // Only a chart asks for intraday bars (a Watchlist row asks for none), so this stock goes in Top Gainers.
+        if (!regularHoursBars)
+            this.topGainers.Charted(id);
         var from = requestParameters.FromTime;
         var to = requestParameters.ToTime;
         var ct = requestParameters.CancellationToken;

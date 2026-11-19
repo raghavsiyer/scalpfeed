@@ -202,6 +202,9 @@ switch (args[0])
     case "float":
         await RunFloat();
         break;
+    case "charted":
+        RunCharted();
+        break;
     case "rvol":
         await RunRvol(args[1..]);
         break;
@@ -640,6 +643,27 @@ async Task RunFloat()
         "a stock the site has without a float (LGHL) says so, apart from one the site hasn't got");
 
     Directory.Delete(dir, true);
+}
+
+// The stocks opened in a chart, added to the end of IBKR Top Gainers.
+void RunCharted()
+{
+    var charted = new ChartedSymbols();
+    const string day = "2026-11-19";
+    Check(charted.Add("POAS", day) && !charted.Add("poas", day), "a chart's first bars add its stock; the next timeframes of the same chart change nothing");
+    charted.Add("BABA", day);
+    charted.Add("SEAT", day);
+    Check(charted.Today(day).SequenceEqual(new[] { "SEAT", "BABA", "POAS" }), "most recent first");
+    Check(charted.Add("POAS", day) && charted.Today(day).SequenceEqual(new[] { "POAS", "SEAT", "BABA" }), "going back to one moves it up, not in twice");
+
+    var merged = ChartedSymbols.Merge(new[] { "SEAT", "VIVS", "CHSN" }, charted.Today(day));
+    Check(merged.SequenceEqual(new[] { "SEAT", "VIVS", "CHSN", "POAS", "BABA" }), $"the scan's rows come first, then each charted stock it hasn't got ({string.Join(" ", merged)})");
+
+    for (int i = 0; i < 15; i++)
+        charted.Add("S" + i, day);
+    Check(charted.Today(day).Count == ChartedSymbols.Most && charted.Today(day)[0] == "S14", $"at most {ChartedSymbols.Most}, the oldest dropped");
+    Check(charted.Today("2026-11-20").Count == 0, "a new day starts empty");
+    Check(!charted.Add(" ", "2026-11-20") && !charted.Add(null, "2026-11-20"), "a blank symbol is ignored");
 }
 
 // Depth pacing against a stand-in for Gateway, so it takes no real slots and can't disturb Quantower.
