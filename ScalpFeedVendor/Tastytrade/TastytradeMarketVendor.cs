@@ -370,7 +370,7 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
         {
             Name = info.Symbol,
             // The float in place of the company's name (your request, 2026-11-19): Description is the one text
-            // column the connection fills in a Watchlist, so it reads 3.88M or 660.9K rather than the open
+            // column the connection fills in a Watchlist, so it reads 3.9M or 661K rather than the open
             // interest column's 660,877. Blank until it's fetched; sent again when it arrives (OnFloatArrived).
             Description = FloatFacts.Short(this.floats?.Get(info.Symbol)),
             SymbolType = info.IsEtf ? SymbolType.ETF : SymbolType.Equities,

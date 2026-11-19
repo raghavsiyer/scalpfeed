@@ -44,7 +44,7 @@ internal sealed record FloatFacts(string Day, double Float, double SharesOut, do
         : Shares(this.Float);
 
     /// <summary>
-    /// The float for a Watchlist's Description column: 3.88M, 8.6K ? when out of date, n/a when the site has none,
+    /// The float for a Watchlist's Description column: 3.9M, 661K, 9K ? when out of date, n/a when the site has none,
     /// blank before it's fetched.
     /// </summary>
     public static string Short(FloatFacts facts) =>
@@ -55,9 +55,9 @@ internal sealed record FloatFacts(string Day, double Float, double SharesOut, do
 
     public static string Shares(double n) =>
         double.IsNaN(n) ? "n/a"
-        : n >= 1e9 ? (n / 1e9).ToString("0.00", CultureInfo.InvariantCulture) + "B"
-        : n >= 999_995 ? (n / 1e6).ToString("0.00", CultureInfo.InvariantCulture) + "M"
-        : n >= 999.95 ? (n / 1e3).ToString("0.0", CultureInfo.InvariantCulture) + "K"
+        : n >= 999_950_000 ? (n / 1e9).ToString("0.00", CultureInfo.InvariantCulture) + "B"
+        : n >= 999_500 ? (n / 1e6).ToString("0.0", CultureInfo.InvariantCulture) + "M"
+        : n >= 999.5 ? (n / 1e3).ToString("0", CultureInfo.InvariantCulture) + "K"
         : n.ToString("#,0", CultureInfo.InvariantCulture);
 
     /// <summary>
