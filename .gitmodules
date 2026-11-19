@@ -1,0 +1,3 @@
+[submodule "rolling-candle"]
+	path = rolling-candle
+	url = https://github.com/raghavsiyer/rolling-candle.git

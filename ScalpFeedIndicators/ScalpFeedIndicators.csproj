@@ -20,6 +20,14 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- The rolling candle lives in its own repo, the rolling-candle submodule (clone with its submodules), and is
+         built in here too: Key Moving Averages draws it, and the Rolling Candle indicator ships in this DLL. -->
+    <Compile Include="..\rolling-candle\src\RollingCandle.cs" LinkBase="RollingCandle" />
+    <Compile Include="..\rolling-candle\src\RollingCandleView.cs" LinkBase="RollingCandle" />
+    <Compile Include="..\rolling-candle\src\RollingCandleIndicator.cs" LinkBase="RollingCandle" />
+  </ItemGroup>
+
+  <ItemGroup>
     <FrameworkReference Include="Microsoft.WindowsDesktop.App" />
   </ItemGroup>
 
