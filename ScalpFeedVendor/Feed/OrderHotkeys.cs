@@ -4,23 +4,30 @@ using System.Runtime.InteropServices;
 namespace ScalpFeedVendor.Feed;
 
 /// <summary>
-/// An order a key sends: buy or sell, limit at the ask (buy) or bid (sell) plus or minus the offset, with this time in
-/// force (DAY, GTC or IOC). The size is the shares given, or with OfPosition that share of the position it closes
+/// An order a key sends: buy or sell, limit at the ask (buy) or bid (sell) plus or minus the offset, a share of the
+/// price (0.05 is 5%), with this time in force (DAY, GTC or IOC). The size is the shares given, or with OfPosition that share of the position it closes
 /// (1 the whole position, 0.5 half), whole shares rounded down: a sell the long position, a buy a short one.
 /// </summary>
 internal sealed record OrderHotkey(string Keys, bool Buy, double Shares, double Offset, string Tif, double OfPosition = 0)
 {
-    /// <summary>Alt+1: buy 1,000 shares, limit at the ask plus 10 cents, immediate or cancel (your requests, 2026-11-18).</summary>
-    public static OrderHotkey BuyAskPlusTen { get; } = new("Alt+1", true, 1000, 0.10, "IOC");
+    /// <summary>
+    /// How far through the quote every key's limit goes: 5% of the price (your choice, 2026-11-19). It was 10 cents,
+    /// which on VIVS at $0.25 was 40% past the ask, and IBKR refused each such buy ("We cannot accept an order at a
+    /// limit price at or more aggressive than 0.2752686", about 8% past it). You asked for 10%, which is past that too.
+    /// </summary>
+    public const double OffsetShare = 0.05;
+
+    /// <summary>Alt+1: buy 1,000 shares, limit at the ask plus 5%, immediate or cancel (your requests, 2026-11-18 and 19).</summary>
+    public static OrderHotkey BuyAsk { get; } = new("Alt+1", true, 1000, OffsetShare, "IOC");
 
     /// <summary>Alt+2: buy 2,000 shares, otherwise as Alt+1 (your request, 2026-11-18).</summary>
-    public static OrderHotkey BuyTwoThousandAskPlusTen { get; } = new("Alt+2", true, 2000, 0.10, "IOC");
+    public static OrderHotkey BuyTwoThousand { get; } = new("Alt+2", true, 2000, OffsetShare, "IOC");
 
-    /// <summary>Shift+Z: sell the whole position, limit at the bid minus 10 cents, immediate or cancel (your request, 2026-11-18).</summary>
-    public static OrderHotkey SellAllBidMinusTen { get; } = new("Shift+Z", false, 0, 0.10, "IOC", OfPosition: 1);
+    /// <summary>Shift+Z: sell the whole position, limit at the bid minus 5%, immediate or cancel (your request, 2026-11-18).</summary>
+    public static OrderHotkey SellAll { get; } = new("Shift+Z", false, 0, OffsetShare, "IOC", OfPosition: 1);
 
-    /// <summary>Shift+X: sell half the position, limit at the bid minus 10 cents, immediate or cancel (your request, 2026-11-18).</summary>
-    public static OrderHotkey SellHalfBidMinusTen { get; } = new("Shift+X", false, 0, 0.10, "IOC", OfPosition: 0.5);
+    /// <summary>Shift+X: sell half the position, limit at the bid minus 5%, immediate or cancel (your request, 2026-11-18).</summary>
+    public static OrderHotkey SellHalf { get; } = new("Shift+X", false, 0, OffsetShare, "IOC", OfPosition: 0.5);
 
     /// <summary>"the whole position", "half the position", or the shares.</summary>
     public string Size() => this.OfPosition switch
@@ -32,7 +39,7 @@ internal sealed record OrderHotkey(string Keys, bool Buy, double Shares, double 
     };
 
     public string Describe() =>
-        $"{(this.Buy ? "buy" : "sell")} {this.Size()}, {this.Tif}{(this.Tif == "IOC" ? " (DAY outside 9:30-16:00 ET)" : "")} limit at the {(this.Buy ? "ask plus" : "bid minus")} {this.Offset}";
+        $"{(this.Buy ? "buy" : "sell")} {this.Size()}, {this.Tif}{(this.Tif == "IOC" ? " (DAY outside 9:30-16:00 ET)" : "")} limit at the {(this.Buy ? "ask plus" : "bid minus")} {this.Offset:0.##%}";
 }
 
 /// <summary>
@@ -113,10 +120,10 @@ internal static class OrderHotkeys
         return (new IbkrOrderTicket(target.Symbol, hotkey.Buy, shares, "LMT", limit, double.NaN, tif), quote, null);
     }
 
-    /// <summary>The quote plus the offset, on IBKR's tick for stocks: $0.01 from a dollar, $0.0001 below.</summary>
+    /// <summary>The quote plus the offset, a share of it (minus for a sell), on IBKR's tick for stocks: $0.01 from a dollar, $0.0001 below.</summary>
     public static double LimitPrice(double quote, double offset)
     {
-        double price = quote + offset;
+        double price = quote * (1 + offset);
         return Math.Round(price, price >= 1.0 ? 2 : 4, MidpointRounding.AwayFromZero);
     }
 
