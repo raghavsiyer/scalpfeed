@@ -43,6 +43,16 @@ internal sealed record FloatFacts(string Day, double Float, double SharesOut, do
         : this.Doubtful ? $"{Shares(this.Float)} ? (trades {this.Turnover:0}x that a day, so likely out of date)"
         : Shares(this.Float);
 
+    /// <summary>
+    /// The float for a Watchlist's Description column: 3.88M, 8.6K ? when out of date, n/a when the site has none,
+    /// blank before it's fetched.
+    /// </summary>
+    public static string Short(FloatFacts facts) =>
+        facts == null ? ""
+        : !facts.Known ? "n/a"
+        : facts.Doubtful ? Shares(facts.Float) + " ?"
+        : Shares(facts.Float);
+
     public static string Shares(double n) =>
         double.IsNaN(n) ? "n/a"
         : n >= 1e9 ? (n / 1e9).ToString("0.00", CultureInfo.InvariantCulture) + "B"
