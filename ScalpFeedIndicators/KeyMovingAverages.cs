@@ -100,6 +100,21 @@ public sealed class KeyMovingAverages : Indicator
     [InputParameter("Rolling candle width (times the chart's candles)", 86, 0.5, 5, 0.1, 1)]
     public double RollingCandleWidth = 1.5;
 
+    [InputParameter("Rolling candle shade by volume", 87)]
+    public bool RollingCandleShade = true;
+
+    [InputParameter("Rolling candle tape bursts", 88)]
+    public bool RollingCandleBursts = true;
+
+    [InputParameter("Rolling candle tape burst: a side's prints within (ms)", 89, 50, 10_000, 50, 0)]
+    public int RollingCandleBurstGapMs = 1000;
+
+    [InputParameter("Rolling candle tape burst: at (times the typical rate bought or sold)", 90, 1, 50, 0.5, 1)]
+    public double RollingCandleBurstMultiple = 3;
+
+    [InputParameter("Rolling candle tape burst: at least (shares)", 91, 0, 1_000_000, 100, 0)]
+    public int RollingCandleBurstMinShares = 1000;
+
     private RollingCandleView rollingCandle;
 
     // One per moving average line, in the order the lines were added.
@@ -208,7 +223,8 @@ public sealed class KeyMovingAverages : Indicator
         {
             this.rollingCandle ??= new RollingCandleView(this, () => this.Count > 0 ? this.Time() : null);
             this.rollingCandle.Start(this.Symbol, this.RollingCandleSeconds, this.RollingCandleTypicalMinutes,
-                this.RollingCandleFullMultiple, this.RollingCandleGlowMultiple, this.RollingCandleMinShares, this.RollingCandleWidth);
+                this.RollingCandleFullMultiple, this.RollingCandleGlowMultiple, this.RollingCandleMinShares, this.RollingCandleWidth,
+                this.RollingCandleShade, this.RollingCandleBursts, this.RollingCandleBurstGapMs, this.RollingCandleBurstMultiple, this.RollingCandleBurstMinShares);
             shown.Add($"{Math.Max(1, this.RollingCandleSeconds)}s candle");
         }
 

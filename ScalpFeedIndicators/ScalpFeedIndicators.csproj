@@ -26,6 +26,7 @@
     <Compile Include="..\rolling-candle\src\RollingCandleView.cs" LinkBase="RollingCandle" />
     <Compile Include="..\rolling-candle\src\RollingCandleIndicator.cs" LinkBase="RollingCandle" />
     <Compile Include="..\rolling-candle\src\CandleShade.cs" LinkBase="RollingCandle" />
+    <Compile Include="..\rolling-candle\src\TapeBursts.cs" LinkBase="RollingCandle" />
   </ItemGroup>
 
   <ItemGroup>
