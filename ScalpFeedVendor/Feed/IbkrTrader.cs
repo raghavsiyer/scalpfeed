@@ -819,6 +819,16 @@ internal sealed class IbkrTrader
 
     private static int Int(string text) => int.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out int value) ? value : -1;
 
+    /// <summary>
+    /// A closing fill's net P&amp;L as a percentage of what its shares cost: closing a long (a sell), they cost the sale
+    /// less the gross P&amp;L; covering a short (a buy), the purchase plus it. NaN when that cost isn't positive.
+    /// </summary>
+    internal static double PnlPercent(bool buy, double price, double shares, double gross, double net)
+    {
+        double cost = buy ? (price * shares) + gross : (price * shares) - gross;
+        return cost > 0 ? net / cost * 100 : double.NaN;
+    }
+
     /// <summary>IBKR's number, or NaN for its "not set" (the largest double, 1.7976931348623157E308).</summary>
     internal static double Reported(double value) => Math.Abs(value) > 1e300 ? double.NaN : value;
 

@@ -1084,6 +1084,11 @@ async Task RunTrader()
     var closing = trader.Fills().First(f => f.ExecId == "0001.02");
     Check(closing is { Buy: false, Shares: 100, Price: 3.60, Commission: 1.0, RealizedPnl: 13.0 }, $"a sell that closed has IBKR's realized P&L, after commissions ({closing})");
     Check(IbkrTrader.Reported(1.7976931348623157E308) is double.NaN && IbkrTrader.Reported(-42.5) == -42.5, "IBKR's 'not set' reads as no number; a loss reads as itself");
+    double pct = IbkrTrader.PnlPercent(false, 3.60, 100, 14, 13);
+    Check(Math.Abs(pct - (13.0 / 346 * 100)) < 1e-9, $"selling 100 at 3.60 for 14 gross, 13 net: the shares cost 346, so +3.76% ({pct:0.00})");
+    double cover = IbkrTrader.PnlPercent(true, 3.40, 100, 9, 8);
+    Check(Math.Abs(cover - (8.0 / 349 * 100)) < 1e-9 && double.IsNaN(IbkrTrader.PnlPercent(false, 1, 10, 20, 19)),
+        $"covering a short at 3.40 for 9 gross: shorted for 349, so +{cover:0.00}%; a cost of nothing or less gives no percentage");
 
     var (id2, _) = trader.Place(new IbkrOrderTicket("NXXT", false, 100, "LMT", 3.60, double.NaN, "DAY"));
     gateway.Send("3", id2.ToString(CultureInfo.InvariantCulture), "Submitted", "0", "100", "0", "124", "0", "0", "79", "", "0");

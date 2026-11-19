@@ -315,7 +315,9 @@ internal sealed class PaperTrading : ITraderSink
     /// <summary>
     /// A fill as a Quantower trade, with its P&amp;L when it closed shares (your report, 2026-11-19: paper trades showed
     /// no P&amp;L, as only the commission was sent): net is IBKR's realized P&amp;L, after commissions, and gross adds
-    /// this fill's commission back. A fill that opened or added has none.
+    /// this fill's commission back. A fill that opened or added has none. The Trades panel has no P&amp;L % column,
+    /// so the net P&amp;L as a share of what the closed shares cost goes in its comment, "+3.76%" (your request, the
+    /// same day).
     /// </summary>
     private MessageTrade TradeMessage(IbkrFill f)
     {
@@ -337,6 +339,9 @@ internal sealed class PaperTrading : ITraderSink
         {
             trade.NetPnl = new PnLItem { AssetID = Usd, Value = f.RealizedPnl };
             trade.GrossPnl = new PnLItem { AssetID = Usd, Value = f.RealizedPnl + fee };
+            double percent = IbkrTrader.PnlPercent(f.Buy, f.Price, f.Shares, f.RealizedPnl + fee, f.RealizedPnl);
+            if (!double.IsNaN(percent))
+                trade.Comment = percent.ToString("+0.00;-0.00;0.00", CultureInfo.InvariantCulture) + "%";
         }
 
         return trade;
