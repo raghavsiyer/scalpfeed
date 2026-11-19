@@ -73,6 +73,7 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
 
     private readonly ScanList topGainers = new("IBKR Top Gainers", logEachChange: false, new ChartedSymbols());
     private readonly ScanList halts = new("IBKR Halts", logEachChange: true);
+    private readonly ScanRanks gainerRanks = new();
 
     /// <summary>
     /// A Watchlist column takes only numbers, so the Volume column shows the day's shares in thousands (700,000 reads
@@ -189,7 +190,8 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
             // and the quote stays on tastytrade until IBKR answers.
             this.topGainers.Make = this.MakeSymbol;
             this.halts.Make = this.MakeSymbol;
-            this.ibkr = new IbkrBridge(this.TimedPush, this.OnIbkrPrint, this.topGainers.Offer, this.halts.Offer, s => this.PushDayBarNow(s.Streamer));
+            this.gainerRanks.Clear();
+            this.ibkr = new IbkrBridge(this.TimedPush, this.OnIbkrPrint, this.OnTopGainers, this.halts.Offer, s => this.PushDayBarNow(s.Streamer));
             this.ibkr.Start();
             this.floats = new FloatSource(this.OnFloatArrived);
             this.averages = new VolumeAverages(this.history.LoadAsync, this.OnAverageArrived);
@@ -446,6 +448,13 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
         if (this.equityBySymbol.TryGetValue(symbol, out var info))
             this.PushMessage(this.CreateSymbol(info));
         this.PushDayBarNow(this.streamerById.GetValueOrDefault(symbol, symbol));
+    }
+
+    /// <summary>Each gainers scan's answer, from IBKR's thread: its ranks kept for the climb column, then the list.</summary>
+    private void OnTopGainers(IReadOnlyList<string> names)
+    {
+        this.gainerRanks.Record(names, FeedClock.UtcNowTicks);
+        this.topGainers.Offer(names);
     }
 
     /// <summary>From the average loader's thread: the row gets its RVOL without waiting for the next trade.</summary>
@@ -847,6 +856,12 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
 
         if (state.DayTurnover > 0)
             bar.QuoteAssetVolume = Math.Round(state.DayTurnover / Million, 3);
+
+        // Places climbed in the gainers scan over the last minute (ScanRanks), in the Funding rate column, which
+        // stocks leave empty: up positive, down negative. Blank off the list or in its first minute.
+        double climbed = this.gainerRanks.Change(state.Id, nowTicks);
+        if (!double.IsNaN(climbed))
+            bar.FundingRate = climbed;
 
         // During a halt, what the depth's Res row shows (your request, 2026-11-17): the reopening auction's price as
         // the mark price and the seconds until the reopening as the mark size, for the IBKR Halts list. Each blank

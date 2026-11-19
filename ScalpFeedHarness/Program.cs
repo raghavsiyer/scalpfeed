@@ -205,6 +205,9 @@ switch (args[0])
     case "charted":
         RunCharted();
         break;
+    case "ranks":
+        RunRanks();
+        break;
     case "rvol":
         await RunRvol(args[1..]);
         break;
@@ -667,6 +670,26 @@ void RunCharted()
     Check(charted.Today(day).Count == ChartedSymbols.Most && charted.Today(day)[0] == "S14", $"at most {ChartedSymbols.Most}, the oldest dropped");
     Check(charted.Today("2026-11-20").Count == 0, "a new day starts empty");
     Check(!charted.Add(" ", "2026-11-20") && !charted.Add(null, "2026-11-20"), "a blank symbol is ignored");
+}
+
+// How far each stock climbed or dropped in the gainers scan over the last minute.
+void RunRanks()
+{
+    var ranks = new ScanRanks();
+    long Sec(double s) => new DateTime(2026, 11, 19, 15, 0, 0, DateTimeKind.Utc).Ticks + (long)(s * TimeSpan.TicksPerSecond);
+    ranks.Record(new[] { "SEAT", "VIVS", "CHSN", "INHD" }, Sec(0));
+    Check(double.IsNaN(ranks.Change("SEAT", Sec(0))) && double.IsNaN(ranks.Change("SEAT", Sec(59))), "blank until the scan has run a minute");
+    for (int t = 2; t < 60; t += 2)
+        ranks.Record(new[] { "SEAT", "VIVS", "CHSN", "INHD" }, Sec(t));
+    ranks.Record(new[] { "CHSN", "SEAT", "NEWZ", "VIVS" }, Sec(60));
+    Check(ranks.Change("CHSN", Sec(60)) == 2 && ranks.Change("SEAT", Sec(60)) == -1 && ranks.Change("VIVS", Sec(60)) == -2,
+        $"a minute on: CHSN up 2, SEAT down 1, VIVS down 2 ({ranks.Change("CHSN", Sec(60))}, {ranks.Change("SEAT", Sec(60))}, {ranks.Change("VIVS", Sec(60))})");
+    Check(ranks.Change("NEWZ", Sec(60)) == 2, $"new to the list at 3rd of 4 counts from 5th: up 2 ({ranks.Change("NEWZ", Sec(60))})");
+    Check(double.IsNaN(ranks.Change("INHD", Sec(60))) && double.IsNaN(ranks.Change("POAS", Sec(60))), "off the list now: blank");
+    for (int t = 62; t <= 120; t += 2)
+        ranks.Record(new[] { "CHSN", "SEAT", "NEWZ", "VIVS" }, Sec(t));
+    Check(ranks.Change("CHSN", Sec(120)) == 0 && ranks.Change("NEWZ", Sec(120)) == 0, "a minute of the same list: 0");
+    Check(ranks.Change("chsn", Sec(120)) == 0, "whatever the case");
 }
 
 // Depth pacing against a stand-in for Gateway, so it takes no real slots and can't disturb Quantower.
