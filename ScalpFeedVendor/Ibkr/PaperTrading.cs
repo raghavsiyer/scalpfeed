@@ -76,8 +76,36 @@ internal sealed class PaperTrading : ITraderSink
     public IList<MessageOpenPosition> GetPositions() =>
         this.trader?.Positions().Select(this.PositionMessage).ToList() ?? [];
 
-    public IList<MessageTrade> GetTrades() =>
-        this.trader?.Fills().Select(this.TradeMessage).ToList() ?? [];
+    /// <summary>
+    /// The fills IBKR has given (today's and those since), as trades, those in the range asked for and of the symbols
+    /// asked for when there are any: Account performance asks for its period ("Today") and showed nothing while the
+    /// Trades list had them all (your report, 2026-11-19).
+    /// </summary>
+    public IList<MessageTrade> GetTrades(TradesHistoryRequestParameters parameters = null)
+    {
+        var fills = this.trader?.Fills() ?? [];
+        var symbols = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (!string.IsNullOrEmpty(parameters?.SymbolId))
+            symbols.Add(parameters.SymbolId);
+        foreach (var id in parameters?.SymbolIds ?? [])
+        {
+            if (!string.IsNullOrEmpty(id))
+                symbols.Add(id);
+        }
+
+        // Quantower's times are UTC; one not marked either way is taken as UTC too.
+        static DateTime Utc(DateTime d) => d.Kind == DateTimeKind.Local ? d.ToUniversalTime() : DateTime.SpecifyKind(d, DateTimeKind.Utc);
+        DateTime from = parameters == null || parameters.From == default ? DateTime.MinValue : Utc(parameters.From);
+        DateTime to = parameters == null || parameters.To == default || parameters.To == DateTime.MaxValue ? DateTime.MaxValue : Utc(parameters.To);
+        var trades = fills
+            .Where(f => f.TimeUtc >= from && f.TimeUtc <= to)
+            .Select(this.TradeMessage)
+            .Where(t => symbols.Count == 0 || symbols.Contains(t.SymbolId))
+            .ToList();
+        if (parameters != null)
+            Log.Info($"[trade] trades asked for {parameters.From:yyyy-MM-dd HH:mm:ss} ({parameters.From.Kind}) to {parameters.To:yyyy-MM-dd HH:mm:ss}{(symbols.Count > 0 ? $", {string.Join(' ', symbols)}" : "")}: {trades.Count} of {fills.Count}");
+        return trades;
+    }
 
     public TradingOperationResult PlaceOrder(PlaceOrderRequestParameters p)
     {

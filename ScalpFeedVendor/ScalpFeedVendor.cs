@@ -119,7 +119,13 @@ public sealed class ScalpFeedVendor : MultiVendor
 
     public override IList<MessageOpenPosition> GetPositions(CancellationToken token) => this.trading?.GetPositions() ?? new List<MessageOpenPosition>();
 
-    public override IList<MessageTrade> GetTrades(TradesHistoryRequestParameters parameters) => this.trading?.GetTrades() ?? new List<MessageTrade>();
+    public override IList<MessageTrade> GetTrades(TradesHistoryRequestParameters parameters) => this.trading?.GetTrades(parameters) ?? new List<MessageTrade>();
+
+    /// <summary>
+    /// Says the connection has a trade history to ask for (IBKR's fills, kept by IbkrTrader), so panels that ask for
+    /// one, like Account performance, do; Quantower isn't to keep its own copy, as IBKR's is the record.
+    /// </summary>
+    public override TradesHistoryMetadata GetTradesMetadata() => new() { AllowLocalStorage = false };
 
     public override TradingOperationResult PlaceOrder(PlaceOrderRequestParameters parameters) =>
         this.trading?.PlaceOrder(parameters) ?? TradingOperationResult.CreateError(parameters.RequestId, "not connected");
