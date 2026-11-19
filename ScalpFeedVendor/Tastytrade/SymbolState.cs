@@ -49,6 +49,9 @@ internal sealed class SymbolState
 
     // The Watchlist row shows a halt's Res price and countdown, so the first row after the halt clears them.
     public volatile bool HaltColumnsShown;
+
+    // The row's Mark size shows its last move in the gainers scan, so it's cleared once the stock leaves the list.
+    public volatile bool ClimbShown;
     public double LuldLoggedLower = double.NaN;
     public double LuldLoggedUpper = double.NaN;
 

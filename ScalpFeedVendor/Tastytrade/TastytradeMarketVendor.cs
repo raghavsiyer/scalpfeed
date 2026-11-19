@@ -857,13 +857,6 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
         if (state.DayTurnover > 0)
             bar.QuoteAssetVolume = Math.Round(state.DayTurnover / Million, 3);
 
-        // The stock's last move in the gainers scan (ScanRanks), in the Funding rate column, which stocks leave
-        // empty: up positive, down negative. Blank off the list or before it has moved. The column shows a funding
-        // rate as a percentage, times 100 (seen 2026-11-19: 1 read 100.00000), so it's sent over 100.
-        double climbed = this.gainerRanks.Change(state.Id);
-        if (!double.IsNaN(climbed))
-            bar.FundingRate = climbed / 100;
-
         // During a halt, what the depth's Res row shows (your request, 2026-11-17): the reopening auction's price as
         // the mark price and the seconds until the reopening as the mark size, for the IBKR Halts list. Each blank
         // until known, and the countdown always is for a regulatory halt. The halt's end sends zeros once, in case a
@@ -887,6 +880,25 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
             state.HaltColumnsShown = false;
             bar.Mark = 0;
             bar.MarkSize = 0;
+        }
+
+        // Outside a halt, the Mark size column shows the stock's last move in the gainers scan (ScanRanks): up
+        // positive, down negative, a whole number (your choice, 2026-11-19; the Funding rate column first tried showed
+        // 5 decimals). Blank before it has moved; 0 once, after it leaves the list, in case a blank leaves the last
+        // move up. A halt's countdown takes the column over until the halt ends.
+        if (state.IbkrHalted <= 0)
+        {
+            double climbed = this.gainerRanks.Change(state.Id);
+            if (!double.IsNaN(climbed))
+            {
+                bar.MarkSize = climbed;
+                state.ClimbShown = true;
+            }
+            else if (state.ClimbShown)
+            {
+                bar.MarkSize = 0;
+                state.ClimbShown = false;
+            }
         }
 
         this.PushMessage(bar);
