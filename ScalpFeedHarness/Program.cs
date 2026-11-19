@@ -1149,6 +1149,67 @@ async Task RunTrader()
     Check(trader.Order(id4)?.Status == IbkrTrader.GoneStatus && trader.OpenOrders().Count == 0, "a working order IBKR no longer reports isn't shown as working");
     var (id5, _) = trader.Place(new IbkrOrderTicket("NXXT", true, 100, "LMT", 3.40, double.NaN, "DAY"));
     Check(id5 > id4, $"the Gateway's next ID after a reconnect (101 here) doesn't reuse one already used ({id5})");
+
+    // A position key cancels the stock's working buys first. LVWR, 2026-11-19: Alt+1's IOC buy 393 was still filling
+    // on paper when Shift+Z sent sell 394, and IBKR repriced the sell so as not to cross it, and the sell died unfilled.
+    string Num(int n) => n.ToString(CultureInfo.InvariantCulture);
+    void LvwrStatus(int oid, string status, int filled, int qty) =>
+        gateway.Send("3", Num(oid), status, Num(filled), Num(qty - filled), filled > 0 ? "0.647" : "0", "200", "0", "0.647", "79", "", "0");
+    void TapeFill(string symbol, int oid, string exec, int shares, string req = "-1") =>
+        gateway.Send("11", req, Num(oid), "0", symbol, "STK", "", "0", "", "", "NYSE", "USD", symbol, symbol, exec, "20261119 15:44:41 US/Eastern", "DU000000", "NYSE", "BOT", Num(shares), "0.647", "200", "79", "0", Num(shares), "0.647", "", "", "", "", "1");
+    void LvwrPosition(int shares) =>
+        gateway.Send("61", "3", "DU000000", "0", "LVWR", "STK", "", "0", "", "", "NYSE", "USD", "LVWR", "LVWR", Num(shares), "0.647");
+
+    var (buyId, _) = trader.Place(new IbkrOrderTicket("LVWR", true, 1000, "LMT", 0.6632, double.NaN, "IOC"));
+    LvwrStatus(buyId, "Submitted", 400, 1000);
+    TapeFill("LVWR", buyId, "0002.01", 400);
+    LvwrPosition(400);
+    var (sellId, _) = trader.Place(new IbkrOrderTicket("LVWR", false, 100, "LMT", 0.70, double.NaN, "DAY"));
+    LvwrStatus(sellId, "Submitted", 0, 100);
+    await WaitFor(() => trader.Positions().Any(p => p is { Symbol: "LVWR", Quantity: 400 }) && trader.Order(buyId)?.Filled == 400 && trader.Order(sellId)?.Status == "Submitted");
+    Check(trader.CancelSide("SEAT", true, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(1)) == null && gateway.Count("4") == 1,
+        "with nothing working on that side, nothing is cancelled");
+
+    var clearing = Task.Run(() => trader.CancelSide("LVWR", true, TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(2)));
+    await WaitFor(() => gateway.Count("4") == 2);
+    await Task.Delay(100);
+    Check(gateway.Count("4") == 2 && gateway.LastOf("4")[2] == Num(buyId), $"Shift+Z with the buy still filling cancels that buy, not the working sell ({string.Join("|", gateway.LastOf("4") ?? [])})");
+    TapeFill("LVWR", buyId, "0002.02", 100);
+    LvwrStatus(buyId, "Cancelled", 500, 1000);
+    await Task.Delay(200);
+    Check(!clearing.IsCompleted, "IBKR's cancel confirmed, with a fill just before it: it still waits for the position to count that fill");
+    LvwrPosition(500);
+    string said = await clearing;
+    Check(said?.Contains($"cancelled working buy {buyId} (500 of 1,000 filled, Cancelled)") == true && said.Contains("; done in ") && said.Contains("position up to date"),
+        $"and goes on once the position says 500 ({said})");
+    Check(trader.Positions().Single(p => p.Symbol == "LVWR").Quantity == 500 && !trader.Order(sellId).IsDone, "so the sell is sized on 500, and the working sell was left alone");
+
+    var (stuckId, _) = trader.Place(new IbkrOrderTicket("LVWR", true, 1000, "LMT", 0.6632, double.NaN, "IOC"));
+    LvwrStatus(stuckId, "Submitted", 0, 1000);
+    await WaitFor(() => trader.Order(stuckId)?.Status == "Submitted");
+    var waited = Stopwatch.StartNew();
+    string stuck = trader.CancelSide("LVWR", true, TimeSpan.FromMilliseconds(300), TimeSpan.FromMilliseconds(300));
+    Check(stuck?.Contains("IBKR hadn't confirmed after") == true && stuck.Contains("position up to date 0 ms later") && waited.ElapsedMilliseconds is >= 300 and < 550,
+        $"IBKR not confirming: it goes on after its wait; with no fill since the last position, no wait for one ({stuck}; {waited.ElapsedMilliseconds} ms)");
+    LvwrStatus(stuckId, "Cancelled", 0, 1000);
+
+    var (lateId, _) = trader.Place(new IbkrOrderTicket("LVWR", true, 1000, "LMT", 0.6632, double.NaN, "IOC"));
+    LvwrStatus(lateId, "Submitted", 0, 1000);
+    await WaitFor(() => trader.Order(lateId)?.Status == "Submitted" && trader.Order(stuckId)?.IsDone == true);
+    var lateClearing = Task.Run(() => trader.CancelSide("LVWR", true, TimeSpan.FromSeconds(2), TimeSpan.FromMilliseconds(200)));
+    await WaitFor(() => gateway.LastOf("4")?[2] == Num(lateId));
+    TapeFill("LVWR", lateId, "0002.03", 100);
+    LvwrStatus(lateId, "Cancelled", 100, 1000);
+    string late = await lateClearing;
+    Check(late?.Contains("done in ") == true && late.Contains("no position after the last fill within") && trader.Positions().Single(p => p.Symbol == "LVWR").Quantity == 500,
+        $"no position after the last fill: it goes on after its wait, by the position it has, never more ({late})");
+
+    TapeFill("OLDY", 7, "0003.01", 100, req: "9002");
+    await WaitFor(() => trader.Fills().Any(f => f.ExecId == "0003.01"));
+    Check(trader.PositionCountsFills("OLDY"), "today's fills asked for at connect don't count as new: no wait for a position after them");
+    TapeFill("OLDY", 7, "0003.02", 100);
+    await WaitFor(() => trader.Fills().Any(f => f.ExecId == "0003.02"));
+    Check(!trader.PositionCountsFills("OLDY"), "a fill as it happens does, until IBKR's position comes in");
     await trader.StopAsync();
 
     // A live account: nothing but startApi, and every order refused.

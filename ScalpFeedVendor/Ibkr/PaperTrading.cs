@@ -137,6 +137,14 @@ internal sealed class PaperTrading : ITraderSink
         this.trader == null ? (0, "IBKR is turned off in ibkr.json") : this.trader.Place(ticket);
 
     /// <summary>
+    /// Before a position hotkey's order: cancels the stock's working orders on the other side (a sell key's buys) and
+    /// waits for them to finish and the position to count their fills (OrderHotkey.CancelWait, PositionWait). Returns
+    /// what happened, for the log, or null when there were none.
+    /// </summary>
+    public string CancelBeforeHotkey(string ibkrSymbol, bool keyBuys) =>
+        this.trader?.CancelSide(ibkrSymbol, !keyBuys, OrderHotkey.CancelWait, OrderHotkey.PositionWait);
+
+    /// <summary>
     /// For a position hotkey: the paper account's position in an IBKR symbol (negative when short), as IBKR's
     /// position stream last said, and the shares still to fill in its working buy and sell orders.
     /// </summary>

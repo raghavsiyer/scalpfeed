@@ -81,11 +81,26 @@ public sealed class ScalpFeedVendor : MultiVendor
         var market = this.marketData;
         var paper = this.trading;
         // Each depth symbol with the paper account's position and working orders, for a position key.
-        var depth = market?.DepthQuotes().Select(q =>
+        List<HotkeyQuote> Depth() => market?.DepthQuotes().Select(q =>
         {
             var (position, buys, sells) = paper?.Exposure(q.Symbol) ?? (0, 0, 0);
             return q with { Position = position, WorkingBuys = buys, WorkingSells = sells };
         }).ToList();
+
+        var depth = Depth();
+        // A position key cancels the stock's working orders on the other side first, or IBKR reprices its order away
+        // from them and an IOC dies unfilled (LVWR order 394, 2026-11-19); then it looks again, for the position
+        // with their fills and the quote now.
+        if (hotkey.OfPosition > 0 && paper != null && depth is [var only])
+        {
+            string cancelled = paper.CancelBeforeHotkey(only.Symbol, hotkey.Buy);
+            if (cancelled != null)
+            {
+                Log.Info($"[hotkey] {hotkey.Keys}: {cancelled}");
+                depth = Depth();
+            }
+        }
+
         var (ticket, quote, problem) = depth == null
             ? (null, double.NaN, "market data isn't connected")
             : OrderHotkeys.Decide(hotkey, depth);

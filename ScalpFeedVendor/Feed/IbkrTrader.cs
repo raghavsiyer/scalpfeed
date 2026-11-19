@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Diagnostics;
 using System.Globalization;
 using System.Net.Sockets;
 using System.Text;
@@ -99,6 +100,11 @@ internal sealed class IbkrTrader
     private readonly Dictionary<string, Dictionary<string, string>> accountValues = new();
     private readonly HashSet<string> positionsSeen = new();
     private readonly HashSet<int> ordersSeen = new();
+
+    // When, by symbol, IBKR last sent a fill as it happened (not today's fills asked for at connect) and a position
+    // (Stopwatch ticks), so a position hotkey that cancels orders first can tell when the position counts their fills.
+    private readonly Dictionary<string, long> liveFillHeard = new();
+    private readonly Dictionary<string, long> positionHeard = new();
 
     private ITraderSink sink;
     private CancellationTokenSource stopCts;
@@ -254,6 +260,68 @@ internal sealed class IbkrTrader
         }
 
         return this.SendNow([4, 1, id, ""]);
+    }
+
+    /// <summary>
+    /// Cancels the working orders in a symbol on one side, buys or sells, then waits for IBKR to say each is done (up
+    /// to doneWait) and for its position to count their last fills (up to positionWait), so an order sized on the
+    /// position can follow and IBKR won't reprice it away from them. Returns what happened, for the log, or null when
+    /// nothing on that side was working.
+    /// </summary>
+    public string CancelSide(string symbol, bool buys, TimeSpan doneWait, TimeSpan positionWait)
+    {
+        var working = this.OpenOrders().Where(o => o.Symbol == symbol && o.Buy == buys).ToList();
+        if (working.Count == 0)
+            return null;
+
+        var clock = Stopwatch.StartNew();
+        var refused = new List<string>();
+        foreach (var order in working)
+        {
+            string error = this.Cancel(order.Id);
+            if (error != null && this.Order(order.Id)?.IsDone != true)
+                refused.Add($"{order.Id} ({error})");
+        }
+
+        bool done = this.WaitUntil(() => working.All(o => this.Order(o.Id)?.IsDone != false), doneWait);
+        long doneMs = clock.ElapsedMilliseconds;
+        bool counted = this.WaitUntil(() => this.PositionCountsFills(symbol), positionWait);
+        long countedMs = clock.ElapsedMilliseconds - doneMs;
+
+        string which = string.Join(", ", working.Select(o => this.Order(o.Id) is { } now
+            ? $"{o.Id} ({now.Filled:#,0} of {now.Quantity:#,0} filled, {now.Status})"
+            : o.Id.ToString(CultureInfo.InvariantCulture)));
+        var said = new List<string> { $"cancelled working {(buys ? "buy" : "sell")} {which}" };
+        if (refused.Count > 0)
+            said.Add($"cancel refused for {string.Join(", ", refused)}");
+        said.Add(done ? $"done in {doneMs} ms" : $"IBKR hadn't confirmed after {doneMs} ms");
+        said.Add(counted ? $"position up to date {countedMs} ms later" : $"no position after the last fill within {countedMs} ms, so the size goes by the one before");
+        return string.Join("; ", said);
+    }
+
+    /// <summary>Whether IBKR's position in the symbol has come in since its last fill as it happened, so it counts that fill.</summary>
+    public bool PositionCountsFills(string symbol)
+    {
+        lock (this.gate)
+            return !this.liveFillHeard.TryGetValue(symbol, out long fill) || this.positionHeard.GetValueOrDefault(symbol) >= fill;
+    }
+
+    /// <summary>Waits, up to the timeout, for the condition to hold, checking it each time IBKR changes an order, fill or position.</summary>
+    private bool WaitUntil(Func<bool> condition, TimeSpan timeout)
+    {
+        var clock = Stopwatch.StartNew();
+        lock (this.gate)
+        {
+            while (!condition())
+            {
+                var left = timeout - clock.Elapsed;
+                if (left <= TimeSpan.Zero)
+                    return false;
+                Monitor.Wait(this.gate, left);
+            }
+        }
+
+        return true;
     }
 
     /// <summary>
@@ -641,6 +709,7 @@ internal sealed class IbkrTrader
                 {
                     killed = order with { Status = neverAcknowledged ? "Inactive" : "Cancelled", UpdatedUtc = DateTime.UtcNow };
                     this.orders[id] = killed;
+                    Monitor.PulseAll(this.gate);
                 }
             }
         }
@@ -669,6 +738,7 @@ internal sealed class IbkrTrader
             if (updated == order with { UpdatedUtc = updated.UpdatedUtc })
                 return;
             this.orders[id] = updated;
+            Monitor.PulseAll(this.gate);
         }
 
         Log.Info($"[trade] order {id} {updated.Status}, filled {updated.Filled} of {updated.Quantity}{(updated.Filled > 0 ? $" at {updated.AvgFillPrice}" : "")}");
@@ -721,6 +791,7 @@ internal sealed class IbkrTrader
             gone = this.orders.Values.Where(o => !o.IsDone && !this.ordersSeen.Contains(o.Id) && o.Status != "PendingSubmit").ToList();
             foreach (var order in gone)
                 this.orders[order.Id] = order with { Status = GoneStatus, UpdatedUtc = DateTime.UtcNow };
+            Monitor.PulseAll(this.gate);
         }
 
         foreach (var order in gone)
@@ -743,6 +814,9 @@ internal sealed class IbkrTrader
             if (this.fills.ContainsKey(fill.ExecId))
                 return;
             this.fills[fill.ExecId] = fill;
+            if (At(f, 1) == "-1")
+                this.liveFillHeard[fill.Symbol] = Stopwatch.GetTimestamp();
+            Monitor.PulseAll(this.gate);
         }
 
         Log.Info($"[trade] fill {fill.Symbol} {(fill.Buy ? "bought" : "sold")} {fill.Shares} at {fill.Price}, order {fill.OrderId}");
@@ -776,6 +850,8 @@ internal sealed class IbkrTrader
         lock (this.gate)
         {
             this.positionsSeen.Add(key);
+            this.positionHeard[position.Symbol] = Stopwatch.GetTimestamp();
+            Monitor.PulseAll(this.gate);
             if (this.positions.TryGetValue(key, out var known) && known == position)
                 return;
             this.positions[key] = position;

@@ -20,6 +20,15 @@ internal sealed record OrderHotkey(string Keys, bool Buy, double Shares, double 
     /// <summary>The most the offset goes through the quote, whatever the price: 15 cents (your request, 2026-11-19, after 20), so from $6 up.</summary>
     public const double MaxOffset = 0.15;
 
+    /// <summary>
+    /// How long a position key waits for IBKR to confirm the cancels of the stock's working orders on the other side
+    /// before sending anyway. On paper, IBKR's own cancels of orders 101 and 394 went from pending to done in 16-27 ms.
+    /// </summary>
+    public static readonly TimeSpan CancelWait = TimeSpan.FromSeconds(1);
+
+    /// <summary>Then how long it waits for IBKR's position to count those orders' last fills before going by the one it has.</summary>
+    public static readonly TimeSpan PositionWait = TimeSpan.FromMilliseconds(500);
+
     /// <summary>Alt+1: buy 1,000 shares, limit at the ask plus 2.5%, immediate or cancel (your requests, 2026-11-18 and 19).</summary>
     public static OrderHotkey BuyAsk { get; } = new("Alt+1", true, 1000, OffsetShare, "IOC");
 
@@ -64,7 +73,9 @@ internal readonly record struct HotkeyQuote(string Symbol, double Bid, double As
 /// ignores outsideRth on an IOC sent to SMART (warning 2109 on every hotkey order that morning), so an IOC wouldn't
 /// work premarket, while a DAY limit does and stays working until it fills or you cancel it. A position key takes its
 /// share of the position as IBKR last said it, never more than the shares not already in working orders on its side,
-/// so presses while earlier ones are working can't go past it.
+/// so presses while earlier ones are working can't go past it. Before that it cancels the stock's working orders on
+/// the other side (your choice, 2026-11-19): IBKR reprices an order so it doesn't cross your own resting one, so a
+/// Shift+Z while an Alt+1 was still filling on paper died unfilled (LVWR order 394).
 /// </summary>
 internal static class OrderHotkeys
 {
