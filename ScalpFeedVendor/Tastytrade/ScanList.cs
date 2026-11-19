@@ -108,7 +108,10 @@ internal sealed class ScanList(string name, bool logEachChange, ChartedSymbols c
             if (this.Make != null && !this.Make(name))
                 continue;
 
-            var symbol = Core.Instance.GetSymbol(new GetSymbolRequestParameters { SymbolId = name }, connectionId);
+            // GetSymbol gives null for a stock a Watchlist already had open from the saved layout (POAS, VIVS and
+            // others on 2026-11-19, though they quoted fine), so those are found among the symbols already loaded.
+            var symbol = Core.Instance.GetSymbol(new GetSymbolRequestParameters { SymbolId = name }, connectionId)
+                ?? Core.Instance.Symbols.FirstOrDefault(s => s.ConnectionId == connectionId && (string.Equals(s.Id, name, StringComparison.OrdinalIgnoreCase) || string.Equals(s.Name, name, StringComparison.OrdinalIgnoreCase)));
             if (symbol == null)
                 lost.Add(name);
             else if (symbol.SymbolType != SymbolType.ETF || !this.scan.Contains(name, StringComparer.OrdinalIgnoreCase))
