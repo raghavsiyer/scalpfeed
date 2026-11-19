@@ -11,25 +11,25 @@ namespace ScalpFeedVendor.Feed;
 internal sealed record OrderHotkey(string Keys, bool Buy, double Shares, double Offset, string Tif, double OfPosition = 0)
 {
     /// <summary>
-    /// How far through the quote every key's limit goes: 5% of the price (your choice, 2026-11-19). It was 10 cents,
-    /// which on VIVS at $0.25 was 40% past the ask, and IBKR refused each such buy ("We cannot accept an order at a
-    /// limit price at or more aggressive than 0.2752686", about 8% past it). You asked for 10%, which is past that too.
+    /// How far through the quote every key's limit goes: 2.5% of the price (your choice, 2026-11-19, after 5% the
+    /// same day). It was 10 cents, which on VIVS at $0.25 was 40% past the ask, and IBKR refused each such buy ("We
+    /// cannot accept an order at a limit price at or more aggressive than 0.2752686", about 8% past it).
     /// </summary>
-    public const double OffsetShare = 0.05;
+    public const double OffsetShare = 0.025;
 
-    /// <summary>The most the offset goes through the quote, whatever the price: 20 cents (your request, 2026-11-19), so from $4 up.</summary>
+    /// <summary>The most the offset goes through the quote, whatever the price: 20 cents (your request, 2026-11-19), so from $8 up.</summary>
     public const double MaxOffset = 0.20;
 
-    /// <summary>Alt+1: buy 1,000 shares, limit at the ask plus 5%, immediate or cancel (your requests, 2026-11-18 and 19).</summary>
+    /// <summary>Alt+1: buy 1,000 shares, limit at the ask plus 2.5%, immediate or cancel (your requests, 2026-11-18 and 19).</summary>
     public static OrderHotkey BuyAsk { get; } = new("Alt+1", true, 1000, OffsetShare, "IOC");
 
     /// <summary>Alt+2: buy 2,000 shares, otherwise as Alt+1 (your request, 2026-11-18).</summary>
     public static OrderHotkey BuyTwoThousand { get; } = new("Alt+2", true, 2000, OffsetShare, "IOC");
 
-    /// <summary>Shift+Z: sell the whole position, limit at the bid minus 5%, immediate or cancel (your request, 2026-11-18).</summary>
+    /// <summary>Shift+Z: sell the whole position, limit at the bid minus 2.5%, immediate or cancel (your request, 2026-11-18).</summary>
     public static OrderHotkey SellAll { get; } = new("Shift+Z", false, 0, OffsetShare, "IOC", OfPosition: 1);
 
-    /// <summary>Shift+X: sell half the position, limit at the bid minus 5%, immediate or cancel (your request, 2026-11-18).</summary>
+    /// <summary>Shift+X: sell half the position, limit at the bid minus 2.5%, immediate or cancel (your request, 2026-11-18).</summary>
     public static OrderHotkey SellHalf { get; } = new("Shift+X", false, 0, OffsetShare, "IOC", OfPosition: 0.5);
 
     /// <summary>"the whole position", "half the position", or the shares.</summary>

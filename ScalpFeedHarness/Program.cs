@@ -1376,10 +1376,10 @@ async Task RunHotkey()
     var alt1 = OrderHotkey.BuyAsk;
     var shiftZ = OrderHotkey.SellAll;
     var shiftX = OrderHotkey.SellHalf;
-    Check(alt1 is { Keys: "Alt+1", Buy: true, Shares: 1000, Offset: 0.05, Tif: "IOC", OfPosition: 0 }, "Alt+1 buys 1,000 shares at the ask plus 5%, immediate or cancel");
-    Check(shiftZ is { Keys: "Shift+Z", Buy: false, Offset: 0.05, Tif: "IOC", OfPosition: 1 }, "Shift+Z sells the whole position at the bid minus 5%, immediate or cancel");
-    Check(shiftX is { Keys: "Shift+X", Buy: false, Offset: 0.05, Tif: "IOC", OfPosition: 0.5 }, "Shift+X sells half the position at the bid minus 5%, immediate or cancel");
-    Check(alt1.Describe() == "buy 1,000 shares, IOC (DAY outside 9:30-16:00 ET) limit at the ask plus 5%, at most 0.20" && shiftZ.Size() == "the whole position" && shiftX.Size() == "half the position",
+    Check(alt1 is { Keys: "Alt+1", Buy: true, Shares: 1000, Offset: 0.025, Tif: "IOC", OfPosition: 0 }, "Alt+1 buys 1,000 shares at the ask plus 2.5%, immediate or cancel");
+    Check(shiftZ is { Keys: "Shift+Z", Buy: false, Offset: 0.025, Tif: "IOC", OfPosition: 1 }, "Shift+Z sells the whole position at the bid minus 2.5%, immediate or cancel");
+    Check(shiftX is { Keys: "Shift+X", Buy: false, Offset: 0.025, Tif: "IOC", OfPosition: 0.5 }, "Shift+X sells half the position at the bid minus 2.5%, immediate or cancel");
+    Check(alt1.Describe() == "buy 1,000 shares, IOC (DAY outside 9:30-16:00 ET) limit at the ask plus 2.5%, at most 0.20" && shiftZ.Size() == "the whole position" && shiftX.Size() == "half the position",
         $"each says what it does ({alt1.Describe()}; {shiftZ.Describe()}; {shiftX.Describe()})");
 
     // IOC in the regular session, DAY outside it: IBKR ignores outsideRth on a SMART IOC (warning 2109, 11-18).
@@ -1392,14 +1392,14 @@ async Task RunHotkey()
         "DAY premarket (4:00 ET as well as 9:29) and from 16:00 after hours");
     Check(OrderHotkeys.TifAt(alt1, Utc(21, 15, 0)) == "DAY", "DAY all weekend, so nothing sits there as an IOC that can't fill");
     Check(OrderHotkeys.TifAt(alt1 with { Tif = "GTC" }, Utc(18, 9, 0)) == "GTC", "a key that isn't IOC keeps its own time in force");
-    Check(OrderHotkeys.LimitPrice(0.8804, 0.05) == 0.9244 && OrderHotkeys.LimitPrice(3.80, 0.05) == 3.99 && OrderHotkeys.LimitPrice(4.00, 0.05) == 4.20,
-        "the limit is the ask plus 5%: 0.8804 makes 0.9244, 3.80 makes 3.99, 4.00 makes 4.20");
-    Check(OrderHotkeys.LimitPrice(5.23, 0.05) == 5.43 && OrderHotkeys.LimitPrice(100, 0.05) == 100.20 && OrderHotkeys.LimitPrice(100, -0.05) == 99.80,
-        "but never more than 20 cents through: 5.23 makes 5.43, 100 makes 100.20 to buy and 99.80 to sell");
-    Check(OrderHotkeys.LimitPrice(0.99995, 0.05) == 1.05 && OrderHotkeys.LimitPrice(0.123456, 0.05) == 0.1296 && OrderHotkeys.LimitPrice(3.80, -0.05) == 3.61,
+    Check(OrderHotkeys.LimitPrice(0.8804, 0.025) == 0.9024 && OrderHotkeys.LimitPrice(4.00, 0.025) == 4.10 && OrderHotkeys.LimitPrice(8.00, 0.025) == 8.20,
+        "the limit is the ask plus 2.5%: 0.8804 makes 0.9024, 4.00 makes 4.10, 8.00 makes 8.20");
+    Check(OrderHotkeys.LimitPrice(10, 0.025) == 10.20 && OrderHotkeys.LimitPrice(100, 0.025) == 100.20 && OrderHotkeys.LimitPrice(100, -0.025) == 99.80,
+        "but never more than 20 cents through: 10 makes 10.20, 100 makes 100.20 to buy and 99.80 to sell");
+    Check(OrderHotkeys.LimitPrice(0.99995, 0.025) == 1.02 && OrderHotkeys.LimitPrice(0.123456, 0.025) == 0.1265 && OrderHotkeys.LimitPrice(4.00, -0.025) == 3.90,
         "rounded to IBKR's tick: a cent from a dollar, a hundredth of a cent below; and minus for a sell");
-    Check(OrderHotkeys.LimitPrice(0.2547, 0.05) == 0.2674 && OrderHotkeys.LimitPrice(0.2547, 0.05) < 0.2752686,
-        "VIVS's ask of 0.2547 makes 0.2674, inside the 0.2752686 IBKR said was the most it would take (10 cents made 0.3547)");
+    Check(OrderHotkeys.LimitPrice(0.2547, 0.025) == 0.2611 && OrderHotkeys.LimitPrice(0.2547, 0.025) < 0.2752686,
+        "VIVS's ask of 0.2547 makes 0.2611, inside the 0.2752686 IBKR said was the most it would take (10 cents made 0.3547)");
 
     Check(OrderHotkeys.TryParseKeys("Alt+1", out uint m, out uint vk) && m == HotkeyListener.Alt && vk == '1', $"Alt+1 is Alt and the 1 key ({m:X}, {vk:X})");
     Check(OrderHotkeys.TryParseKeys("Shift+Z", out m, out vk) && m == HotkeyListener.Shift && vk == 'Z', "Shift+Z is Shift and the Z key");
@@ -1409,15 +1409,15 @@ async Task RunHotkey()
 
     var svre = new HotkeyQuote("SVRE", 0.8803, 0.8804, false);
     var (ticket, quote, problem) = OrderHotkeys.Decide(alt1, [svre], rth);
-    Check(problem == null && ticket == new IbkrOrderTicket("SVRE", true, 1000, "LMT", 0.9244, double.NaN, "IOC") && quote == 0.8804,
-        $"Alt+1, one depth open: buy 1,000 SVRE, IOC limit 0.9244 ({ticket})");
-    Check(OrderHotkeys.Decide(alt1, [svre], Utc(18, 12, 0)).Ticket == new IbkrOrderTicket("SVRE", true, 1000, "LMT", 0.9244, double.NaN, "DAY"),
+    Check(problem == null && ticket == new IbkrOrderTicket("SVRE", true, 1000, "LMT", 0.9024, double.NaN, "IOC") && quote == 0.8804,
+        $"Alt+1, one depth open: buy 1,000 SVRE, IOC limit 0.9024 ({ticket})");
+    Check(OrderHotkeys.Decide(alt1, [svre], Utc(18, 12, 0)).Ticket == new IbkrOrderTicket("SVRE", true, 1000, "LMT", 0.9024, double.NaN, "DAY"),
         "the same press at 7:00 ET premarket sends a DAY limit");
     var alt2 = OrderHotkey.BuyTwoThousand;
-    Check(alt2 is { Keys: "Alt+2", Buy: true, Shares: 2000, Offset: 0.05, Tif: "IOC", OfPosition: 0 }, "Alt+2 buys 2,000 shares at the ask plus 5%, immediate or cancel");
+    Check(alt2 is { Keys: "Alt+2", Buy: true, Shares: 2000, Offset: 0.025, Tif: "IOC", OfPosition: 0 }, "Alt+2 buys 2,000 shares at the ask plus 2.5%, immediate or cancel");
     Check(OrderHotkeys.TryParseKeys("Alt+2", out m, out vk) && m == HotkeyListener.Alt && vk == '2', "Alt+2 is Alt and the 2 key");
-    Check(OrderHotkeys.Decide(alt2, [svre], rth).Ticket == new IbkrOrderTicket("SVRE", true, 2000, "LMT", 0.9244, double.NaN, "IOC"),
-        "Alt+2, one depth open: buy 2,000 SVRE, IOC limit 0.9244");
+    Check(OrderHotkeys.Decide(alt2, [svre], rth).Ticket == new IbkrOrderTicket("SVRE", true, 2000, "LMT", 0.9024, double.NaN, "IOC"),
+        "Alt+2, one depth open: buy 2,000 SVRE, IOC limit 0.9024");
     Check(OrderHotkeys.Decide(alt1, []).Problem?.Contains("no market depth") == true, "no depth open: nothing, and says so");
     var two = OrderHotkeys.Decide(alt1, [svre, new HotkeyQuote("CRMN", 1.20, 1.21, false)]);
     Check(two.Ticket == null && two.Problem.Contains("SVRE, CRMN"), $"two depths open: nothing, naming them ({two.Problem})");
@@ -1427,8 +1427,8 @@ async Task RunHotkey()
 
     var held = svre with { Position = 1500 };
     var all = OrderHotkeys.Decide(shiftZ, [held], rth);
-    Check(all.Problem == null && all.Ticket == new IbkrOrderTicket("SVRE", false, 1500, "LMT", 0.8363, double.NaN, "IOC") && all.Quote == 0.8803,
-        $"Shift+Z holding 1,500: sell 1,500 SVRE, IOC limit at the bid 0.8803 minus 5% ({all.Ticket})");
+    Check(all.Problem == null && all.Ticket == new IbkrOrderTicket("SVRE", false, 1500, "LMT", 0.8583, double.NaN, "IOC") && all.Quote == 0.8803,
+        $"Shift+Z holding 1,500: sell 1,500 SVRE, IOC limit at the bid 0.8803 minus 2.5% ({all.Ticket})");
     Check(OrderHotkeys.Decide(shiftZ, [held with { WorkingSells = 500 }]).Ticket?.Quantity == 1000, "shares already in working sells are left out");
     Check(OrderHotkeys.Decide(shiftZ, [held with { WorkingSells = 1500 }]).Problem?.Contains("already in working sell orders") == true,
         "with the whole position already in working sells: nothing, so a second press can't go short");
@@ -1437,12 +1437,12 @@ async Task RunHotkey()
     Check(OrderHotkeys.Decide(shiftZ, [held with { WorkingBuys = 1000 }]).Ticket?.Quantity == 1500, "working buys don't change what's sold");
     Check(OrderHotkeys.Decide(shiftZ, [held with { Bid = -1 }]).Problem?.Contains("no IBKR bid") == true && OrderHotkeys.Decide(shiftZ, [held with { Halted = true }]).Ticket == null,
         "no bid, or halted: nothing");
-    Check(OrderHotkeys.Decide(shiftZ, [held with { Bid = 0.05 }]).Ticket?.LimitPrice == 0.0475, "a bid of 5 cents sells at 0.0475: 5% off never takes a limit to 0, as 10 cents off did");
+    Check(OrderHotkeys.Decide(shiftZ, [held with { Bid = 0.08 }]).Ticket?.LimitPrice == 0.078, "a bid of 8 cents sells at 0.078: a share off never takes a limit to 0, as 10 cents off did");
 
     var half = OrderHotkeys.Decide(shiftX, [held], rth);
     Check(OrderHotkeys.Decide(shiftX, [held], Utc(18, 22, 0)).Ticket?.Tif == "DAY", "Shift+X after hours sends DAY too");
-    Check(half.Problem == null && half.Ticket == new IbkrOrderTicket("SVRE", false, 750, "LMT", 0.8363, double.NaN, "IOC"),
-        $"Shift+X holding 1,500: sell 750 SVRE, IOC limit at the bid minus 5% ({half.Ticket})");
+    Check(half.Problem == null && half.Ticket == new IbkrOrderTicket("SVRE", false, 750, "LMT", 0.8583, double.NaN, "IOC"),
+        $"Shift+X holding 1,500: sell 750 SVRE, IOC limit at the bid minus 2.5% ({half.Ticket})");
     Check(OrderHotkeys.Decide(shiftX, [svre with { Position = 1001 }]).Ticket?.Quantity == 500, "half of an odd position rounds down: 1,001 sells 500");
     Check(OrderHotkeys.Decide(shiftX, [held with { WorkingSells = 1000 }]).Ticket?.Quantity == 500,
         "never more than the shares not already being sold: 1,500 held with 1,000 in working sells sells 500");
