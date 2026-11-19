@@ -74,8 +74,11 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
     private readonly ScanList topGainers = new("IBKR Top Gainers", logEachChange: false, new ChartedSymbols());
     private readonly ScanList halts = new("IBKR Halts", logEachChange: true);
 
-    /// <summary>The Quote asset volume column shows the day's dollar volume in hundreds: $15.0M reads 150,126.</summary>
-    private const double DollarVolumeUnit = 100;
+    /// <summary>
+    /// The Volume and Quote asset volume columns show the day's shares and dollars in millions, to 3 decimals (your
+    /// choice, 2026-11-19): 700,000 shares reads 0.700, $15.0M reads 15.013. A Watchlist column takes only numbers.
+    /// </summary>
+    private const double Million = 1e6;
     private System.Threading.Timer flushTimer;
     private System.Threading.Timer housekeepingTimer;
     private CancellationTokenSource lifetime;
@@ -809,7 +812,7 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
         if (!double.IsNaN(state.PrevClose))
             bar.PreviousClose = state.PrevClose;
         if (!double.IsNaN(state.DayVolume))
-            bar.Volume = state.DayVolume;
+            bar.Volume = Math.Round(state.DayVolume / Million, 3);
 
         if (!double.IsNaN(state.LastPrice))
         {
@@ -829,8 +832,7 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
 
         // Quantower's Free version runs no indicators in a Watchlist, so these go in columns that stocks leave
         // empty: the float, in shares, as open interest; RVOL as the previous settlement, where it reads as a plain
-        // number; and the day's dollar volume, in hundreds of dollars (your choice, 2026-11-16), as the quote asset
-        // volume. Blank when the float is unknown or doubtful (FloatFacts), or there's no average yet (VolumeAverages).
+        // number; and the day's dollar volume, in millions (Million), as the quote asset volume. Blank when the float is unknown or doubtful (FloatFacts), or there's no average yet (VolumeAverages).
         if (this.floats?.Get(state.Id) is { Known: true, Doubtful: false } facts)
             bar.OpenInterest = facts.Float;
 
@@ -841,7 +843,7 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
         }
 
         if (state.DayTurnover > 0)
-            bar.QuoteAssetVolume = Math.Round(state.DayTurnover / DollarVolumeUnit);
+            bar.QuoteAssetVolume = Math.Round(state.DayTurnover / Million, 3);
 
         // During a halt, what the depth's Res row shows (your request, 2026-11-17): the reopening auction's price as
         // the mark price and the seconds until the reopening as the mark size, for the IBKR Halts list. Each blank
