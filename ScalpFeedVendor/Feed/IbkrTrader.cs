@@ -39,7 +39,11 @@ internal sealed record IbkrOrderTicket(string Symbol, bool Buy, double Quantity,
 
 internal sealed record IbkrPosition(string Account, string Symbol, double Quantity, double AvgCost);
 
-internal sealed record IbkrFill(string ExecId, int OrderId, string Account, string Symbol, bool Buy, double Shares, double Price, DateTime TimeUtc, double Commission);
+/// <param name="RealizedPnl">
+/// IBKR's realized P&amp;L for a fill that closed shares, after commissions, from its commission report; NaN for one
+/// that opened or added (IBKR sends the largest double then), or before the report comes in.
+/// </param>
+internal sealed record IbkrFill(string ExecId, int OrderId, string Account, string Symbol, bool Buy, double Shares, double Price, DateTime TimeUtc, double Commission, double RealizedPnl = double.NaN);
 
 internal interface ITraderSink
 {
@@ -753,7 +757,7 @@ internal sealed class IbkrTrader
         {
             if (!this.fills.TryGetValue(At(f, 2), out var fill))
                 return;
-            updated = fill with { Commission = Dbl(At(f, 3)) };
+            updated = fill with { Commission = Dbl(At(f, 3)), RealizedPnl = Reported(Dbl(At(f, 5))) };
             this.fills[fill.ExecId] = updated;
         }
 
@@ -814,6 +818,9 @@ internal sealed class IbkrTrader
     private static string At(string[] f, int i) => i < f.Length ? f[i] : "";
 
     private static int Int(string text) => int.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out int value) ? value : -1;
+
+    /// <summary>IBKR's number, or NaN for its "not set" (the largest double, 1.7976931348623157E308).</summary>
+    internal static double Reported(double value) => Math.Abs(value) > 1e300 ? double.NaN : value;
 
     private static double Dbl(string text) => double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out double value) ? value : double.NaN;
 

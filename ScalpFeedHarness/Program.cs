@@ -1077,6 +1077,13 @@ async Task RunTrader()
     Check(fill is { Buy: true, Shares: 100, Price: 3.45, Commission: 1.0, OrderId: 101 } && fill.TimeUtc == new DateTime(2026, 11, 11, 18, 45, 0, DateTimeKind.Utc), $"the fill has its commission and IBKR's time ({fill})");
     Check(trader.Positions() is [{ Symbol: "NXXT", Quantity: 100, AvgCost: 3.46 }], "the position is IBKR's");
     Check(sink.Accounts.Any(a => a.Account == "DU000000" && a.Values.GetValueOrDefault("NetLiquidation") == "1000000.00"), "the account's values reach the sink");
+    Check(double.IsNaN(fill.RealizedPnl), "a buy that opened has no realized P&L (IBKR sends the largest double for it)");
+    gateway.Send("11", "-1", "101", "0", "NXXT", "STK", "", "0", "", "", "ISLAND", "USD", "NXXT", "NMS", "0001.02", "20261111 13:50:00 US/Eastern", "DU000000", "ISLAND", "SLD", "100", "3.60", "123", "79", "0", "100", "3.60", "", "", "", "", "1");
+    gateway.Send("59", "1", "0001.02", "1.0", "USD", "13.0", "1.7976931348623157E308", "");
+    await WaitFor(() => trader.Fills().Any(f => f.ExecId == "0001.02" && f.Commission == 1.0));
+    var closing = trader.Fills().First(f => f.ExecId == "0001.02");
+    Check(closing is { Buy: false, Shares: 100, Price: 3.60, Commission: 1.0, RealizedPnl: 13.0 }, $"a sell that closed has IBKR's realized P&L, after commissions ({closing})");
+    Check(IbkrTrader.Reported(1.7976931348623157E308) is double.NaN && IbkrTrader.Reported(-42.5) == -42.5, "IBKR's 'not set' reads as no number; a loss reads as itself");
 
     var (id2, _) = trader.Place(new IbkrOrderTicket("NXXT", false, 100, "LMT", 3.60, double.NaN, "DAY"));
     gateway.Send("3", id2.ToString(CultureInfo.InvariantCulture), "Submitted", "0", "100", "0", "124", "0", "0", "79", "", "0");

@@ -312,18 +312,35 @@ internal sealed class PaperTrading : ITraderSink
     private static double Value(IReadOnlyDictionary<string, string> values, string tag) =>
         values.TryGetValue(tag, out var text) && double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out double value) ? value : 0;
 
-    private MessageTrade TradeMessage(IbkrFill f) => new()
+    /// <summary>
+    /// A fill as a Quantower trade, with its P&amp;L when it closed shares (your report, 2026-11-19: paper trades showed
+    /// no P&amp;L, as only the commission was sent): net is IBKR's realized P&amp;L, after commissions, and gross adds
+    /// this fill's commission back. A fill that opened or added has none.
+    /// </summary>
+    private MessageTrade TradeMessage(IbkrFill f)
     {
-        TradeId = f.ExecId,
-        SymbolId = this.SymbolId(f.Symbol),
-        AccountId = f.Account,
-        OrderId = f.OrderId.ToString(CultureInfo.InvariantCulture),
-        DateTime = f.TimeUtc,
-        Side = f.Buy ? Side.Buy : Side.Sell,
-        Price = f.Price,
-        Quantity = f.Shares,
-        Fee = new PnLItem { AssetID = Usd, Value = double.IsNaN(f.Commission) ? 0 : -f.Commission },
-    };
+        double fee = double.IsNaN(f.Commission) ? 0 : f.Commission;
+        var trade = new MessageTrade
+        {
+            TradeId = f.ExecId,
+            SymbolId = this.SymbolId(f.Symbol),
+            AccountId = f.Account,
+            OrderId = f.OrderId.ToString(CultureInfo.InvariantCulture),
+            DateTime = f.TimeUtc,
+            Side = f.Buy ? Side.Buy : Side.Sell,
+            Price = f.Price,
+            Quantity = f.Shares,
+            Fee = new PnLItem { AssetID = Usd, Value = -fee },
+        };
+
+        if (!double.IsNaN(f.RealizedPnl))
+        {
+            trade.NetPnl = new PnLItem { AssetID = Usd, Value = f.RealizedPnl };
+            trade.GrossPnl = new PnLItem { AssetID = Usd, Value = f.RealizedPnl + fee };
+        }
+
+        return trade;
+    }
 
     private string WaitForAccount()
     {
