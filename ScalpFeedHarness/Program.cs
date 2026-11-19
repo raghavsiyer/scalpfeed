@@ -1379,7 +1379,7 @@ async Task RunHotkey()
     Check(alt1 is { Keys: "Alt+1", Buy: true, Shares: 1000, Offset: 0.025, Tif: "IOC", OfPosition: 0 }, "Alt+1 buys 1,000 shares at the ask plus 2.5%, immediate or cancel");
     Check(shiftZ is { Keys: "Shift+Z", Buy: false, Offset: 0.025, Tif: "IOC", OfPosition: 1 }, "Shift+Z sells the whole position at the bid minus 2.5%, immediate or cancel");
     Check(shiftX is { Keys: "Shift+X", Buy: false, Offset: 0.025, Tif: "IOC", OfPosition: 0.5 }, "Shift+X sells half the position at the bid minus 2.5%, immediate or cancel");
-    Check(alt1.Describe() == "buy 1,000 shares, IOC (DAY outside 9:30-16:00 ET) limit at the ask plus 2.5%, at most 0.20" && shiftZ.Size() == "the whole position" && shiftX.Size() == "half the position",
+    Check(alt1.Describe() == "buy 1,000 shares, IOC (DAY outside 9:30-16:00 ET) limit at the ask plus 2.5%, at most 0.15" && shiftZ.Size() == "the whole position" && shiftX.Size() == "half the position",
         $"each says what it does ({alt1.Describe()}; {shiftZ.Describe()}; {shiftX.Describe()})");
 
     // IOC in the regular session, DAY outside it: IBKR ignores outsideRth on a SMART IOC (warning 2109, 11-18).
@@ -1392,10 +1392,10 @@ async Task RunHotkey()
         "DAY premarket (4:00 ET as well as 9:29) and from 16:00 after hours");
     Check(OrderHotkeys.TifAt(alt1, Utc(21, 15, 0)) == "DAY", "DAY all weekend, so nothing sits there as an IOC that can't fill");
     Check(OrderHotkeys.TifAt(alt1 with { Tif = "GTC" }, Utc(18, 9, 0)) == "GTC", "a key that isn't IOC keeps its own time in force");
-    Check(OrderHotkeys.LimitPrice(0.8804, 0.025) == 0.9024 && OrderHotkeys.LimitPrice(4.00, 0.025) == 4.10 && OrderHotkeys.LimitPrice(8.00, 0.025) == 8.20,
-        "the limit is the ask plus 2.5%: 0.8804 makes 0.9024, 4.00 makes 4.10, 8.00 makes 8.20");
-    Check(OrderHotkeys.LimitPrice(10, 0.025) == 10.20 && OrderHotkeys.LimitPrice(100, 0.025) == 100.20 && OrderHotkeys.LimitPrice(100, -0.025) == 99.80,
-        "but never more than 20 cents through: 10 makes 10.20, 100 makes 100.20 to buy and 99.80 to sell");
+    Check(OrderHotkeys.LimitPrice(0.8804, 0.025) == 0.9024 && OrderHotkeys.LimitPrice(4.00, 0.025) == 4.10 && OrderHotkeys.LimitPrice(6.00, 0.025) == 6.15,
+        "the limit is the ask plus 2.5%: 0.8804 makes 0.9024, 4.00 makes 4.10, 6.00 makes 6.15");
+    Check(OrderHotkeys.LimitPrice(10, 0.025) == 10.15 && OrderHotkeys.LimitPrice(100, 0.025) == 100.15 && OrderHotkeys.LimitPrice(100, -0.025) == 99.85,
+        "but never more than 15 cents through: 10 makes 10.15, 100 makes 100.15 to buy and 99.85 to sell");
     Check(OrderHotkeys.LimitPrice(0.99995, 0.025) == 1.02 && OrderHotkeys.LimitPrice(0.123456, 0.025) == 0.1265 && OrderHotkeys.LimitPrice(4.00, -0.025) == 3.90,
         "rounded to IBKR's tick: a cent from a dollar, a hundredth of a cent below; and minus for a sell");
     Check(OrderHotkeys.LimitPrice(0.2547, 0.025) == 0.2611 && OrderHotkeys.LimitPrice(0.2547, 0.025) < 0.2752686,

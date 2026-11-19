@@ -17,8 +17,8 @@ internal sealed record OrderHotkey(string Keys, bool Buy, double Shares, double 
     /// </summary>
     public const double OffsetShare = 0.025;
 
-    /// <summary>The most the offset goes through the quote, whatever the price: 20 cents (your request, 2026-11-19), so from $8 up.</summary>
-    public const double MaxOffset = 0.20;
+    /// <summary>The most the offset goes through the quote, whatever the price: 15 cents (your request, 2026-11-19, after 20), so from $6 up.</summary>
+    public const double MaxOffset = 0.15;
 
     /// <summary>Alt+1: buy 1,000 shares, limit at the ask plus 2.5%, immediate or cancel (your requests, 2026-11-18 and 19).</summary>
     public static OrderHotkey BuyAsk { get; } = new("Alt+1", true, 1000, OffsetShare, "IOC");
@@ -124,7 +124,7 @@ internal static class OrderHotkeys
     }
 
     /// <summary>
-    /// The quote plus the offset, a share of it (minus for a sell) but never more than 20 cents (OrderHotkey.MaxOffset),
+    /// The quote plus the offset, a share of it (minus for a sell) but never more than 15 cents (OrderHotkey.MaxOffset),
     /// on IBKR's tick for stocks: $0.01 from a dollar, $0.0001 below.
     /// </summary>
     public static double LimitPrice(double quote, double offset)
