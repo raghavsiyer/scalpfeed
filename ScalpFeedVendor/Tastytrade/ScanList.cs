@@ -19,6 +19,7 @@ internal sealed class ScanList(string name, bool logEachChange, ChartedSymbols c
     private IReadOnlyList<string> scan = [];
     private bool logged;
     private string lostLogged;
+    private string chartedLogged;
 
     public string Name { get; } = name;
 
@@ -44,7 +45,11 @@ internal sealed class ScanList(string name, bool logEachChange, ChartedSymbols c
             return;
 
         lock (this.gate)
+        {
+            if (!this.scan.Contains(symbol, StringComparer.OrdinalIgnoreCase))
+                Log.Info($"[scan] {this.Name}: {symbol} opened in a chart, so it goes after the scan's rows");
             this.Queue();
+        }
     }
 
     private void Queue()
@@ -133,6 +138,12 @@ internal sealed class ScanList(string name, bool logEachChange, ChartedSymbols c
 
         // The gainers change every 30 seconds or so, so only the first of each connection and each remaking go in
         // the log; the halts list changes seldom, and each change is worth a line.
+        // A charted stock's arrival is worth a line too, with how many rows the list now has.
+        var chartedNow = charted?.Today(FloatFacts.DayOf(DateTime.UtcNow)) ?? [];
+        string added = string.Join(" ", symbols.Select(s => s.Name).Where(n => chartedNow.Contains(n, StringComparer.OrdinalIgnoreCase) && !this.scan.Contains(n, StringComparer.OrdinalIgnoreCase)));
+        if (added.Length > 0 && added != this.chartedLogged)
+            Log.Info($"[scan] {this.Name}: {symbols.Count} rows, with {added} from charts");
+        this.chartedLogged = added;
         if (logEachChange || !this.logged || !exists)
             Log.Info($"[scan] {this.Name}: {symbols.Count} stocks of {names.Count} rows{(symbols.Count > 0 ? ", " : "")}{string.Join(" ", symbols.Take(10).Select(s => s.Name))}{(symbols.Count > 10 ? " ..." : "")}");
         this.logged = true;
