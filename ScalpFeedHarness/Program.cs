@@ -62,9 +62,6 @@ switch (args[0])
     case "ibkrrows":
         await RunIbkrRows(int.Parse(args[1]), int.Parse(args[2]), args[3..]);
         break;
-    case "ticks":
-        await RunTicks();
-        break;
     case "raw":
         using (var rawClient = api())
             Console.WriteLine(Log.Scrub(await rawClient.GetRawAsync(args[1], CancellationToken.None)));
@@ -3079,37 +3076,6 @@ async Task RunIbkrRows(int port, int rows, string[] symbols)
         Console.WriteLine($"problem: {problem}");
 
     await client.StopAsync();
-}
-
-// One tick size per stock (PriceBands.OneTick), so no chart or DOM ladder spans a change of tick size at $1, which
-// crashed Quantower (VIVS, YFOR). Then where VIVS and ANT trade, from tastytrade (read-only).
-async Task RunTicks()
-{
-    TickBand[] stock = [new(1, 0.0001), new(double.PositiveInfinity, 0.01)];
-    Check(PriceBands.TickAt(stock, 0.28) == 0.0001 && PriceBands.TickAt(stock, 0.9999) == 0.0001, "under a dollar the tick is $0.0001");
-    Check(PriceBands.TickAt(stock, 1.0) == 0.01 && PriceBands.TickAt(stock, 95) == 0.01, "from a dollar it's $0.01");
-    Check(PriceBands.TickAt([], 0.5) == 0.0001 && PriceBands.TickAt([], 5) == 0.01, "with no tick sizes from tastytrade, the same shape");
-
-    foreach (double tick in new[] { 0.0001, 0.01 })
-    {
-        var bands = PriceBands.OneTick(tick);
-        bool oneSize = bands.All(b => b.TickSize == tick);
-        bool covers = bands[0].Low == 0 && double.IsPositiveInfinity(bands[^1].High) && bands.Zip(bands.Skip(1)).All(p => p.First.High == p.Second.Low);
-        bool noDollarLine = bands.All(b => b.High != 1.0);
-        Check(oneSize && covers && noDollarLine, $"one size of {tick} from 0 up with no line at $1 ({string.Join(" ", bands.Select(b => $"[{b.Low}-{b.High} {b.TickSize} {b.Decimals}dp]"))})");
-    }
-
-    Check(PriceBands.OneTick(0.0001) is [(0, 0.10, _, 4), (0.10, _, _, 3)] && PriceBands.OneTick(0.01) is [(0, _, _, 2)],
-        "under a dollar: 4 decimals under 10 cents, 3 from there; from a dollar: 2");
-
-    using var client = api();
-    double vivs = await client.GetPriceAsync("VIVS", CancellationToken.None);
-    double ant = await client.GetPriceAsync("ANT", CancellationToken.None);
-    double none = await client.GetPriceAsync("ZZZZZZ", CancellationToken.None);
-    Console.WriteLine($"tastytrade: VIVS {vivs}, ANT {ant}, ZZZZZZ {none}");
-    Check(vivs > 0 && vivs < 1 && PriceBands.TickAt(stock, vivs) == 0.0001, "VIVS trades under a dollar, so $0.0001");
-    Check(ant > 1 && PriceBands.TickAt(stock, ant) == 0.01, "ANT trades over a dollar, so $0.01");
-    Check(double.IsNaN(none), "a ticker tastytrade hasn't got gives no price");
 }
 
 // The last few all-hours daily bars of each symbol, read-only.

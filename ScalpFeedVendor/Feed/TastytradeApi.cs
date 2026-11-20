@@ -147,31 +147,6 @@ internal sealed class TastytradeApi : IDisposable
         return hits;
     }
 
-    /// <summary>
-    /// Where a stock trades now, from tastytrade's REST market data: the last trade, else the mark, else the previous
-    /// close. NaN when none is given. It picks the stock's one tick size (PriceBands.TickAt).
-    /// </summary>
-    public async Task<double> GetPriceAsync(string symbol, CancellationToken ct)
-    {
-        var json = await this.GetJsonAsync("/market-data/by-type?equity=" + Uri.EscapeDataString(symbol), ct).ConfigureAwait(false);
-        if (json["data"]?["items"] is not JsonArray items)
-            return double.NaN;
-
-        foreach (var item in items)
-        {
-            if (!string.Equals((string)item?["symbol"], symbol, StringComparison.OrdinalIgnoreCase))
-                continue;
-            foreach (var field in new[] { "last", "mark", "prev-close" })
-            {
-                double price = ParseDouble((string)item[field]);
-                if (price > 0)
-                    return price;
-            }
-        }
-
-        return double.NaN;
-    }
-
     /// <summary>Raw response for one path, for diagnostics in the test harness.</summary>
     public async Task<string> GetRawAsync(string path, CancellationToken ct) =>
         (await this.GetJsonAsync(path, ct).ConfigureAwait(false)).ToJsonString();

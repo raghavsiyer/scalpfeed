@@ -47,10 +47,6 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
     private static QuoteToken sharedToken;
     private static volatile bool staleNoticeOpen;
 
-    // Each stock's one tick size (PriceBands.OneTick), picked the first time it's looked up and kept until Quantower
-    // restarts, so a symbol sent again (a float arriving, a reconnect) never changes its ticks under an open chart.
-    private static readonly ConcurrentDictionary<string, double> TickBySymbol = new(StringComparer.OrdinalIgnoreCase);
-
     private static readonly IReadOnlyDictionary<string, string[]> LiveFields = new Dictionary<string, string[]>
     {
         ["Quote"] = ["eventType", "eventSymbol", "bidTime", "askTime", "bidPrice", "bidSize", "askPrice", "askSize"],
@@ -324,10 +320,7 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
         try
         {
             var info = this.api.GetEquityAsync(requestParameters.SymbolId, requestParameters.CancellationToken).GetAwaiter().GetResult();
-            if (info == null)
-                return null;
-            this.PickTick(this.api, info, requestParameters.CancellationToken);
-            return this.CreateSymbol(info);
+            return info == null ? null : this.CreateSymbol(info);
         }
         catch (Exception ex) when (ex is TastytradeApiException or HttpRequestException or TaskCanceledException)
         {
@@ -364,7 +357,6 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
                 return false;
             }
 
-            this.PickTick(api, info, cts.Token);
             this.PushMessage(this.CreateSymbol(info));
             return true;
         }
@@ -375,46 +367,6 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
             return false;
         }
     }
-
-    /// <summary>
-    /// The stock's one tick size, from where it trades now (tastytrade's REST market data), the first time it's
-    /// looked up. Without a price from there, where the feed last saw it; with neither, $0.01, which only shows a
-    /// sub-dollar stock's prices in cents, rather than tastytrade's two sizes, which can crash Quantower.
-    /// </summary>
-    private void PickTick(TastytradeApi api, EquityInfo info, CancellationToken ct)
-    {
-        if (TickBySymbol.ContainsKey(info.Symbol))
-            return;
-
-        double price = double.NaN;
-        string from = "its last price";
-        try
-        {
-            price = api.GetPriceAsync(info.Symbol, ct).GetAwaiter().GetResult();
-        }
-        catch (Exception ex) when (ex is TastytradeApiException or HttpRequestException or TaskCanceledException)
-        {
-            Log.Info($"[ticks] {info.Symbol}: no price from tastytrade's market data ({ex.Message})");
-        }
-
-        if (!(price > 0))
-        {
-            var state = this.GetState(info.StreamerSymbol);
-            price = state.LastPrice > 0 ? state.LastPrice : state.PrevClose;
-            from = "the feed";
-        }
-
-        double tick = price > 0 ? PriceBands.TickAt(info.TickBands, price) : 0.01;
-        if (TickBySymbol.TryAdd(info.Symbol, tick))
-            Log.Info(price > 0
-                ? $"[ticks] {info.Symbol}: one tick size of {tick} from {from}, {price}"
-                : $"[ticks] {info.Symbol}: no price to pick a tick size from, so {tick}");
-    }
-
-    /// <summary>The ticks Quantower gets: the stock's one size (PickTick), or $0.01 if it was never picked.</summary>
-    private static List<VariableTick> TicksFor(EquityInfo info) =>
-        PriceBands.OneTick(TickBySymbol.GetOrAdd(info.Symbol, 0.01))
-            .Select(b => new VariableTick(b.Low, b.High, true, b.TickSize, 1, b.Decimals)).ToList();
 
     private MessageSymbol CreateSymbol(EquityInfo info)
     {
@@ -437,7 +389,7 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
             NettingType = NettingType.Undefined,
             QuotingType = SymbolQuotingType.LotSize,
             DeltaCalculationType = DeltaCalculationType.AggressorFlag,
-            VariableTickList = TicksFor(info),
+            VariableTickList = ToVariableTicks(info.TickBands),
             AvailableOptions = AvailableDerivatives.None,
             AvailableFutures = AvailableDerivatives.None,
             LotSize = 1,
@@ -523,6 +475,9 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
             .Where(s => s.DepthOn)
             .Select(s => new HotkeyQuote(IbkrClient.ToIbkrSymbol(s.Streamer), s.IbkrQuotes ? s.IbkrBid : double.NaN, s.IbkrQuotes ? s.IbkrAsk : double.NaN, s.IbkrHalted > 0))
             .ToList();
+
+    private static List<VariableTick> ToVariableTicks(IReadOnlyList<TickBand> bands) =>
+        PriceBands.ForDisplay(bands).Select(b => new VariableTick(b.Low, b.High, true, b.TickSize, 1, b.Decimals)).ToList();
 
     #endregion Symbols
 
