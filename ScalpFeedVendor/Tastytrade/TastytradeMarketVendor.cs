@@ -1081,7 +1081,19 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
             if (!forceNew && token != null && DateTime.UtcNow - token.FetchedUtc < TokenMaxAge)
                 return token;
 
+            if (forceNew && token != null)
+            {
+                // A refused token mustn't come back through the copy kept for the next connection (GetStartupToken),
+                // as it did after 2026-11-19 20:26, if minting a new one fails. How old it was, and whether tastytrade
+                // hands back the same one, say whether its tokens die on their own clock rather than ours.
+                if (sharedToken?.Token == token.Token)
+                    sharedToken = null;
+                Log.Info($"Asking for a new quote token; the last was fetched {(DateTime.UtcNow - token.FetchedUtc).TotalHours:F1} h ago");
+            }
+
             var fresh = await this.api.GetQuoteTokenAsync(ct).ConfigureAwait(false);
+            if (forceNew && token != null && fresh.Token == token.Token)
+                Log.Info("tastytrade returned the same quote token");
             if (token != null && fresh.Level != token.Level)
                 this.PushMessage(MessageDealTicket.CreateInfoDealTicket(Header, $"Feed level changed from {token.Level} to {fresh.Level}."));
 

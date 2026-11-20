@@ -193,6 +193,9 @@ switch (args[0])
     case "refused":
         await RunRefusedCredentials();
         break;
+    case "tokenrefused":
+        await RunTokenRefused();
+        break;
     case "printfilter":
         RunPrintFilter(args[1..]);
         break;
@@ -2801,6 +2804,130 @@ async Task RunConnectRetry()
     Check(ready, "the wait sees a retry that succeeds");
     Check(clock.Elapsed < TimeSpan.FromSeconds(5), "the wait ends when the link is ready, not at its timeout");
     await link.StopAsync();
+}
+
+// A quote token tastytrade no longer accepts, against a stand-in DXLink server. From 2026-11-19 20:26 tastytrade
+// answered the token's AUTH with ERROR UNAUTHORIZED and closed the socket, and the link offered the same token for
+// ten hours. Either way of refusing it has to bring a freshly minted one.
+async Task RunTokenRefused()
+{
+    foreach (bool asError in new[] { true, false })
+    {
+        string how = asError ? "ERROR UNAUTHORIZED, then a closed socket" : "AUTH_STATE UNAUTHORIZED after the AUTH";
+        int port;
+        {
+            var probe = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+            probe.Start();
+            port = ((System.Net.IPEndPoint)probe.LocalEndpoint).Port;
+            probe.Stop();
+        }
+
+        var listener = new System.Net.HttpListener();
+        listener.Prefixes.Add($"http://localhost:{port}/");
+        listener.Start();
+        var offered = new ConcurrentQueue<string>();
+        var server = Task.Run(async () =>
+        {
+            while (listener.IsListening)
+            {
+                System.Net.HttpListenerContext context;
+                try
+                {
+                    context = await listener.GetContextAsync();
+                }
+                catch (Exception ex) when (ex is System.Net.HttpListenerException or ObjectDisposedException or InvalidOperationException)
+                {
+                    break;
+                }
+
+                _ = Task.Run(() => FakeDxLink(context, asError, offered));
+            }
+        });
+
+        var forced = new ConcurrentQueue<bool>();
+        Task<QuoteToken> Token(bool forceNew, CancellationToken ct)
+        {
+            // Unless asked for a new one, the token in hand: the dead one, as the plugin kept doing.
+            forced.Enqueue(forceNew);
+            return Task.FromResult(new QuoteToken(forceNew ? "fresh" : "dead", $"ws://localhost:{port}/", "api", DateTime.UtcNow));
+        }
+
+        var fields = new Dictionary<string, string[]> { ["Quote"] = ["eventType", "eventSymbol", "bidPrice", "askPrice"] };
+        var link = new DxLinkLink("tokenrefused", Token, fields, new CountingSink());
+        var clock = Stopwatch.StartNew();
+        link.Start();
+        bool ready = await link.WaitReadyAsync(TimeSpan.FromSeconds(8), CancellationToken.None);
+        long ms = clock.ElapsedMilliseconds;
+        await link.StopAsync();
+        listener.Stop();
+        listener.Close();
+        await server;
+
+        Console.WriteLine($"{how}: ready={ready} after {ms} ms, tokens offered [{string.Join(", ", offered)}], forceNew asked [{string.Join(", ", forced)}]");
+        Check(ready && ms < 3000, $"{how}: the link is back within a few seconds");
+        Check(offered.SequenceEqual(["dead", "fresh"]), $"{how}: it offers the dead token once, then a fresh one");
+        Check(forced.SequenceEqual([false, true]), $"{how}: it asks for a new token after the refusal, not the same one again");
+    }
+}
+
+// The DXLink handshake, as tastytrade's server plays it, for one connection: any token but "fresh" is refused.
+async Task FakeDxLink(System.Net.HttpListenerContext context, bool refuseWithError, ConcurrentQueue<string> offered)
+{
+    System.Net.WebSockets.WebSocket ws = null;
+    try
+    {
+        ws = (await context.AcceptWebSocketAsync(null)).WebSocket;
+        var buffer = new byte[64 * 1024];
+        Task Send(string json) => ws.SendAsync(Encoding.UTF8.GetBytes(json), WebSocketMessageType.Text, true, CancellationToken.None);
+        while (ws.State == WebSocketState.Open)
+        {
+            var received = await ws.ReceiveAsync(buffer, CancellationToken.None);
+            if (received.MessageType == WebSocketMessageType.Close)
+                break;
+
+            using var message = JsonDocument.Parse(buffer.AsMemory(0, received.Count));
+            var root = message.RootElement;
+            switch (root.GetProperty("type").GetString())
+            {
+                case "SETUP":
+                    await Send("""{"type":"SETUP","channel":0,"keepaliveTimeout":60,"acceptKeepaliveTimeout":60,"version":"stand-in"}""");
+                    await Send("""{"type":"AUTH_STATE","channel":0,"state":"UNAUTHORIZED"}""");
+                    break;
+                case "AUTH":
+                    string token = root.GetProperty("token").GetString();
+                    offered.Enqueue(token);
+                    if (token == "fresh")
+                    {
+                        await Send("""{"type":"AUTH_STATE","channel":0,"state":"AUTHORIZED","userId":"stand-in"}""");
+                    }
+                    else if (refuseWithError)
+                    {
+                        await Send("""{"type":"ERROR","channel":0,"error":"UNAUTHORIZED","message":"Authentication failed"}""");
+                        await ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "Bye", CancellationToken.None);
+                    }
+                    else
+                    {
+                        await Send("""{"type":"AUTH_STATE","channel":0,"state":"UNAUTHORIZED"}""");
+                    }
+
+                    break;
+                case "CHANNEL_REQUEST":
+                    await Send("""{"type":"CHANNEL_OPENED","channel":1,"service":"FEED","parameters":{"contract":"AUTO"}}""");
+                    break;
+                case "FEED_SETUP":
+                    await Send("""{"type":"FEED_CONFIG","channel":1,"dataFormat":"COMPACT","aggregationPeriod":0,"eventFields":{"Quote":["eventType","eventSymbol","bidPrice","askPrice"]}}""");
+                    break;
+            }
+        }
+    }
+    catch (Exception ex) when (ex is WebSocketException or OperationCanceledException or ObjectDisposedException or System.Net.HttpListenerException)
+    {
+        // The client hung up, or the test is over.
+    }
+    finally
+    {
+        ws?.Dispose();
+    }
 }
 
 // Rejected credentials: asked once, then not again, because too many failures can block the IP.

@@ -424,6 +424,19 @@ internal sealed class DxLinkLink
                 break;
 
             case "ERROR":
+                Log.Info($"[{this.name}] {type}: {Clip(text)}");
+                // tastytrade also refuses a token this way: AUTH answered with ERROR UNAUTHORIZED, then the socket
+                // closed. Reconnecting with the same token was refused for ten hours (2026-11-19 20:26 on, after the
+                // PC slept), so it's treated like AUTH_STATE UNAUTHORIZED: reconnect with a freshly minted token.
+                if (root.TryGetProperty("error", out var error) && error.ValueKind == JsonValueKind.String
+                    && error.GetString() == "UNAUTHORIZED")
+                {
+                    this.needNewToken = true;
+                    return "quote token was refused";
+                }
+
+                break;
+
             case "CHANNEL_CLOSED":
                 Log.Info($"[{this.name}] {type}: {Clip(text)}");
                 break;
