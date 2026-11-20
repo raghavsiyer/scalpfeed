@@ -15,11 +15,20 @@ internal static class FeedAlarm
 
     private static readonly (uint Hz, uint Ms)[] AllClearTones = [(600, 120), (900, 180)];
 
+    /// <summary>
+    /// How loud the tones are, as a share of full scale (your request, 2026-11-20: quieter). They used to be Windows'
+    /// Beep, which has no volume; as a sound they also follow Quantower's slider in the Windows volume mixer.
+    /// </summary>
+    public const double Loudness = 0.25;
+
+    private static readonly byte[] WarningSound = ToneWav.Build(WarningTones, Loudness);
+    private static readonly byte[] AllClearSound = ToneWav.Build(AllClearTones, Loudness);
+
     private static readonly object Gate = new();
     private static Timer repeatTimer;
     private static DateTime lastKeepAliveUtc;
     private static int playing;
-    private static bool beepFailureLogged;
+    private static bool soundFailureLogged;
 
     public static TimeSpan RepeatEvery { get; set; } = TimeSpan.FromSeconds(15);
 
@@ -77,9 +86,9 @@ internal static class FeedAlarm
         PlayAllClear();
     }
 
-    public static void PlayWarning() => Play(WarningTones, true);
+    public static void PlayWarning() => Play(WarningSound, true);
 
-    public static void PlayAllClear() => Play(AllClearTones, false);
+    public static void PlayAllClear() => Play(AllClearSound, false);
 
     private static void OnRepeat(object state)
     {
@@ -108,7 +117,7 @@ internal static class FeedAlarm
         }
     }
 
-    private static void Play((uint Hz, uint Ms)[] tones, bool warning)
+    private static void Play(byte[] sound, bool warning)
     {
         var test = TestPlayer;
         if (test != null)
@@ -125,13 +134,11 @@ internal static class FeedAlarm
         {
             try
             {
-                foreach (var (hz, ms) in tones)
+                // Synchronous, so the sound's bytes stay in use only until it has played.
+                if (!PlaySound(sound, IntPtr.Zero, SoundMemory | SoundSync | SoundNoDefault) && !soundFailureLogged)
                 {
-                    if (!Beep(hz, ms) && !beepFailureLogged)
-                    {
-                        beepFailureLogged = true;
-                        Log.Info($"Windows refused to play the alarm tone: error {Marshal.GetLastWin32Error()}");
-                    }
+                    soundFailureLogged = true;
+                    Log.Info($"Windows refused to play the alarm sound: error {Marshal.GetLastWin32Error()}");
                 }
             }
             finally
@@ -141,7 +148,11 @@ internal static class FeedAlarm
         });
     }
 
-    [DllImport("kernel32.dll", SetLastError = true)]
+    private const uint SoundSync = 0x0000;
+    private const uint SoundNoDefault = 0x0002;
+    private const uint SoundMemory = 0x0004;
+
+    [DllImport("winmm.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool Beep(uint frequency, uint duration);
+    private static extern bool PlaySound(byte[] sound, IntPtr module, uint flags);
 }

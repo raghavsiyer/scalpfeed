@@ -3244,6 +3244,24 @@ async Task RunAlarmTest()
     // Late in the day this limit isn't what matters; markets shut is what silences alarms.
     Check(FeedHealth.SilenceLimit(new DateTime(2026, 11, 7, 17, 0, 0, DateTimeKind.Utc)) == null, "Saturday counts as markets shut");
 
+    // The tones as sound (ToneWav), since Windows' Beep has no volume: a quarter of full scale, the same pitches and lengths.
+    (uint, uint)[] tones = [(1000, 150), (700, 150)];
+    var wav = ToneWav.Build(tones, FeedAlarm.Loudness);
+    int dataBytes = BitConverter.ToInt32(wav, 40);
+    var pcm = Enumerable.Range(0, dataBytes / 2).Select(i => BitConverter.ToInt16(wav, 44 + i * 2)).ToArray();
+    Check(Encoding.ASCII.GetString(wav, 0, 4) == "RIFF" && Encoding.ASCII.GetString(wav, 8, 4) == "WAVE" && BitConverter.ToInt16(wav, 22) == 1
+          && BitConverter.ToInt32(wav, 24) == ToneWav.SampleRate && BitConverter.ToInt16(wav, 34) == 16 && wav.Length == 44 + dataBytes,
+        "the sound is a 16-bit mono 44.1 kHz WAV");
+    Check(pcm.Length == ToneWav.SampleRate * 300 / 1000, $"it lasts as long as the tones, 300 ms ({pcm.Length} samples)");
+    int loudest = pcm.Max(v => Math.Abs((int)v));
+    Check(Math.Abs(loudest - FeedAlarm.Loudness * short.MaxValue) < 30, $"its peak is a quarter of full scale ({loudest} of {short.MaxValue})");
+    Check(Math.Abs(pcm[0]) < 5 && Math.Abs(pcm[^1]) < 5, "each end fades from silence, so it doesn't click");
+    int Crossings(int from, int count) => Enumerable.Range(from + 1, count - 1).Count(i => (pcm[i - 1] < 0) != (pcm[i] < 0));
+    int first = Crossings(0, pcm.Length / 2), second = Crossings(pcm.Length / 2, pcm.Length / 2);
+    Check(Math.Abs(first - 300) <= 3 && Math.Abs(second - 210) <= 3, $"the pitches are 1000 Hz then 700 Hz ({first} and {second} zero crossings in 150 ms)");
+    // Played at zero loudness, so nothing is heard: Windows takes the format (SND_MEMORY | SND_SYNC | SND_NODEFAULT).
+    Check(SilentSound.Play(ToneWav.Build(tones, 0)), "Windows plays it (silently here)");
+
     FeedAlarm.TestPlayer = null;
     Console.WriteLine("Playing the real warning sound");
     FeedAlarm.PlayWarning();
@@ -4165,4 +4183,12 @@ internal sealed class PositionPrinter(ConcurrentQueue<IbkrPosition> reported) : 
     public void OnTraderFill(IbkrFill fill) { }
 
     public void OnTraderOrderMessage(int orderId, int code, string text, bool endedOrder) { }
+}
+
+internal static class SilentSound
+{
+    [System.Runtime.InteropServices.DllImport("winmm.dll")]
+    private static extern bool PlaySound(byte[] sound, IntPtr module, uint flags);
+
+    public static bool Play(byte[] wav) => PlaySound(wav, IntPtr.Zero, 0x0004 | 0x0002);
 }
