@@ -45,7 +45,8 @@ internal static class DepthSizes
 /// 3 from there to a dollar, and 2 from a dollar up (2026-11-06). That's only how prices are written.
 /// Tick sizes stay as tastytrade gives them, because they're what price steps and chart bucketing go
 /// by, and prints and bars still carry their full prices, so 2.7188 shows as 2.72 but is still 2.7188
-/// to everything that uses it.
+/// to everything that uses it. Since 2026-11-20 Quantower gets one tick size per stock (OneTick), not
+/// tastytrade's two, so a stock under a dollar keeps 3 decimals above $1 too.
 /// </summary>
 internal static class PriceBands
 {
@@ -53,6 +54,33 @@ internal static class PriceBands
 
     // Where the number of decimals changes: prices below each line, up from the one before, get that many.
     private static readonly (double Below, int Decimals)[] DisplayLines = [(0.10, 4), (DollarLine, 3), (double.PositiveInfinity, 2)];
+
+    /// <summary>tastytrade's tick size at this price: $0.0001 under a dollar and $0.01 from one, for stocks.</summary>
+    public static double TickAt(IReadOnlyList<TickBand> bands, double price)
+    {
+        if (bands.Count == 0)
+            return price < DollarLine ? 0.0001 : 0.01;
+        foreach (var band in bands)
+        {
+            if (price < band.Below)
+                return band.Size;
+        }
+
+        return bands[^1].Size;
+    }
+
+    /// <summary>
+    /// One tick size from 0 up, the one where the stock trades, which is what Quantower gets (2026-11-20). With
+    /// tastytrade's two (TickAt), Quantower overflowed its stack and closed whenever a chart or DOM ladder spanned
+    /// the dollar line, where the size changes: YFOR's chart from $0.86 to $1.36 (11-19) and VIVS's ladder at $0.28
+    /// with an ask at $1.00 (11-20), three times each. Books and charts that stayed on one side never did, including
+    /// ones across 10 cents, where only the decimals change, so those lines stay. Under a dollar: 4 decimals under
+    /// 10 cents and 3 from there up, with no line at $1. From a dollar: 2 throughout.
+    /// </summary>
+    public static List<(double Low, double High, double TickSize, int Decimals)> OneTick(double tickSize) =>
+        tickSize < 0.01
+            ? [(0, 0.10, tickSize, 4), (0.10, double.PositiveInfinity, tickSize, 3)]
+            : [(0, double.PositiveInfinity, tickSize, 2)];
 
     public static List<(double Low, double High, double TickSize, int Decimals)> ForDisplay(IReadOnlyList<TickBand> bands)
     {
