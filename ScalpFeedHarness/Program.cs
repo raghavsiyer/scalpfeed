@@ -62,6 +62,9 @@ switch (args[0])
     case "ibkrrows":
         await RunIbkrRows(int.Parse(args[1]), int.Parse(args[2]), args[3..]);
         break;
+    case "positions":
+        await RunPositions(int.Parse(args[1]));
+        break;
     case "raw":
         using (var rawClient = api())
             Console.WriteLine(Log.Scrub(await rawClient.GetRawAsync(args[1], CancellationToken.None)));
@@ -3078,6 +3081,25 @@ async Task RunIbkrRows(int port, int rows, string[] symbols)
     await client.StopAsync();
 }
 
+// The paper account's positions as IBKR reports them, read-only, on a client ID of its own. IbkrTrader never places
+// an order by itself, and this sends none.
+async Task RunPositions(int port)
+{
+    var trader = new IbkrTrader("127.0.0.1", port, 84);
+    var reported = new ConcurrentQueue<IbkrPosition>();
+    trader.SetSink(new PositionPrinter(reported));
+    trader.Start();
+    for (int i = 0; i < 40 && !trader.Ready; i++)
+        await Task.Delay(250);
+    await Task.Delay(2500);
+    Console.WriteLine($"ready={trader.Ready} {trader.NotReadyWhy}");
+    foreach (var p in reported)
+        Console.WriteLine($"  reported {p.Symbol,-6} qty {p.Quantity,8} avg cost {p.AvgCost}");
+    foreach (var p in trader.Positions())
+        Console.WriteLine($"  open     {p.Symbol,-6} qty {p.Quantity,8} avg cost {p.AvgCost}");
+    await trader.StopAsync();
+}
+
 // The last few all-hours daily bars of each symbol, read-only.
 async Task RunDayRange(string[] symbols)
 {
@@ -4128,4 +4150,19 @@ internal sealed class TraderTestSink : ITraderSink
     public void OnTraderFill(IbkrFill fill) => this.Fills.Enqueue(fill);
 
     public void OnTraderOrderMessage(int orderId, int code, string text, bool endedOrder) => this.Messages.Enqueue((orderId, code, text, endedOrder));
+}
+
+internal sealed class PositionPrinter(ConcurrentQueue<IbkrPosition> reported) : ITraderSink
+{
+    public void OnTraderState(bool ready, string detail) { }
+
+    public void OnTraderAccount(string account, IReadOnlyDictionary<string, string> values) { }
+
+    public void OnTraderPosition(IbkrPosition position) => reported.Enqueue(position);
+
+    public void OnTraderOrder(IbkrOrder order) { }
+
+    public void OnTraderFill(IbkrFill fill) { }
+
+    public void OnTraderOrderMessage(int orderId, int code, string text, bool endedOrder) { }
 }
