@@ -42,7 +42,12 @@ internal static class DepthSizes
 
 /// <summary>
 /// The price bands Quantower gets for a symbol: 4 decimals under 10 cents (your choice of 2026-11-11),
-/// 3 from there to a dollar, and 2 from a dollar up (2026-11-06). That's only how prices are written.
+/// 3 from there to a dollar, and 2 from a dollar up (2026-11-06), but never fewer than the band's tick size
+/// needs (2026-11-23), so with tastytrade's $0.0001 tick under a dollar, 10 cents to a dollar gets 4 too.
+/// Quantower steps a DOM ladder's price one tick at a time and rounds each step to the band's decimals:
+/// with 3 decimals and a $0.0001 tick, 0.7135 + 0.0001 rounds back to 0.714 and the step never advances,
+/// so Quantower recursed until its stack overflowed and it closed (VIVS and YFOR 11-19 and 11-20, WETO
+/// 11-23, all between 10 cents and a dollar; the trace names Quantower's VariableTick price stepping).
 /// Tick sizes stay as tastytrade gives them, because they're what price steps and chart bucketing go
 /// by, and prints and bars still carry their full prices, so 2.7188 shows as 2.72 but is still 2.7188
 /// to everything that uses it.
@@ -74,7 +79,7 @@ internal static class PriceBands
                     continue;
 
                 double to = Math.Min(below, band.Below);
-                result.Add((from, to, band.Size, decimals));
+                result.Add((from, to, band.Size, Math.Max(decimals, DecimalsOf(band.Size))));
                 from = to;
             }
 
@@ -82,5 +87,18 @@ internal static class PriceBands
         }
 
         return result;
+    }
+
+    /// <summary>How many decimals it takes to write this tick size exactly: 0.0001 and 0.0005 need 4, 0.01 needs 2.</summary>
+    public static int DecimalsOf(double tickSize)
+    {
+        double scaled = tickSize;
+        for (int decimals = 0; decimals < 10; decimals++, scaled *= 10)
+        {
+            if (Math.Abs(scaled - Math.Round(scaled)) < 1e-9 * Math.Max(1, scaled))
+                return decimals;
+        }
+
+        return 10;
     }
 }
