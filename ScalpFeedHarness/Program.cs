@@ -1519,6 +1519,15 @@ async Task RunHotkey()
     Check(OrderHotkeys.TryParseKeys("Alt+2", out m, out vk) && m == HotkeyListener.Alt && vk == '2', "Alt+2 is Alt and the 2 key");
     Check(OrderHotkeys.Decide(alt2, [svre], rth).Ticket == new IbkrOrderTicket("SVRE", true, 2000, "LMT", 0.9024, double.NaN, "IOC"),
         "Alt+2, one depth open: buy 2,000 SVRE, IOC limit 0.9024");
+    var alt0 = OrderHotkey.BuyOne;
+    Check(alt0 is { Keys: "Alt+0", Buy: true, Shares: 1, Offset: 0.025, Tif: "IOC", OfPosition: 0 }, "Alt+0 buys 1 share at the ask plus 2.5%, immediate or cancel");
+    Check(OrderHotkeys.TryParseKeys("Alt+0", out m, out vk) && m == HotkeyListener.Alt && vk == '0', "Alt+0 is Alt and the 0 key");
+    Check(OrderHotkeys.Decide(alt0, [svre], rth).Ticket == new IbkrOrderTicket("SVRE", true, 1, "LMT", 0.9024, double.NaN, "IOC")
+        && OrderHotkeys.Decide(alt0, [svre], Utc(18, 12, 0)).Ticket?.Tif == "DAY",
+        "Alt+0, one depth open: buy 1 SVRE, IOC limit 0.9024, DAY premarket");
+    var withAlt0 = new List<(uint, uint)> { (HotkeyListener.Alt, '1'), (HotkeyListener.Alt, '2'), (HotkeyListener.Alt, '0') };
+    Check(OrderHotkeys.OnKeyDown(withAlt0, '0', HotkeyListener.Alt, false, true, true) == (2, true) && OrderHotkeys.OnKeyDown(withAlt0, '0', 0, false, true, false) == (-1, false),
+        "Alt+0 fires as its own key, even with a text cursor; 0 alone types a 0");
     Check(OrderHotkeys.Decide(alt1, []).Problem?.Contains("no market depth") == true, "no depth open: nothing, and says so");
     var two = OrderHotkeys.Decide(alt1, [svre, new HotkeyQuote("CRMN", 1.20, 1.21, false)]);
     Check(two.Ticket == null && two.Problem.Contains("SVRE, CRMN"), $"two depths open: nothing, naming them ({two.Problem})");

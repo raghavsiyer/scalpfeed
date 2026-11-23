@@ -35,6 +35,9 @@ internal sealed record OrderHotkey(string Keys, bool Buy, double Shares, double 
     /// <summary>Alt+2: buy 2,000 shares, otherwise as Alt+1 (your request, 2026-11-18).</summary>
     public static OrderHotkey BuyTwoThousand { get; } = new("Alt+2", true, 2000, OffsetShare, "IOC");
 
+    /// <summary>Alt+0: buy 1 share, otherwise as Alt+1 (your request, 2026-11-23).</summary>
+    public static OrderHotkey BuyOne { get; } = new("Alt+0", true, 1, OffsetShare, "IOC");
+
     /// <summary>Shift+Z: sell the whole position, limit at the bid minus 2.5%, immediate or cancel (your request, 2026-11-18).</summary>
     public static OrderHotkey SellAll { get; } = new("Shift+Z", false, 0, OffsetShare, "IOC", OfPosition: 1);
 

@@ -22,11 +22,11 @@ public sealed class ScalpFeedVendor : MultiVendor
     private const string HotkeyHeader = "ScalpFeed hotkey";
 
     /// <summary>
-    /// The order hotkeys (OrderHotkeys): Alt+1 buys 1,000 shares and Alt+2 2,000 at the ask plus 10 cents; Shift+Z
-    /// sells the whole position and Shift+X half of it, at the bid minus 10.
+    /// The order hotkeys (OrderHotkeys): Alt+1 buys 1,000 shares, Alt+2 2,000 and Alt+0 1, at the ask plus 2.5%;
+    /// Shift+Z sells the whole position and Shift+X half of it, at the bid minus 2.5%.
     /// </summary>
     private static readonly IReadOnlyList<OrderHotkey> Hotkeys =
-        [OrderHotkey.BuyAsk, OrderHotkey.BuyTwoThousand, OrderHotkey.SellAll, OrderHotkey.SellHalf];
+        [OrderHotkey.BuyAsk, OrderHotkey.BuyTwoThousand, OrderHotkey.SellAll, OrderHotkey.SellHalf, OrderHotkey.BuyOne];
 
     private TastytradeMarketVendor marketData;
     private PaperTrading trading;
