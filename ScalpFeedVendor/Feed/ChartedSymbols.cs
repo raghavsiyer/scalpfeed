@@ -1,16 +1,17 @@
 namespace ScalpFeedVendor.Feed;
 
 /// <summary>
-/// The stock on your chart, added to the end of IBKR Top Gainers when the scan hasn't got it (your request,
-/// 2026-11-19), so a ticker you searched sits in the list with the gainers. Only while it's on the chart: charting
-/// another stock takes it off again (your request, 2026-11-23; it had kept the last 10 all day, which filled the
-/// list with searched stocks the scan's volume filter would leave out). A chart is told apart from a Watchlist row
-/// by asking for intraday bars: a row asks for none, only the daily bars for RVOL. Cleared at the start of each
-/// Eastern day. Thread-safe; nothing here needs Quantower.
+/// The stocks opened in a chart today, added to the end of IBKR Top Gainers when the scan hasn't got them (your
+/// request, 2026-11-19), so a ticker you searched sits in the list with the gainers. The one on the chart now is
+/// always there; the earlier ones stay only while they've traded at least the scan's volume (your request,
+/// 2026-11-23, after the list filled with searched stocks the scan's volume filter would leave out), so one under it
+/// goes when you chart another. A chart is told apart from a Watchlist row by asking for intraday bars: a row asks
+/// for none, only the daily bars for RVOL. Most recent first, at most 10, and cleared at the start of each Eastern
+/// day. Thread-safe; nothing here needs Quantower.
 /// </summary>
 internal sealed class ChartedSymbols
 {
-    public const int Most = 1;
+    public const int Most = 10;
 
     private readonly object gate = new();
     private readonly List<string> symbols = [];
@@ -46,14 +47,18 @@ internal sealed class ChartedSymbols
         }
     }
 
-    /// <summary>The scan's rows, then each charted symbol the scan hasn't got.</summary>
-    public static IReadOnlyList<string> Merge(IReadOnlyList<string> scan, IReadOnlyList<string> charted)
+    /// <summary>
+    /// The scan's rows, then each charted symbol the scan hasn't got: the one charted last always, an earlier one
+    /// only if <paramref name="stays"/> says so (it's traded the scan's volume), or always with no rule.
+    /// </summary>
+    public static IReadOnlyList<string> Merge(IReadOnlyList<string> scan, IReadOnlyList<string> charted, Func<string, bool> stays = null)
     {
         var seen = new HashSet<string>(scan, StringComparer.OrdinalIgnoreCase);
         var merged = new List<string>(scan);
-        foreach (var s in charted)
+        for (int i = 0; i < charted.Count; i++)
         {
-            if (seen.Add(s))
+            var s = charted[i];
+            if ((i == 0 || stays == null || stays(s)) && seen.Add(s))
                 merged.Add(s);
         }
 

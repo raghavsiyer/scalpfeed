@@ -674,22 +674,36 @@ async Task RunFloat()
     Directory.Delete(dir, true);
 }
 
-// The stock on the chart, added to the end of IBKR Top Gainers only while it's charted.
+// The stocks opened in a chart, added to the end of IBKR Top Gainers: the current one always, earlier ones over the volume.
 void RunCharted()
 {
     var charted = new ChartedSymbols();
     const string day = "2026-11-19";
     Check(charted.Add("POAS", day) && !charted.Add("poas", day), "a chart's first bars add its stock; the next timeframes of the same chart change nothing");
-    Check(charted.Add("BABA", day) && charted.Today(day).SequenceEqual(new[] { "BABA" }), "charting another stock replaces it: a searched stock doesn't stay in the list");
+    charted.Add("BABA", day);
+    charted.Add("SEAT", day);
+    Check(charted.Today(day).SequenceEqual(new[] { "SEAT", "BABA", "POAS" }), "most recent first");
+    Check(charted.Add("POAS", day) && charted.Today(day).SequenceEqual(new[] { "POAS", "SEAT", "BABA" }), "going back to one moves it up, not in twice");
 
     var merged = ChartedSymbols.Merge(new[] { "SEAT", "VIVS", "CHSN" }, charted.Today(day));
-    Check(merged.SequenceEqual(new[] { "SEAT", "VIVS", "CHSN", "BABA" }), $"the scan's rows come first, then the charted stock if it hasn't got it ({string.Join(" ", merged)})");
-    Check(charted.Add("VIVS", day) && ChartedSymbols.Merge(new[] { "SEAT", "VIVS", "CHSN" }, charted.Today(day)).SequenceEqual(new[] { "SEAT", "VIVS", "CHSN" }),
-        "charting a stock the scan already has leaves just the scan's rows, so the earlier searched stock is gone");
+    Check(merged.SequenceEqual(new[] { "SEAT", "VIVS", "CHSN", "POAS", "BABA" }), $"with no volume rule, the scan's rows come first, then each charted stock it hasn't got ({string.Join(" ", merged)})");
+
+    // POAS on the chart now under the volume, BABA earlier over it, WETO earlier under it.
+    var volume = new Dictionary<string, double> { ["POAS"] = 12_000, ["BABA"] = 3_000_000, ["WETO"] = 40_000 };
+    Func<string, bool> stays = s => volume.TryGetValue(s, out var v) && v >= 50_000;
+    charted.Add("WETO", day);
+    charted.Add("POAS", day);
+    var byVolume = ChartedSymbols.Merge(new[] { "VIVS" }, charted.Today(day), stays);
+    Check(byVolume.SequenceEqual(new[] { "VIVS", "POAS", "BABA" }),
+        $"the stock on the chart shows even under the volume; earlier ones stay only over it, so WETO at 40,000 goes ({string.Join(" ", byVolume)})");
+    volume["WETO"] = 60_000;
+    Check(ChartedSymbols.Merge(new[] { "VIVS" }, charted.Today(day), stays).SequenceEqual(new[] { "VIVS", "POAS", "WETO", "BABA" }), "once it trades past the volume it's back");
+    Check(ChartedSymbols.Merge(new[] { "VIVS" }, charted.Today(day), s => false).SequenceEqual(new[] { "VIVS", "POAS" }), "with none over the volume, only the stock on the chart");
+    Check(ChartedSymbols.Merge(new[] { "POAS" }, charted.Today(day), s => false).SequenceEqual(new[] { "POAS" }), "a charted stock the scan has isn't in twice");
 
     for (int i = 0; i < 15; i++)
         charted.Add("S" + i, day);
-    Check(charted.Today(day).Count == 1 && charted.Today(day)[0] == "S14", "only the latest charted stock is kept");
+    Check(charted.Today(day).Count == ChartedSymbols.Most && charted.Today(day)[0] == "S14", $"at most {ChartedSymbols.Most}, the oldest dropped");
     Check(charted.Today("2026-11-20").Count == 0, "a new day starts empty");
     Check(!charted.Add(" ", "2026-11-20") && !charted.Add(null, "2026-11-20"), "a blank symbol is ignored");
 }

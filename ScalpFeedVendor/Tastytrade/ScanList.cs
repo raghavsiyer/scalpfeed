@@ -8,8 +8,9 @@ namespace ScalpFeedVendor.Tastytrade;
 /// after hours the after-hours ones, and IBKR Halts (IbkrScan). Looking the symbols up can call back into this
 /// connection (a symbol it hasn't made yet), so it runs off IBKR's thread, one list at a time. A list the same as
 /// the last is left alone, unless the list has gone (deleted in Quantower), when it's made again. Stocks only:
-/// leveraged ETFs (SOXS, UVIX, MSTZ on 11-16) crowd a gainers list. With <paramref name="charted"/>, the stock
-/// on your chart follows the scan's rows while it's charted (ChartedSymbols), an ETF too, since you asked for it.
+/// leveraged ETFs (SOXS, UVIX, MSTZ on 11-16) crowd a gainers list. With <paramref name="charted"/>, the stocks
+/// opened in a chart today follow the scan's rows (ChartedSymbols), ETFs included, since you asked for those: the one
+/// on the chart now, and earlier ones that pass <see cref="Stays"/>.
 /// </summary>
 internal sealed class ScanList(string name, bool logEachChange, ChartedSymbols charted = null)
 {
@@ -28,6 +29,9 @@ internal sealed class ScanList(string name, bool logEachChange, ChartedSymbols c
     /// false when tastytrade hasn't got it, which leaves it out.
     /// </summary>
     public Func<string, bool> Make { get; set; }
+
+    /// <summary>Whether a stock charted earlier today stays in the list (it's traded the scan's volume); null keeps them all.</summary>
+    public Func<string, bool> Stays { get; set; }
 
     public void Offer(IReadOnlyList<string> symbols)
     {
@@ -55,7 +59,7 @@ internal sealed class ScanList(string name, bool logEachChange, ChartedSymbols c
     private void Queue()
     {
         bool idle = this.next == null;
-        this.next = charted == null ? this.scan : ChartedSymbols.Merge(this.scan, charted.Today(FloatFacts.DayOf(DateTime.UtcNow)));
+        this.next = charted == null ? this.scan : ChartedSymbols.Merge(this.scan, charted.Today(FloatFacts.DayOf(DateTime.UtcNow)), this.Stays);
         if (idle)
             _ = Task.Run(this.PublishAll);
     }
