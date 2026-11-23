@@ -1,14 +1,16 @@
 namespace ScalpFeedVendor.Feed;
 
 /// <summary>
-/// The stocks opened in a chart today, added to the end of IBKR Top Gainers when the scan hasn't got them (your
-/// request, 2026-11-19), so a ticker you searched sits in the list with the gainers. A chart is told apart from a
-/// Watchlist row by asking for intraday bars: a row asks for none, only the daily bars for RVOL. Most recent first,
-/// at most 10, and cleared at the start of each Eastern day. Thread-safe; nothing here needs Quantower.
+/// The stock on your chart, added to the end of IBKR Top Gainers when the scan hasn't got it (your request,
+/// 2026-11-19), so a ticker you searched sits in the list with the gainers. Only while it's on the chart: charting
+/// another stock takes it off again (your request, 2026-11-23; it had kept the last 10 all day, which filled the
+/// list with searched stocks the scan's volume filter would leave out). A chart is told apart from a Watchlist row
+/// by asking for intraday bars: a row asks for none, only the daily bars for RVOL. Cleared at the start of each
+/// Eastern day. Thread-safe; nothing here needs Quantower.
 /// </summary>
 internal sealed class ChartedSymbols
 {
-    public const int Most = 10;
+    public const int Most = 1;
 
     private readonly object gate = new();
     private readonly List<string> symbols = [];
