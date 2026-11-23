@@ -240,6 +240,9 @@ switch (args[0])
     case "scan":
         await RunScan(args.Length > 1 ? int.Parse(args[1], CultureInfo.InvariantCulture) : 0, args.Length > 2 ? args[2] : null);
         break;
+    case "searchfilter":
+        RunSearchFilter();
+        break;
 }
 
 Console.WriteLine(failures == 0 ? "\nALL CHECKS PASSED" : $"\n{failures} CHECK(S) FAILED");
@@ -672,6 +675,19 @@ async Task RunFloat()
         "a stock the site has without a float (LGHL) says so, apart from one the site hasn't got");
 
     Directory.Delete(dir, true);
+}
+
+// Which symbol search hits Quantower's search box gets: no warrants unless typed exactly.
+void RunSearchFilter()
+{
+    const string common = "Brand Engagement Network Inc. - Common Stock", warrant = "Brand Engagement Network Inc. - Warrant";
+    Check(SearchFilter.Shows("BNAI", common, "BNAI") && !SearchFilter.Shows("BNAIW", warrant, "BNAI"), "typing BNAI finds the stock, not its warrant BNAIW");
+    Check(SearchFilter.Shows("BNAIW", warrant, "bnaiw ") && !SearchFilter.Shows("BNAIW", warrant, "BNAIW1"), "typing the warrant's exact symbol still finds it, in any case");
+    Check(!SearchFilter.Shows("XYZWS", "XYZ Corp - Warrants, each exercisable for one share", "XYZ"), "Warrants, plural, are left out too");
+    Check(SearchFilter.Shows("SNOW", "Snowflake Inc. - Class A Common Stock", "SN") && SearchFilter.Shows("BW", "Babcock & Wilcox Enterprises, Inc. Common Stock", "B"),
+        "a stock whose symbol ends in W is kept: it's the description that counts");
+    Check(SearchFilter.Shows("ABCR", "ABC Inc. - Rights", "ABC") && SearchFilter.Shows("ABCU", "ABC Inc. - Units", "ABC") && SearchFilter.Shows("ABC", null, "ABC"),
+        "rights, units and a missing description are kept");
 }
 
 // The stocks opened in a chart, added to the end of IBKR Top Gainers: the current one always, earlier ones over the volume.

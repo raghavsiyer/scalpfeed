@@ -138,10 +138,12 @@ internal sealed class TastytradeApi : IDisposable
 
         foreach (var item in items)
         {
-            // Search also returns futures, crypto and the like. This connection is stocks only.
+            // Search also returns futures, crypto and the like. This connection is stocks only, and leaves out
+            // warrants unless their exact symbol is typed (SearchFilter).
             var symbol = (string)item?["symbol"];
-            if (!string.IsNullOrEmpty(symbol) && (string)item["instrument-type"] == "Equity")
-                hits.Add(new SearchHit(symbol, (string)item["description"] ?? string.Empty));
+            var description = (string)item?["description"] ?? string.Empty;
+            if (!string.IsNullOrEmpty(symbol) && (string)item["instrument-type"] == "Equity" && SearchFilter.Shows(symbol, description, filter))
+                hits.Add(new SearchHit(symbol, description));
         }
 
         return hits;
