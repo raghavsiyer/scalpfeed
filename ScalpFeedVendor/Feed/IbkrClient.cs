@@ -112,6 +112,9 @@ internal sealed record IbkrConfig(bool Enabled, string Host, int Port, int Clien
     /// <summary>The trading connection's own client ID: tradingClientId in ibkr.json, else the data one plus 1.</summary>
     public int TradingClientId => this.TradingClientIdSetting > 0 ? this.TradingClientIdSetting : this.ClientId + 1;
 
+    /// <summary>The restriction lookups' client ID (IbkrRestrictions): the data one plus 2, or plus 3 if trading has that.</summary>
+    public int RestrictionsClientId => this.ClientId + 2 == this.TradingClientId ? this.ClientId + 3 : this.ClientId + 2;
+
     /// <summary>Reads ibkr.json, which is optional. The defaults suit a paper IB Gateway.</summary>
     public static IbkrConfig Load()
     {

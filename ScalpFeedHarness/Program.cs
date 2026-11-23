@@ -243,6 +243,9 @@ switch (args[0])
     case "searchfilter":
         RunSearchFilter();
         break;
+    case "restrictions":
+        await RunRestrictions(args.Length > 1 ? int.Parse(args[1], CultureInfo.InvariantCulture) : 0);
+        break;
 }
 
 Console.WriteLine(failures == 0 ? "\nALL CHECKS PASSED" : $"\n{failures} CHECK(S) FAILED");
@@ -675,6 +678,62 @@ async Task RunFloat()
         "a stock the site has without a float (LGHL) says so, apart from one the site hasn't got");
 
     Directory.Delete(dir, true);
+}
+
+// IBKR's ineligibility reasons in contract details (IbkrRestrictions): parsing Gateway's replies as captured at version
+// 186 on 2026-11-23, then, given a port, real lookups on Gateway under client 96 (contract details only, read-only).
+async Task RunRestrictions(int port)
+{
+    string[] Reply(string symbol, string[] secIds, params string[] reasons)
+    {
+        var f = new List<string> { "10", "9001", symbol, "STK", "", "", "0", "", "SMART", "USD", symbol, "SCM", "SCM", "932900175", "0.0001", "",
+            "LMT,MKT", "SMART,NASDAQ", "1", "0", "LONG NAME", "NASDAQ", "", "Financial", "Insurance", "Insurance Brokers", "US/Eastern",
+            "20261123:0400-20261123:2000", "20261123:0930-20261123:1600", "", "" };
+        f.Add((secIds.Length / 2).ToString(CultureInfo.InvariantCulture));
+        f.AddRange(secIds);
+        f.AddRange(["1", "", "", "557,557", "", "COMMON", "0.0001", "0.0001", "100"]);
+        f.Add((reasons.Length / 2).ToString(CultureInfo.InvariantCulture));
+        f.AddRange(reasons);
+        return f.ToArray();
+    }
+
+    const string compliance = "No Opening Trades: Small Cap, Subject to Compliance Restriction";
+    string[] isin = ["ISIN", "KYG989MC1147"];
+    var zbao = Reply("ZBAO", isin, "i189", compliance);
+    Check(zbao.Length == 46 && IbkrRestrictions.ParseReasons(zbao) == compliance, "ZBAO's reply, 46 fields as Gateway sent it: its one reason");
+    Check(IbkrRestrictions.ParseReasons(Reply("NVDA", isin)) == "", "NVDA's: no reasons");
+    Check(IbkrRestrictions.ParseReasons(Reply("XYZ", [])) == "" && IbkrRestrictions.ParseReasons(Reply("XYZ", ["ISIN", "US1", "CUSIP", "1"], "i189", compliance)) == compliance,
+        "found past no security IDs, or two");
+    Check(IbkrRestrictions.ParseReasons(Reply("XYZ", isin, "i128", "Closing only", "i189", compliance)) == "Closing only; " + compliance, "two reasons are joined");
+    Check(IbkrRestrictions.ParseReasons(zbao[..^1]) == null && IbkrRestrictions.ParseReasons(zbao.Append("extra").ToArray()) == null
+          && IbkrRestrictions.ParseReasons(zbao.Select((v, i) => i == 3 ? "FUND" : v).ToArray()) == null && IbkrRestrictions.ParseReasons(["4", "2"]) == null,
+        "a reply in any other layout isn't read: one field short or long, a fund, or not contract details");
+
+    var config = IbkrConfig.Load();
+    Check(config with { ClientId = 78, TradingClientIdSetting = 0 } is { TradingClientId: 79, RestrictionsClientId: 80 }
+          && (config with { ClientId = 78, TradingClientIdSetting = 80 }).RestrictionsClientId == 81,
+        "its own client ID: data plus 2, or plus 3 when trading has that");
+    Check(IbkrRestrictions.AllowedRequests.SetEquals([71, 9]), "it may send only startApi and contract details");
+
+    if (port == 0)
+        return;
+
+    var lookups = new IbkrRestrictions(() => IbkrConfig.Load() with { Port = port }, clientId: 96);
+    var warnings = new ConcurrentQueue<(string, string)>();
+    lookups.Prefetch(["NVDA", "AHMA", "ZZQQX", "BRK/B"]);
+    lookups.Charted("ZBAO", (s, r) => warnings.Enqueue((s, r)));
+    var watch = Stopwatch.StartNew();
+    while (!(lookups.Known("ZBAO") && lookups.Known("BRK B")) && watch.Elapsed < TimeSpan.FromSeconds(20))
+        await Task.Delay(50);
+    Check(lookups.Reason("zbao") == compliance && lookups.Reason("AHMA") == compliance, $"Gateway: ZBAO and AHMA are restricted ({lookups.Reason("ZBAO")})");
+    Check(lookups.Known("NVDA") && lookups.Reason("NVDA") == null && lookups.Known("BRK/B") && lookups.Reason("BRK.B".Replace('.', '/')) == null,
+        "NVDA and BRK/B (asked as BRK B) aren't");
+    Check(lookups.Known("ZZQQX") && lookups.Reason("ZZQQX") == null, "a symbol IBKR doesn't know counts as unrestricted");
+    Check(warnings.Count == 1 && warnings.TryPeek(out var first) && first == ("ZBAO", compliance), "the charted ZBAO warned once, with IBKR's reason");
+    lookups.Charted("ZBAO", (s, r) => warnings.Enqueue((s, r)));
+    lookups.Charted("NVDA", (s, r) => warnings.Enqueue((s, r)));
+    Check(warnings.Count == 1, "charting it again the same day, or charting NVDA, doesn't");
+    Console.WriteLine($"Looked up 5 stocks in {watch.ElapsedMilliseconds} ms");
 }
 
 // Which symbol search hits Quantower's search box gets: no warrants unless typed exactly.
@@ -1566,6 +1625,18 @@ async Task RunHotkey()
     var two = OrderHotkeys.Decide(alt1, [svre, new HotkeyQuote("CRMN", 1.20, 1.21, false)]);
     Check(two.Ticket == null && two.Problem.Contains("SVRE, CRMN"), $"two depths open: nothing, naming them ({two.Problem})");
     Check(OrderHotkeys.Decide(alt1, [svre with { Halted = true }]).Problem?.Contains("halted") == true, "a halted stock: nothing");
+
+    // A stock IBKR won't let you open (IbkrRestrictions): a buy sends nothing and says why; a closing order still goes.
+    const string compliance = "No Opening Trades: Small Cap, Subject to Compliance Restriction";
+    var zbao = new HotkeyQuote("ZBAO", 0.1517, 0.1518, false);
+    Func<string, string> restricted = s => s == "ZBAO" ? compliance : null;
+    var blocked = OrderHotkeys.Decide(alt1, [zbao], rth, restricted);
+    Check(blocked.Ticket == null && blocked.Problem == $"IBKR won't let you open a position in ZBAO ({compliance})", $"Alt+1 on restricted ZBAO, flat: nothing, with IBKR's reason ({blocked.Problem})");
+    Check(OrderHotkeys.Decide(alt1, [zbao with { Position = 1000 }], rth, restricted).Ticket == null, "adding to a long in it: nothing either");
+    Check(OrderHotkeys.Decide(alt1, [zbao with { Position = -1000 }], rth, restricted).Ticket is { Buy: true, Quantity: 1000 }, "a buy that covers a short goes");
+    Check(OrderHotkeys.Decide(shiftZ, [zbao with { Position = 1000 }], rth, restricted).Ticket is { Buy: false, Quantity: 1000 }, "Shift+Z selling a long in it goes");
+    Check(OrderHotkeys.Decide(alt1, [svre], rth, restricted).Ticket != null && OrderHotkeys.Decide(alt1, [zbao], rth).Ticket != null,
+        "a stock without a reason, or no lookup at all, sends as before");
     Check(OrderHotkeys.Decide(alt1, [svre with { Ask = -1 }]).Ticket == null && OrderHotkeys.Decide(alt1, [svre with { Ask = double.NaN }]).Ticket == null,
         "no IBKR ask (a side with no market, or IBKR not quoting): nothing");
 
@@ -3256,6 +3327,17 @@ async Task RunAlarmTest()
         else
             Interlocked.Increment(ref allClears);
     };
+
+    // Muted by default (your request, 2026-11-23): an alarm still turns on and off, but nothing reaches the speaker.
+    Check(FeedAlarm.Muted, "sounds are muted by default");
+    FeedAlarm.Raise("muted");
+    FeedAlarm.PlayWarning();
+    FeedAlarm.Clear();
+    FeedAlarm.PlayAllClear();
+    Check(warnings == 0 && allClears == 0 && !FeedAlarm.IsActive, "muted, an alarm and its all-clear play nothing");
+
+    // The rest is the alarm's timing with the sound on, as it would be if unmuted.
+    FeedAlarm.Muted = false;
     FeedAlarm.RepeatEvery = TimeSpan.FromMilliseconds(100);
     FeedAlarm.GiveUpAfter = TimeSpan.FromMilliseconds(600);
 
@@ -3309,6 +3391,7 @@ async Task RunAlarmTest()
     // Played at zero loudness, so nothing is heard: Windows takes the format (SND_MEMORY | SND_SYNC | SND_NODEFAULT).
     Check(SilentSound.Play(ToneWav.Build(tones, 0)), "Windows plays it (silently here)");
 
+    // No real sound is played here any more: you asked for none (2026-11-23).
     FeedAlarm.TestPlayer = null;
     FeedAlarm.Muted = true;
 }
@@ -3322,17 +3405,6 @@ async Task RunCrossTest()
     var now = DateTime.UtcNow;
     int badSpyBars = 0, badPlugBars = 0, loads = 0;
 
-
-    // Muted by default (your request, 2026-11-23): an alarm still turns on and off, but nothing reaches the speaker.
-    Check(FeedAlarm.Muted, "sounds are muted by default");
-    FeedAlarm.Raise("muted");
-    FeedAlarm.PlayWarning();
-    FeedAlarm.Clear();
-    FeedAlarm.PlayAllClear();
-    Check(warnings == 0 && allClears == 0 && !FeedAlarm.IsActive, "muted, an alarm and its all-clear play nothing");
-
-    // The rest is the alarm's timing with the sound on, as it would be if unmuted.
-    FeedAlarm.Muted = false;
     for (int round = 0; round < 12; round++)
     {
         var plug = await history.LoadAsync("PLUG{=1m}", now.AddHours(-3), DateTime.UtcNow, CancellationToken.None);
@@ -3391,7 +3463,6 @@ async Task RunDayVolume(string[] symbols)
 
         Console.WriteLine($"RESULT {symbol,-5} 1m sum 11-04: overnight={overnight:F0} pre={pre:F0} regular={regular:F0} post={post:F0} total={overnight + pre + regular + post:F0} bars={minutes.Count}");
 
-    // No real sound is played here any more: you asked for none (2026-11-23).
         // The plugin merges volume onto regular-hours bars by bar time, so the times must line up.
         foreach (var (code, days) in new[] { ("=1d", 60), ("=1w", 400), ("=1mo", 1000) })
         {

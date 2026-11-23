@@ -97,8 +97,11 @@ internal static class OrderHotkeys
     public static string TifAt(OrderHotkey hotkey, DateTime utc) =>
         hotkey.Tif == "IOC" && !InRegularHours(utc) ? "DAY" : hotkey.Tif;
 
-    /// <summary>The order for this key on these depth symbols at this moment (now when not given), or why there's none.</summary>
-    public static (IbkrOrderTicket Ticket, double Quote, string Problem) Decide(OrderHotkey hotkey, IReadOnlyList<HotkeyQuote> depth, DateTime? utc = null)
+    /// <summary>
+    /// The order for this key on these depth symbols at this moment (now when not given), or why there's none.
+    /// <paramref name="restriction"/> gives IBKR's reason a stock can't be opened (IbkrRestrictions), or null.
+    /// </summary>
+    public static (IbkrOrderTicket Ticket, double Quote, string Problem) Decide(OrderHotkey hotkey, IReadOnlyList<HotkeyQuote> depth, DateTime? utc = null, Func<string, string> restriction = null)
     {
         if (depth.Count == 0)
             return (null, double.NaN, "no market depth is open, so there's no stock to send it for");
@@ -123,6 +126,12 @@ internal static class OrderHotkeys
             if (!(shares >= 1))
                 return (null, quote, $"{hotkey.Size()} of {held:#,0} shares of {target.Symbol} is under one share");
         }
+
+        // IBKR refuses an opening trade in a restricted stock outright (ZBAO, 21 times on 2026-11-23), so none is sent.
+        // An order that closes a position still goes: IBKR allows that.
+        bool opens = hotkey.Buy ? target.Position >= 0 : target.Position <= 0;
+        if (opens && restriction?.Invoke(target.Symbol) is { } reason)
+            return (null, quote, $"IBKR won't let you open a position in {target.Symbol} ({reason})");
 
         if (target.Halted)
             return (null, quote, $"{target.Symbol} is halted");

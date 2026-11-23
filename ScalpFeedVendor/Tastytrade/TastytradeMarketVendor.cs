@@ -192,7 +192,7 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
             this.topGainers.Stays = this.TradedScanVolume(IbkrConfig.Load().TopGainers?.VolumeAbove ?? 0);
             this.halts.Make = this.MakeSymbol;
             this.gainerRanks.Clear();
-            this.ibkr = new IbkrBridge(this.TimedPush, this.OnIbkrPrint, this.OnTopGainers, this.halts.Offer, s => this.PushDayBarNow(s.Streamer));
+            this.ibkr = new IbkrBridge(this.TimedPush, this.OnIbkrPrint, this.OnTopGainers, this.OnHalts, s => this.PushDayBarNow(s.Streamer));
             this.ibkr.Start();
             this.floats = new FloatSource(this.OnFloatArrived);
             this.averages = new VolumeAverages(this.history.LoadAsync, this.OnAverageArrived);
@@ -458,12 +458,30 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
     private Func<string, bool> TradedScanVolume(double least) => id =>
         least <= 0 || (this.statesByStreamer.TryGetValue(this.streamerById.GetValueOrDefault(id, id), out var state) && state.DayVolume >= least);
 
-    /// <summary>Each gainers scan's answer, from IBKR's thread: its ranks kept for the climb column, then the list.</summary>
+    /// <summary>
+    /// Each gainers scan's answer, from IBKR's thread: its ranks kept for the climb column, then the list. Its stocks'
+    /// restrictions are looked up ahead, so opening one warns straight away.
+    /// </summary>
     private void OnTopGainers(IReadOnlyList<string> names)
     {
         this.gainerRanks.Record(names, FeedClock.UtcNowTicks);
         this.topGainers.Offer(names);
+        IbkrRestrictions.Shared.Prefetch(names);
     }
+
+    /// <summary>The halted stocks list, with their restrictions looked up ahead, as for Top Gainers.</summary>
+    private void OnHalts(IReadOnlyList<string> names)
+    {
+        this.halts.Offer(names);
+        IbkrRestrictions.Shared.Prefetch(names);
+    }
+
+    /// <summary>
+    /// A stock IBKR won't let you open a position in was opened in a chart: a pop-up once a day, with no sound
+    /// (your request, 2026-11-23). A buy hotkey on it sends nothing and says why.
+    /// </summary>
+    private void WarnRestricted(string symbol, string reason) =>
+        this.PushMessage(MessageDealTicket.CreateRefuseDealTicket(Header, $"{symbol}: IBKR won't let you open a position, so buy hotkeys send nothing for it. IBKR's reason: {reason}. Selling shares you hold still works."));
 
     /// <summary>From the average loader's thread: the row gets its RVOL without waiting for the next trade.</summary>
     private void OnAverageArrived(string streamer) => this.PushDayBarNow(streamer);
@@ -949,9 +967,14 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
         var streamer = this.streamerById.GetValueOrDefault(id, id);
         bool regularHoursBars = UsesRegularHoursBars(time.Period);
 
-        // Only a chart asks for intraday bars (a Watchlist row asks for none), so this stock goes in Top Gainers.
+        // Only a chart asks for intraday bars (a Watchlist row asks for none), so this stock goes in Top Gainers, and
+        // if IBKR won't let you open a position in it, a pop-up says so.
         if (!regularHoursBars)
+        {
             this.topGainers.Charted(id);
+            IbkrRestrictions.Shared.Charted(id, this.WarnRestricted);
+        }
+
         var from = requestParameters.FromTime;
         var to = requestParameters.ToTime;
         var ct = requestParameters.CancellationToken;

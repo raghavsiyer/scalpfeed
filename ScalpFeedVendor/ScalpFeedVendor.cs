@@ -103,7 +103,7 @@ public sealed class ScalpFeedVendor : MultiVendor
 
         var (ticket, quote, problem) = depth == null
             ? (null, double.NaN, "market data isn't connected")
-            : OrderHotkeys.Decide(hotkey, depth);
+            : OrderHotkeys.Decide(hotkey, depth, restriction: IbkrRestrictions.Shared.Reason);
 
         int id = 0;
         if (problem == null)
