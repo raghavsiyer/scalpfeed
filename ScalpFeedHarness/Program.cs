@@ -688,6 +688,11 @@ void RunSearchFilter()
         "a stock whose symbol ends in W is kept: it's the description that counts");
     Check(SearchFilter.Shows("ABCR", "ABC Inc. - Rights", "ABC") && SearchFilter.Shows("ABCU", "ABC Inc. - Units", "ABC") && SearchFilter.Shows("ABC", null, "ABC"),
         "rights, units and a missing description are kept");
+    Check(!SearchFilter.Shows("ACCO", "Acco Brands Corporation Common Stock", "brand") && !SearchFilter.Shows("BNAI", common, "brand"),
+        "a company name doesn't match: \"brand\" finds neither ACCO (Acco Brands) nor BNAI (Brand Engagement)");
+    Check(SearchFilter.Shows("BNAI", common, "bna") && SearchFilter.Shows("BNAV", "Amplify Fairlead Tactical Bitcoin ETF", "BNA") && !SearchFilter.Shows("ABNA", "x", "BNA"),
+        "tickers that start with what's typed match, in any case; one with it in the middle doesn't");
+    Check(SearchFilter.Shows("BRK/B", "Berkshire Hathaway Inc. Class B", "BRK.B") && !SearchFilter.Shows("BNAI", common, "  "), "BRK.B finds BRK/B; blank finds nothing");
 }
 
 // The stocks opened in a chart, added to the end of IBKR Top Gainers: the current one always, earlier ones over the volume.
