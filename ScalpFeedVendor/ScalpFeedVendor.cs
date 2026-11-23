@@ -75,7 +75,7 @@ public sealed class ScalpFeedVendor : MultiVendor
         base.Disconnect();
     }
 
-    /// <summary>An order hotkey was pressed with Quantower in front: its order goes, or a warning sound says why not.</summary>
+    /// <summary>An order hotkey was pressed with Quantower in front: its order goes, or a pop-up says why not.</summary>
     private void OnOrderHotkey(OrderHotkey hotkey)
     {
         var market = this.marketData;
@@ -113,7 +113,7 @@ public sealed class ScalpFeedVendor : MultiVendor
         {
             string what = $"{(ticket.Buy ? "buy" : "sell")} {ticket.Quantity:#,0} {ticket.Symbol} {ticket.Tif} limit {ticket.LimitPrice} ({(ticket.Buy ? "ask" : "bid")} {quote} {(ticket.Buy ? "+" : "-")} {hotkey.Offset:0.##%}, at most {OrderHotkey.MaxOffset:0.00})";
             // Logged only: a pop-up for every order sent was noise (your request, 2026-11-19). One that sent
-            // nothing still pops up, with a sound.
+            // nothing still pops up, silently since 2026-11-23 (FeedAlarm.Muted).
             Log.Info($"[hotkey] {hotkey.Keys}: order {id}, {what}");
         }
         else

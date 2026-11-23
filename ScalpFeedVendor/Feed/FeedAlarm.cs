@@ -6,10 +6,16 @@ namespace ScalpFeedVendor.Feed;
 /// Sound for a feed problem, because a warning that only reaches a notification panel is easy
 /// to miss mid-trade. It repeats until a real quote arrives. Static because Quantower builds a
 /// new vendor for every reconnect, and an alarm has to outlive those. Never call from the data
-/// path; the tones block their own worker thread for about a second.
+/// path; the tones block their own worker thread for about a second. Muted (<see cref="Muted"/>).
 /// </summary>
 internal static class FeedAlarm
 {
+    /// <summary>
+    /// No sound at all, for any warning (your request, 2026-11-23: no sounds on any notification). The pop-ups and
+    /// the alarm's log lines carry on as before; false brings the sounds back unchanged.
+    /// </summary>
+    public static bool Muted { get; set; } = true;
+
     private static readonly (uint Hz, uint Ms)[] WarningTones =
         [(1000, 150), (700, 150), (1000, 150), (700, 150), (1000, 150), (700, 150)];
 
@@ -119,6 +125,9 @@ internal static class FeedAlarm
 
     private static void Play(byte[] sound, bool warning)
     {
+        if (Muted)
+            return;
+
         var test = TestPlayer;
         if (test != null)
         {

@@ -3310,12 +3310,7 @@ async Task RunAlarmTest()
     Check(SilentSound.Play(ToneWav.Build(tones, 0)), "Windows plays it (silently here)");
 
     FeedAlarm.TestPlayer = null;
-    Console.WriteLine("Playing the real warning sound");
-    FeedAlarm.PlayWarning();
-    await Task.Delay(1500);
-    Console.WriteLine("Playing the real all-clear sound");
-    FeedAlarm.PlayAllClear();
-    await Task.Delay(800);
+    FeedAlarm.Muted = true;
 }
 
 // Back-to-back loads of very differently priced symbols. A live update left over from the
@@ -3327,6 +3322,17 @@ async Task RunCrossTest()
     var now = DateTime.UtcNow;
     int badSpyBars = 0, badPlugBars = 0, loads = 0;
 
+
+    // Muted by default (your request, 2026-11-23): an alarm still turns on and off, but nothing reaches the speaker.
+    Check(FeedAlarm.Muted, "sounds are muted by default");
+    FeedAlarm.Raise("muted");
+    FeedAlarm.PlayWarning();
+    FeedAlarm.Clear();
+    FeedAlarm.PlayAllClear();
+    Check(warnings == 0 && allClears == 0 && !FeedAlarm.IsActive, "muted, an alarm and its all-clear play nothing");
+
+    // The rest is the alarm's timing with the sound on, as it would be if unmuted.
+    FeedAlarm.Muted = false;
     for (int round = 0; round < 12; round++)
     {
         var plug = await history.LoadAsync("PLUG{=1m}", now.AddHours(-3), DateTime.UtcNow, CancellationToken.None);
@@ -3385,6 +3391,7 @@ async Task RunDayVolume(string[] symbols)
 
         Console.WriteLine($"RESULT {symbol,-5} 1m sum 11-04: overnight={overnight:F0} pre={pre:F0} regular={regular:F0} post={post:F0} total={overnight + pre + regular + post:F0} bars={minutes.Count}");
 
+    // No real sound is played here any more: you asked for none (2026-11-23).
         // The plugin merges volume onto regular-hours bars by bar time, so the times must line up.
         foreach (var (code, days) in new[] { ("=1d", 60), ("=1w", 400), ("=1mo", 1000) })
         {

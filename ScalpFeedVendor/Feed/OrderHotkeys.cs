@@ -385,7 +385,7 @@ internal sealed class HotkeyListener
         if (onPress == null)
         {
             Log.Info($"[hotkey] {key.Keys} pressed while the connection is down, so nothing was sent");
-            FeedAlarm.PlayWarning();
+            FeedAlarm.PlayWarning(); // muted (FeedAlarm.Muted)
             return;
         }
 
