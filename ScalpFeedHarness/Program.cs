@@ -164,6 +164,14 @@ switch (args[0])
         Check(DepthSizes.Shows(300, 2.57, 2.57, 2.57, "NSDQ") && DepthSizes.Shows(300, 2.56, 2.57, 2.56, "NSDQ"), "Nasdaq's rows at the best price, book's or quote's, show at any size");
         Check(DepthSizes.Shows(200, 2.55, 2.57, 2.57, "TSSM") && DepthSizes.Shows(200, 2.55, 2.57, 2.57, "BATS") && !DepthSizes.Shows(100, 2.55, 2.57, 2.57, "MLCO"),
             "market makers and other venues keep the 100-share line");
+        Check(DepthSizes.InRange(1.80, 2.00, 2.00, true) && !DepthSizes.InRange(1.79, 2.00, 2.00, true), "a bid exactly 10% under the best bid shows, and one past it doesn't");
+        Check(DepthSizes.InRange(2.20, 2.00, 2.00, false) && !DepthSizes.InRange(2.21, 2.00, 2.00, false), "an ask exactly 10% over the best ask shows, and one past it doesn't");
+        Check(DepthSizes.InRange(0.2322, 0.2580, 0.2580, true) && !DepthSizes.InRange(0.2321, 0.2580, 0.2580, true) && DepthSizes.InRange(0.2838, 0.2580, 0.2580, false) && !DepthSizes.InRange(0.2839, 0.2580, 0.2580, false), "the same in $0.0001 steps");
+        Check(DepthSizes.InRange(2.00, 2.00, 2.00, true) && DepthSizes.InRange(3.00, 3.00, 3.00, false) && DepthSizes.InRange(2.90, 3.00, 3.00, false), "each side goes by its own best, so with bid 2 and ask 3 both still show");
+        Check(DepthSizes.InRange(2.50, 2.00, 2.00, true) && DepthSizes.InRange(1.50, 2.00, 2.00, false), "a price better than the best is never out of range");
+        Check(DepthSizes.InRange(1.70, 2.00, 1.70, true) && DepthSizes.InRange(2.40, 2.00, 2.40, false), "a row at the quote's price shows though the book's best is over 10% away");
+        Check(DepthSizes.InRange(1.00, double.NaN, double.NaN, true) && DepthSizes.InRange(9.00, 0, double.NaN, false), "with no best price nothing is cut");
+        Check(Enumerable.Range(1000, 90_000).All(n => DepthSizes.InRange(n / 10_000.0 * 0.9, n / 10_000.0, double.NaN, true) && DepthSizes.InRange(n / 10_000.0 * 1.1, n / 10_000.0, double.NaN, false)), "rounding never cuts a row exactly at 10%, from 10 cents to $10");
         var depthRows = new List<IbkrDepthRow> { new(2.55, 100, "A"), new(2.57, 100, "B"), new(2.56, 300, "C") };
         Check(DepthSizes.Best(depthRows, true) == 2.57 && DepthSizes.Best(depthRows, false) == 2.55 && double.IsNaN(DepthSizes.Best(new List<IbkrDepthRow>(), true)), "the best price is found on each side");
         break;

@@ -547,8 +547,10 @@ internal sealed class IbkrBridge : IIbkrSink
             if (target.Count == ids.Length)
                 break;
 
+            // The Limit and Res rows are marks, not orders, so they show however far off they are.
             bool res = row.Venue == ResVenue;
-            if (res || LuldBand.IsLabel(row.Venue) || DepthSizes.Shows(row.Size, row.Price, bestInBook, quoted, row.Venue))
+            if (res || LuldBand.IsLabel(row.Venue)
+                || (DepthSizes.InRange(row.Price, bestInBook, quoted, side == QuotePriceType.Bid) && DepthSizes.Shows(row.Size, row.Price, bestInBook, quoted, row.Venue)))
             {
                 // The Res row's size is already what it should read. A Limit row's 100 shares read 1.
                 double size = res ? row.Size : DepthSizes.ToHundreds(row.Size);

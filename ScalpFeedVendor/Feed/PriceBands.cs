@@ -5,7 +5,8 @@ namespace ScalpFeedVendor.Feed;
 /// shows as 28, and with rows of 100 shares or fewer left out unless they're at the best price, because
 /// hiding those would show a wrong spread. Nasdaq's own rows (venue NSDQ) behind the best price are left
 /// out up to 500 shares, 5 lots (your choice, 2026-11-18); its market makers (TSSM, MLCO and so on) keep
-/// the 100. Only depth rows use this. The quote, tape and bars are unaffected.
+/// the 100. Orders over 10% from their own side's best price are left out too (your request, 2026-11-24).
+/// Only depth rows use this. The quote, tape and bars are unaffected.
 /// </summary>
 internal static class DepthSizes
 {
@@ -14,6 +15,7 @@ internal static class DepthSizes
 
     private const double MostSharesHidden = 100;
     private const double MostNasdaqSharesHidden = 500;
+    private const double MostAway = 0.10;
     private const double SamePrice = 1e-9;
 
     /// <param name="bestInBook">This side's best price among the depth rows.</param>
@@ -21,6 +23,16 @@ internal static class DepthSizes
     /// <param name="venue">The row's venue, which sets how many shares behind the best price are left out.</param>
     public static bool Shows(double shares, double price, double bestInBook, double quoted, string venue = null) =>
         shares > 0 && (shares > MostHidden(venue) || Math.Abs(price - bestInBook) < SamePrice || Math.Abs(price - quoted) < SamePrice);
+
+    /// <summary>
+    /// Whether a row is within 10% of its side's best price in the book: a bid no further below the best bid, an ask no
+    /// further above the best ask. Each side from its own best, not from a price between, so a wide spread never hides
+    /// the best prices; a row at the quote's price always counts as within, as it does for its size.
+    /// </summary>
+    public static bool InRange(double price, double bestInBook, double quoted, bool bid) =>
+        !(bestInBook > 0)
+        || Math.Abs(price - quoted) < SamePrice
+        || (bid ? price >= (bestInBook * (1 - MostAway)) - SamePrice : price <= (bestInBook * (1 + MostAway)) + SamePrice);
 
     private static double MostHidden(string venue) => venue == NasdaqVenue ? MostNasdaqSharesHidden : MostSharesHidden;
 
