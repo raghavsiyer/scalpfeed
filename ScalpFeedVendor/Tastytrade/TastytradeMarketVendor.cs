@@ -68,6 +68,7 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
     private HistoryClient history;
     private IbkrBridge ibkr;
     private FloatSource floats;
+    private SplitSource splits;
     private VolumeAverages averages;
     private DateTime nextAveragesUtc;
 
@@ -195,6 +196,7 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
             this.ibkr = new IbkrBridge(this.TimedPush, this.OnIbkrPrint, this.OnTopGainers, this.OnHalts, s => this.PushDayBarNow(s.Streamer));
             this.ibkr.Start();
             this.floats = new FloatSource(this.OnFloatArrived);
+            this.splits = new SplitSource();
             this.averages = new VolumeAverages(this.history.LoadAsync, this.OnAverageArrived);
 
             return ConnectionResult.CreateSuccess();
@@ -1393,6 +1395,8 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
         this.ibkr = null;
         this.floats?.Dispose();
         this.floats = null;
+        this.splits?.Dispose();
+        this.splits = null;
         this.averages?.Dispose();
         this.averages = null;
 

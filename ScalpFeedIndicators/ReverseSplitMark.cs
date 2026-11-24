@@ -9,9 +9,9 @@ namespace ScalpFeedIndicators;
 /// <summary>
 /// A circle with an R in it, and the ratio beside it, under the bar of the stock's last reverse split on a daily chart
 /// (your request, 2026-11-23). It sits on the bottom edge of the price area, just above the time axis: Quantower's
-/// documented chart API has nothing for the axis strip itself. The split comes from split-cache.json, which the
-/// ScalpFeed connection fills with the float (SplitFacts). Nothing is drawn on any other timeframe, when the chart
-/// doesn't reach back to the split, or for a forward split.
+/// documented chart API has nothing for the axis strip itself. The splits come from split-cache.json, which the
+/// ScalpFeed connection fills from Massive (SplitSource). Nothing is drawn on any other timeframe, when the chart
+/// doesn't reach back to the last reverse split, or for one announced but still to come.
 /// </summary>
 internal sealed class ReverseSplitMark
 {
@@ -28,11 +28,7 @@ internal sealed class ReverseSplitMark
             var graphics = args?.Graphics;
             if (window == null || graphics == null || history?.Aggregation is not HistoryAggregationTime time || time.Period != Period.DAY1)
                 return;
-            if (SplitCacheFile.Get(symbol) is not { Reverse: true, Date: DateTime day } split)
-                return;
-
-            int bar = SplitFacts.BarFor(day, history.Count, i => history[i, SeekOriginHistory.Begin].TimeLeft);
-            if (bar < 0)
+            if (ReverseSplits.Latest(SplitCacheFile.Get(symbol), history.Count, i => history[i, SeekOriginHistory.Begin].TimeLeft) is not var (bar, split))
                 return;
 
             // GetChartX is a bar's left edge (Quantower's DrawOnBars sample), so half a bar more is its middle.
@@ -40,7 +36,7 @@ internal sealed class ReverseSplitMark
             float x = (float)(window.CoordinatesConverter.GetChartX(barTime) + (chart.BarsWidth / 2.0));
             Rectangle area = window.ClientRectangle;
             Draw(graphics, area, x, split.Ratio);
-            this.LogOnce($"{symbol} {split.Describe()}, under the {barTime:yyyy-MM-dd} bar at x {x:0} of {area}; the paint covers {args.Rectangle}, window {args.WindowIndex}");
+            this.LogOnce($"{symbol} reverse split {split.Ratio} on {split.Day:yyyy-MM-dd}, under the {barTime:yyyy-MM-dd} bar at x {x:0} of {area}; the paint covers {args.Rectangle}, window {args.WindowIndex}");
         }
         catch (Exception ex)
         {
@@ -113,31 +109,28 @@ internal sealed class ReverseSplitMark
 internal static class SplitCacheFile
 {
     private static readonly object Gate = new();
-    private static Dictionary<string, SplitFacts> cache = new();
+    private static ReverseSplits cache = ReverseSplits.None;
     private static DateTime fileTimeUtc;
     private static long checkedMs = long.MinValue;
 
-    public static SplitFacts Get(string symbol)
+    public static IReadOnlyList<ReverseSplit> Get(string symbol)
     {
-        if (string.IsNullOrEmpty(symbol))
-            return null;
-
         lock (Gate)
         {
             long now = Environment.TickCount64;
             if (now - checkedMs >= 2000)
             {
                 checkedMs = now;
-                string path = SplitFacts.CachePath;
+                string path = ReverseSplits.CachePath;
                 var time = File.Exists(path) ? File.GetLastWriteTimeUtc(path) : default;
                 if (time != fileTimeUtc)
                 {
                     fileTimeUtc = time;
-                    cache = SplitFacts.ReadCache(path);
+                    cache = ReverseSplits.Read(path);
                 }
             }
 
-            return cache.GetValueOrDefault(symbol);
+            return cache.Of(symbol);
         }
     }
 }

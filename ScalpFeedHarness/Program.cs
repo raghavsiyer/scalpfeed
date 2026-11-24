@@ -236,6 +236,9 @@ switch (args[0])
     case "float":
         await RunFloat();
         break;
+    case "splits":
+        await RunSplits(args.Length > 1 ? args[1] : null);
+        break;
     case "charted":
         RunCharted();
         break;
@@ -531,12 +534,131 @@ async Task RunRvol(string[] symbols)
     }
 }
 
+// The reverse splits from Massive, against answers made up here (its terms keep its data out of a public repo), and
+// nothing is sent anywhere. With "live", one real request with the key in massive.json, into a temporary folder; any
+// symbols after it, comma separated, have theirs listed.
+async Task RunSplits(string mode)
+{
+    string dir = Path.Combine(Path.GetTempPath(), "scalpfeed-splits-" + Environment.ProcessId);
+    Directory.CreateDirectory(dir);
+    string path = Path.Combine(dir, ReverseSplits.FileName);
+    if (mode != null)
+    {
+        using var real = new SplitSource(path, checkEvery: Timeout.InfiniteTimeSpan);
+        await real.CheckAsync();
+        var got = ReverseSplits.Read(path);
+        Check(got.Stocks.Count >= SplitSource.FewestStocks, $"Massive answered with {got.Stocks.Count} stocks");
+        foreach (var s in mode.Split(',').Where(s => s != "live"))
+            Console.WriteLine($"{s}: {string.Join(", ", got.Of(s).Select(x => $"{x.Day:yyyy-MM-dd} {x.Ratio}"))}");
+        Directory.Delete(dir, true);
+        return;
+    }
+
+    long ms = 1_794_860_000_000;
+    static string Row(string ticker, string day, string from, string to, string type = "reverse_split") =>
+        $$$"""{"ticker":"{{{ticker}}}","execution_date":"{{{day}}}","split_from":{{{from}}},"split_to":{{{to}}},"adjustment_type":"{{{type}}}","id":"x"}""";
+    static string Answer(params string[] rows) => "{\"status\":\"OK\",\"results\":[" + string.Join(",", rows) + "]}";
+    ReverseSplits Parse(params string[] rows) => ReverseSplits.FromAnswer(JsonNode.Parse(Answer(rows)), ms);
+    static DateTime Day(string d) => DateTime.ParseExact(d, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal);
+
+    var parsed = Parse(
+        Row("AAA", "2025-03-04", "20", "1"), Row("AAA", "2026-06-01", "100.0", "1.0"), Row("AAA", "2025-03-04", "20", "1"), Row("BBB", "2026-05-05", "4.5", "1"),
+        Row("CCC", "2026-05-05", "3", "2"), Row("DDD", "2026-05-05", "1", "10", "forward_split"), Row("EEE", "2026-05-05", "1", "10"), Row("FFF", "soon", "10", "1"),
+        Row("GG.A", "2026-02-02", "8", "1"), Row("HHH", "2026-05-05", "\"ten\"", "1"), "null", "{}");
+    Check(parsed.Of("AAA").SequenceEqual(new[] { new ReverseSplit(new DateTime(2026, 6, 1), "1:100"), new ReverseSplit(new DateTime(2025, 3, 4), "1:20") }), "a stock's reverse splits, newest first whatever order they came in, each once");
+    Check(parsed.Of("bbb").Single().Ratio == "1:4.5" && parsed.Of("CCC").Single().Ratio == "2:3", "ratios that aren't whole");
+    Check(parsed.Of("GG/A").Single().Ratio == "1:8", "a share class, which tastytrade writes with a slash");
+    Check(parsed.Stocks.Keys.Order().SequenceEqual(new[] { "AAA", "BBB", "CCC", "GG.A" }) && parsed.Of("ZZZ").Count == 0 && parsed.Of(null).Count == 0, $"forward splits and rows it can't read are left out ({string.Join(" ", parsed.Stocks.Keys.Order())})");
+    Check(Parse().Stocks.Count == 0 && ReverseSplits.FromAnswer(JsonNode.Parse("{\"results\":{}}"), ms).Stocks.Count == 0, "no results is none");
+
+    parsed.Write(path);
+    var back = ReverseSplits.Read(path);
+    Check(back.FetchedMs == ms && back.Stocks.Count == 4 && back.Of("AAA").SequenceEqual(parsed.Of("AAA")) && back.Of("GG/A").Count == 1, "the file reads back the same");
+    var reading = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+    var letGo = Task.Run(async () => { await Task.Delay(60); reading.Dispose(); });
+    Parse(Row("NEW", "2026-06-01", "10", "1")).Write(path);
+    await letGo;
+    Check(ReverseSplits.Read(path).Of("NEW").Count == 1, "a chart reading it only holds up the swap until it's done");
+    File.WriteAllText(path, "{\"splits\": {");
+    bool damaged = ReverseSplits.Read(path) == ReverseSplits.None;
+    File.WriteAllText(path, "{\"AAA\":{\"date\":\"2026-06-01\",\"reverse\":true,\"ratio\":\"1:100\",\"fetchedMs\":5}}");
+    Check(damaged && ReverseSplits.Read(path) == ReverseSplits.None, "a damaged file, or one from before 2026-11-24, reads as none");
+    File.Delete(path);
+
+    // Which daily bar, with Monday the 7th a holiday.
+    DateTime[] days = [.. new[] { "2026-08-28", "2026-08-31", "2026-09-01", "2026-09-02", "2026-09-03", "2026-09-04", "2026-09-08", "2026-09-09" }.Select(Day)];
+    string Bar(string d)
+    {
+        int i = ReverseSplits.BarFor(Day(d), days.Length, n => days[n]);
+        return i < 0 ? "none" : days[i].ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+    }
+    Check(days.Select(d => d.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)).All(d => Bar(d) == d), "a split goes under its own day's bar, first and last included");
+    Check(Bar("2026-09-05") == "2026-09-08" && Bar("2026-09-07") == "2026-09-08", "on a weekend or holiday, under the next bar");
+    Check(Bar("2026-08-27") == "none" && Bar("2026-09-10") == "none" && ReverseSplits.BarFor(days[0], 0, n => days[n]) == -1, "under none when the bars don't reach back to it, it's still to come, or there are no bars");
+    string Last(params string[] at) => ReverseSplits.Latest([.. at.Select(d => new ReverseSplit(Day(d), "1:2"))], days.Length, n => days[n]) is { } l ? $"{l.Split.Day:MM-dd} at {days[l.Bar]:MM-dd}" : "none";
+    Check(Last("2026-12-24", "2026-09-02", "2026-08-31") == "09-02 at 09-02", "the last split is marked, not one announced but still to come, nor an earlier one");
+    Check(Last("2026-12-24", "2026-01-05") == "none" && Last("2026-12-24") == "none" && Last() == "none", "nothing when the last is before the chart, or there's none yet");
+
+    // The fetcher, with a stand-in for Massive.
+    var now = new DateTime(2026, 11, 24, 9, 0, 0, DateTimeKind.Utc);
+    string key = null;
+    var asked = new List<(string Url, string Key)>();
+    string Market(int stocks) => Answer([.. Enumerable.Range(0, stocks).Select(n => Row("T" + n, "2026-06-01", "10", "1"))]);
+    (int, string) answer = (200, Market(300));
+    async Task<(int, string)> Send(string url, string k, CancellationToken ct)
+    {
+        asked.Add((url, k));
+        await Task.Delay(5, ct);
+        return answer;
+    }
+
+    using (var source = new SplitSource(path, Send, () => key, () => now, Timeout.InfiniteTimeSpan))
+    {
+        await source.CheckAsync();
+        Check(asked.Count == 0 && !File.Exists(path), "with no key, nothing is sent");
+        key = "mv-test-key-123";
+        await Task.WhenAll(source.CheckAsync(), source.CheckAsync());
+        Check(asked.Count == 1 && asked[0].Key == key && !asked[0].Url.Contains(key) && asked[0].Url.StartsWith("https://api.massive.com/"), "once there is, one request, with the key apart from the address");
+        Check(ReverseSplits.Read(path).Stocks.Count == 300, "and the file is written");
+        now = now.AddHours(5.9);
+        await source.CheckAsync();
+        Check(asked.Count == 1, "kept for 6 hours");
+    }
+
+    using (var source = new SplitSource(path, Send, () => key, () => now, Timeout.InfiniteTimeSpan))
+    {
+        await source.CheckAsync();
+        Check(asked.Count == 1, "across a reconnect or restart too");
+        now = now.AddHours(0.2);
+        answer = (200, Market(SplitSource.FewestStocks - 1));
+        await source.CheckAsync();
+        Check(asked.Count == 2 && ReverseSplits.Read(path).Stocks.Count == 300, "then fetched again, and an answer with too few stocks leaves the file alone");
+        answer = (200, Market(400));
+        now = now.AddMinutes(9);
+        await source.CheckAsync();
+        bool waited = asked.Count == 2;
+        now = now.AddMinutes(2);
+        await source.CheckAsync();
+        Check(waited && asked.Count == 3 && ReverseSplits.Read(path).Stocks.Count == 400, "a failure waits 10 minutes before trying again");
+        foreach (var bad in new[] { (401, ""), (429, ""), (500, "oops"), (200, "<html>"), (302, "") })
+        {
+            now = now.AddHours(7);
+            answer = bad;
+            await source.CheckAsync();
+        }
+        Check(asked.Count == 8 && ReverseSplits.Read(path).Stocks.Count == 400, "a refused key, a rate limit, an error, a redirect or a page that isn't data leaves the file alone");
+    }
+
+    Check(!File.ReadAllText(Log.FilePath).Contains("mv-test-key-123"), "the key is never in the log");
+    Directory.Delete(dir, true);
+}
+
 // The float from stockanalysis.com through Firecrawl, against canned answers: nothing is sent anywhere.
 async Task RunFloat()
 {
     // Trimmed from Firecrawl's answers on 2026-11-16.
-    static string Stats(string symbol, string flt, string shares, string volume, string more = "") =>
-        $$$"""{"success":true,"data":{"alexandria":[{"provider":"stockanalysis-com","capability":"securities/stock_statistics","creditsCost":5,"data":{"name":"{{{symbol}}}","sections":[ {"id":"shares","items":[{"hover":"{{{shares}}}","id":"sharesout","title":"Shares Outstanding","value":"x"},{"hover":"{{{flt}}}","id":"float","title":"Float","value":"x"}]}, {"id":"stockPrice","items":[{"hover":"{{{volume}}}","id":"averageVolume","title":"Average Volume (20 Days)","value":"x"}]}{{{more}}}],"symbol":"{{{symbol}}}"}}]}}""";
+    static string Stats(string symbol, string flt, string shares, string volume) =>
+        $$$"""{"success":true,"data":{"alexandria":[{"provider":"stockanalysis-com","capability":"securities/stock_statistics","creditsCost":5,"data":{"name":"{{{symbol}}}","sections":[ {"id":"shares","items":[{"hover":"{{{shares}}}","id":"sharesout","title":"Shares Outstanding","value":"x"},{"hover":"{{{flt}}}","id":"float","title":"Float","value":"x"}]}, {"id":"stockPrice","items":[{"hover":"{{{volume}}}","id":"averageVolume","title":"Average Volume (20 Days)","value":"x"}]}],"symbol":"{{{symbol}}}"}}]}}""";
     const string NotFound = """{"success":true,"data":{"alexandria":[{"provider":"stockanalysis-com","capability":"securities/stock_statistics","error":{"code":"not_found","message":"The workflow could not find that resource.","status":404}}]}}""";
 
     long ms = 1_794_860_000_000;
@@ -556,45 +678,6 @@ async Task RunFloat()
     string dir = Path.Combine(Path.GetTempPath(), "scalpfeed-float-" + Environment.ProcessId);
     Directory.CreateDirectory(dir);
     string cachePath = Path.Combine(dir, "float-cache.json");
-
-    // The last split, in the same answer. FGL's section as Firecrawl sent it on 2026-11-23; what the site says for a
-    // stock that has never split hasn't been seen, so both its usual n/a and no section at all are read as none.
-    static string Split(string date, string type, string ratio) =>
-        $$$""", {"id":"stockSplits","items":[{"hover":"{{{date}}}","id":"lastSplitDate","title":"Last Split Date","value":"Sep 1, 2026"},{"hover":"{{{type}}}","id":"lastSplitType","title":"Split Type","value":"{{{type}}}"},{"hover":"{{{ratio}}}","id":"splitRatio","title":"Split Ratio","value":"{{{ratio}}}"}],"text":""}""";
-    SplitFacts Read(string more) => SplitFacts.FromStatistics(JsonNode.Parse(Stats("FGL", "1", "1", "1", more))["data"]["alexandria"][0]["data"], ms);
-    string fglSection = Split("September 1, 2026", "Reverse", "1:100");
-    var fglSplit = Read(fglSection);
-    var forward = Read(Split("June 10, 2024", "Forward", "10:1"));
-    Check(fglSplit == new SplitFacts(new DateTime(2026, 9, 1), true, "1:100", ms), $"the last split's date, type and ratio ({fglSplit.Describe()})");
-    Check(forward is { Reverse: false, Ratio: "10:1" } && forward.Date == new DateTime(2024, 6, 10), "a forward split isn't a reverse one");
-    Check(Read("").Date == null && Read(Split("n/a", "n/a", "n/a")).Date == null && Read("").Describe() == "no split listed", "none listed is none");
-    Check(Read(fglSection.Replace("\"hover\":\"September 1, 2026\",", "")).Date == new DateTime(2026, 9, 1), "the short date does when there's no exact one");
-
-    string splitPath = Path.Combine(dir, SplitFacts.FileName);
-    SplitFacts.WriteCache(splitPath, new Dictionary<string, SplitFacts> { ["FGL"] = fglSplit, ["NONE"] = new(null, false, null, ms) });
-    var splitsBack = SplitFacts.ReadCache(splitPath);
-    Check(splitsBack["fgl"] == fglSplit && splitsBack["NONE"] == new SplitFacts(null, false, null, ms), "the split file reads back the same, none included, whatever the case");
-    var reading = new FileStream(splitPath, FileMode.Open, FileAccess.Read, FileShare.Read);
-    var letGo = Task.Run(async () => { await Task.Delay(60); reading.Dispose(); });
-    splitsBack["MORE"] = forward;
-    SplitFacts.WriteCache(splitPath, splitsBack);
-    await letGo;
-    Check(SplitFacts.ReadCache(splitPath).Count == 3, "a chart reading it only holds up the swap until it's done");
-    File.WriteAllText(splitPath, "{\"FGL\": {");
-    Check(SplitFacts.ReadCache(splitPath).Count == 0, "a damaged file reads as empty");
-    File.Delete(splitPath);
-
-    // Which daily bar it goes under: FGL's week, with Labor Day (Monday the 7th) closed.
-    DateTime[] days = [.. new[] { "08-28", "08-31", "09-01", "09-02", "09-03", "09-04", "09-08", "09-09" }.Select(d => DateTime.ParseExact("2026-" + d, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal))];
-    string Bar(string d)
-    {
-        int i = SplitFacts.BarFor(DateTime.ParseExact("2026-" + d, "yyyy-MM-dd", CultureInfo.InvariantCulture), days.Length, n => days[n]);
-        return i < 0 ? "none" : days[i].ToString("MM-dd", CultureInfo.InvariantCulture);
-    }
-    Check(days.All(d => Bar(d.ToString("MM-dd", CultureInfo.InvariantCulture)) == d.ToString("MM-dd", CultureInfo.InvariantCulture)), "a split goes under its own day's bar, first and last included");
-    Check(Bar("09-05") == "09-08" && Bar("09-07") == "09-08", "on a weekend or holiday, under the next bar");
-    Check(Bar("08-27") == "none" && Bar("09-10") == "none" && SplitFacts.BarFor(days[0], 0, n => days[n]) == -1, "nothing when the bars don't reach back to it, it's still to come, or there are no bars");
-
     FloatFacts.WriteCache(cachePath, new Dictionary<string, FloatFacts> { ["GDHG"] = gdhg, ["ZZZZ"] = new("2026-11-16", double.NaN, double.NaN, double.NaN, ms) });
     var back = FloatFacts.ReadCache(cachePath);
     Check(back["gdhg"] == gdhg && !back["ZZZZ"].Known && back["ZZZZ"].Day == "2026-11-16", "the cache file reads back the same, a missing symbol included, whatever the case");
@@ -644,36 +727,6 @@ async Task RunFloat()
     floats.Want("ZQZQX");
     await floats.IdleAsync();
     Check(sent.IsEmpty, "not asked again the same day, found or not");
-
-    // The split is kept with the float, in its own file, before the connection is told; a stock fetched without one
-    // has none, and a stock the site doesn't have isn't in it.
-    SplitFacts whenTold = null;
-    answers["FGL"] = (200, Stats("FGL", "1,728,837", "1,731,736", "1,460,667", fglSection));
-    using (var split = new FloatSource(s => whenTold = SplitFacts.ReadCache(splitPath).GetValueOrDefault(s), cachePath, Send, () => key, () => now, Timeout.InfiniteTimeSpan))
-    {
-        split.Want("FGL");
-        await split.IdleAsync();
-    }
-    var kept = SplitFacts.ReadCache(splitPath);
-    Check(sent.SequenceEqual(new[] { "FGL" }) && whenTold is { Reverse: true, Ratio: "1:100" }, "one lookup brings the float and the split, saved before the connection is told");
-    Check(kept["FGL"].Date == new DateTime(2026, 9, 1) && kept["GDHG"].Date == null && !kept.ContainsKey("ZQZQX"), $"every stock fetched is in the split file, one without a split too ({string.Join(" ", kept.Keys)})");
-    Check(!File.ReadAllText(cachePath).Contains("split", StringComparison.OrdinalIgnoreCase) && FloatFacts.ReadCache(cachePath).ContainsKey("FGL"), "the float file momo-algo shares is as before");
-
-    // Not being able to save the split (its path is a folder here) doesn't cost the float.
-    string unwritable = Path.Combine(dir, "folder");
-    Directory.CreateDirectory(unwritable);
-    using (var stuck = new FloatSource(null, cachePath, Send, () => key, () => now, Timeout.InfiniteTimeSpan, unwritable))
-    {
-        stuck.Want("STUCK");
-        await stuck.IdleAsync();
-        Check(stuck.Get("STUCK") is { Known: true }, "a split that can't be saved doesn't cost the float");
-    }
-    answers["ODD"] = (200, Stats("ODD", "1,000,000", "2,000,000", "500,000", """, {"id":"stockSplits","items":{"lastSplitDate":5}}"""));
-    floats.Want("ODD");
-    await floats.IdleAsync();
-    Check(floats.Get("ODD") is { Known: true } && !SplitFacts.ReadCache(splitPath).ContainsKey("ODD"), "nor does a split section in a shape it can't read");
-    sent.Clear();
-
     using (var reopened = new FloatSource(null, cachePath, Send, () => key, () => now))
     {
         reopened.Want("GDHG");

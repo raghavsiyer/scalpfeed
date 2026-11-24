@@ -18,9 +18,6 @@ namespace ScalpFeedVendor.Feed;
 /// A symbol asked for while there's no key, or while fetches are paused (rate limited, out of credits), is held and
 /// asked for again every 30 seconds until it goes through: it's only asked for when first quoted, so on 2026-11-19
 /// SEAT, quoted before the key was in, never got its float, and the rows queued behind a rate limit were dropped.
-/// The same answer carries the stock's last split, kept in split-cache.json for the marker on daily charts
-/// (SplitFacts; your request, 2026-11-23). It's as old as the float: a stock cached before then has none until its
-/// next fetch, and so does one whose float the bot fetched. None is fetched for the split alone.
 /// </summary>
 internal sealed class FloatSource : IDisposable
 {
@@ -45,8 +42,6 @@ internal sealed class FloatSource : IDisposable
     private readonly Func<string> readKey;
     private readonly Func<DateTime> utcNow;
     private readonly string cachePath;
-    private readonly string splitPath;
-    private readonly ConcurrentDictionary<string, SplitFacts> splits;
     private readonly Action<string> arrived;
     private readonly object fileGate = new();
     private DateTime pausedUntilUtc;
@@ -60,8 +55,7 @@ internal sealed class FloatSource : IDisposable
 
     /// <param name="arrived">Called from the background with a symbol whose facts just came in.</param>
     /// <param name="retryHeldEvery">The harness passes Timeout.InfiniteTimeSpan and calls RetryHeld itself.</param>
-    /// <param name="splitPath">Beside the float cache unless given.</param>
-    public FloatSource(Action<string> arrived, string cachePath = null, Send send = null, Func<string> readKey = null, Func<DateTime> utcNow = null, TimeSpan? retryHeldEvery = null, string splitPath = null)
+    public FloatSource(Action<string> arrived, string cachePath = null, Send send = null, Func<string> readKey = null, Func<DateTime> utcNow = null, TimeSpan? retryHeldEvery = null)
     {
         var every = retryHeldEvery ?? RetryHeldEvery;
         this.retryHeld = new Timer(_ => this.RetryHeld(), null, every, every);
@@ -69,8 +63,6 @@ internal sealed class FloatSource : IDisposable
         this.cachePath = cachePath ?? FloatFacts.CachePath;
         this.cache = new(FloatFacts.ReadCache(this.cachePath), StringComparer.OrdinalIgnoreCase);
         this.fileTimeUtc = File.Exists(this.cachePath) ? File.GetLastWriteTimeUtc(this.cachePath) : default;
-        this.splitPath = splitPath ?? Path.Combine(Path.GetDirectoryName(this.cachePath) ?? "", SplitFacts.FileName);
-        this.splits = new(SplitFacts.ReadCache(this.splitPath), StringComparer.OrdinalIgnoreCase);
         this.utcNow = utcNow ?? (() => DateTime.UtcNow);
         this.readKey = readKey ?? ReadKeyFile;
         if (send == null)
@@ -273,7 +265,6 @@ internal sealed class FloatSource : IDisposable
         else if (result?["data"] is JsonObject statistics)
         {
             facts = FloatFacts.FromStatistics(statistics, day, fetchedMs);
-            this.KeepSplit(symbol, statistics, fetchedMs);
         }
         else
         {
@@ -295,25 +286,6 @@ internal sealed class FloatSource : IDisposable
             ? $", shares outstanding {FloatFacts.Shares(facts.SharesOut)}, 20-day volume {FloatFacts.Shares(facts.AverageVolume)}, {(int?)result?["creditsCost"] ?? 0} credits"
             : ""));
         this.arrived?.Invoke(symbol);
-    }
-
-    /// <summary>
-    /// Keeps the split that came with the float; only the one fetch under way calls it, so it takes no lock Quantower's
-    /// threads might wait on. Not being able to read or write it never costs the float.
-    /// </summary>
-    private void KeepSplit(string symbol, JsonObject statistics, long fetchedMs)
-    {
-        try
-        {
-            var split = SplitFacts.FromStatistics(statistics, fetchedMs);
-            this.splits[symbol] = split;
-            SplitFacts.WriteCache(this.splitPath, this.splits);
-            Log.Info($"[split] {symbol} {split.Describe()}");
-        }
-        catch (Exception ex)
-        {
-            Log.Info($"[split] {symbol} not saved, trying again with the next fetch: {Log.Scrub(ex.Message)}");
-        }
     }
 
     private void Failed(string symbol, string why)
