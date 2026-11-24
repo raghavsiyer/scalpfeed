@@ -33,7 +33,8 @@ internal sealed record IbkrScan(
     double PriceBelow = 25,
     int VolumeAbove = 50_000,
     double ChangeAbove = 10,
-    double IntervalSeconds = 2)
+    double IntervalSeconds = 2,
+    double DollarVolumeAbove = 0)
 {
     private static readonly TimeZoneInfo Eastern = TimeZoneInfo.FindSystemTimeZoneById("Eastern Standard Time");
 
@@ -80,17 +81,22 @@ internal sealed record IbkrScan(
             o["priceBelow"]?.GetValue<double>() ?? d.PriceBelow,
             o["volumeAbove"]?.GetValue<int>() ?? d.VolumeAbove,
             o["changeAbove"]?.GetValue<double>() ?? d.ChangeAbove,
-            o["intervalSeconds"]?.GetValue<double>() ?? d.IntervalSeconds);
+            o["intervalSeconds"]?.GetValue<double>() ?? d.IntervalSeconds,
+            o["dollarVolumeAbove"]?.GetValue<double>() ?? d.DollarVolumeAbove);
     }
 
     /// <summary>
-    /// The change filter for this scan. It has to match the scan: on the after-hours one, changePercAbove would
-    /// still filter by the regular session's change and hide a stock that only started moving after the close.
+    /// The change and dollar volume filters for this scan. The change one has to match the scan: on the after-hours one,
+    /// changePercAbove would still filter by the regular session's change and hide a stock that only started moving
+    /// after the close. usdVolumeAbove (your request, 2026-11-24) is in dollars and goes by the same day's dollar volume
+    /// as the $Vol column: at 250,000 that day after the close it left out $0.22M and kept $0.30M, and at 5,000,000 it
+    /// left out $4.54M and kept $5.51M. Not yet seen in premarket.
     /// </summary>
     public string Filter(string code) =>
-        this.ChangeAbove > 0
+        (this.ChangeAbove > 0
             ? $"{(code.Contains("AFTER_HOURS", StringComparison.Ordinal) ? "afterHoursChangePercAbove" : "changePercAbove")}={this.ChangeAbove.ToString(CultureInfo.InvariantCulture)};"
-            : "";
+            : "")
+        + (this.DollarVolumeAbove > 0 ? $"usdVolumeAbove={this.DollarVolumeAbove.ToString("0.##", CultureInfo.InvariantCulture)};" : "");
 
     /// <summary>reqScannerSubscription for server versions 143 and up, which take filter options and no version field.</summary>
     public object[] Request(int id, string code) =>

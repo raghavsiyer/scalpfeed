@@ -285,6 +285,11 @@ async Task RunScan(int port, string liveCode)
     Check(IbkrScan.From(JsonNode.Parse("false")) == null && IbkrScan.From(null) == new IbkrScan(), "topGainers in ibkr.json: false turns it off, and it's on by default");
     var custom = IbkrScan.From(JsonNode.Parse("""{"priceAbove":1,"priceBelow":20,"volumeAbove":100000}"""));
     Check(custom == new IbkrScan(PriceAbove: 1, PriceBelow: 20, VolumeAbove: 100000), "its filters can be set");
+    var dollars = IbkrScan.From(JsonNode.Parse("""{"dollarVolumeAbove":250000}"""));
+    Check(dollars == new IbkrScan(DollarVolumeAbove: 250_000) && dollars.Filter("TOP_PERC_GAIN") == "changePercAbove=10;usdVolumeAbove=250000;"
+          && dollars.Filter("TOP_AFTER_HOURS_PERC_GAIN") == "afterHoursChangePercAbove=10;usdVolumeAbove=250000;", "so can a least dollar volume, on both scans");
+    Check(new IbkrScan().DollarVolumeAbove == 0 && IbkrScan.HaltDefaults.DollarVolumeAbove == 0 && (dollars with { ChangeAbove = 0 }).Filter("X") == "usdVolumeAbove=250000;"
+          && Equals(dollars.Request(7, "TOP_PERC_GAIN")[^2], "changePercAbove=10;usdVolumeAbove=250000;"), "which is off unless set, stands alone, and goes in the request's filter options");
     var haltScan = IbkrScan.HaltDefaults;
     Check(haltScan is { Code: "HALTED", AfterHoursCode: "HALTED", Rows: 50, PriceAbove: 0.10, PriceBelow: 25, VolumeAbove: 1, ChangeAbove: 0, IntervalSeconds: 2, Location: "STK.US.MAJOR" }
           && haltScan.Filter("HALTED") == "",

@@ -194,7 +194,8 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
             // Gateway being closed mustn't fail the connection: tape and charts still work,
             // and the quote stays on tastytrade until IBKR answers.
             this.topGainers.Make = this.MakeSymbol;
-            this.topGainers.Stays = this.TradedScanVolume(IbkrConfig.Load().TopGainers?.VolumeAbove ?? 0);
+            var gainers = IbkrConfig.Load().TopGainers;
+            this.topGainers.Stays = this.TradedScanVolume(gainers?.VolumeAbove ?? 0, gainers?.DollarVolumeAbove ?? 0);
             this.halts.Make = this.MakeSymbol;
             this.gainerRanks.Clear();
             this.ibkr = new IbkrBridge(this.TimedPush, this.OnIbkrPrint, this.OnTopGainers, this.OnHalts, s => this.PushDayBarNow(s.Streamer));
@@ -459,11 +460,14 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
     }
 
     /// <summary>
-    /// Whether a stock charted earlier today stays in Top Gainers: its day volume (shares, as last heard) is at least
-    /// the scan's volume filter (your request, 2026-11-23). Unknown volume doesn't stay; with no filter, all stay.
+    /// Whether a stock charted earlier today stays in Top Gainers: its day volume, in shares and dollars as last heard,
+    /// is at least the scan's filters (your request, 2026-11-23, and for dollars 2026-11-24). Unknown volume doesn't
+    /// stay; with no filter, all stay.
     /// </summary>
-    private Func<string, bool> TradedScanVolume(double least) => id =>
-        least <= 0 || (this.statesByStreamer.TryGetValue(this.streamerById.GetValueOrDefault(id, id), out var state) && state.DayVolume >= least);
+    private Func<string, bool> TradedScanVolume(double leastShares, double leastDollars) => id =>
+        (leastShares <= 0 && leastDollars <= 0)
+        || (this.statesByStreamer.TryGetValue(this.streamerById.GetValueOrDefault(id, id), out var state)
+            && (leastShares <= 0 || state.DayVolume >= leastShares) && (leastDollars <= 0 || state.DayTurnover >= leastDollars));
 
     /// <summary>
     /// Each gainers scan's answer, from IBKR's thread: its ranks kept for the climb column, then the list. Its stocks'
