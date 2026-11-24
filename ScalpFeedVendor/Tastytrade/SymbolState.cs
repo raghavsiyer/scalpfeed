@@ -38,6 +38,12 @@ internal sealed class SymbolState
     // Belong to IBKR's receive thread: what was last said in the log about this symbol's LULD.
     public int IbkrHalted = -1;
 
+    /// <summary>Orders placed in a halt wait for this stock (HeldOrders), so its IBKR quote stays on to hear the end.</summary>
+    public volatile bool OrdersHeld;
+
+    /// <summary>When IBKR's quote last came (Environment.TickCount64), whoever asked for it.</summary>
+    public long IbkrQuoteMs;
+
     // The reopening auction's indicative price, paired shares and imbalance, from IBKR during a halt or pause only.
     public double ResPrice = double.NaN;
     public double ResPaired = double.NaN;

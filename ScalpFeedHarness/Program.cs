@@ -244,6 +244,9 @@ switch (args[0])
     case "float":
         await RunFloat();
         break;
+    case "held":
+        RunHeld();
+        break;
     case "splits":
         await RunSplits(args.Length > 1 ? args[1] : null);
         break;
@@ -798,6 +801,129 @@ async Task RunOfferings(string mode)
 
     Check(!File.ReadAllText(Log.FilePath).Contains(key), "the key is never in the log");
     Directory.Delete(dir, true);
+}
+
+// Orders placed in a halt, with stand-ins for the connection and IBKR. No order goes anywhere.
+void RunHeld()
+{
+    var now = new DateTime(2026, 11, 24, 16, 20, 0, DateTimeKind.Utc); // 11:20 ET on a Tuesday
+    var halt = new Dictionary<string, (int, bool)> { ["AAA"] = (2, true), ["BBB"] = (0, true), ["CCC"] = (-1, false), ["DDD"] = (1, true) };
+    var watched = new HashSet<string>();
+    var placed = new List<IbkrOrderTicket>();
+    var events = new List<string>();
+    bool ready = true;
+    string refuse = null;
+    var held = new HeldOrders(() => now, onTimer: false);
+    HeldOrders.Hooks Hooks(string tag = "") => new(
+        s => halt.GetValueOrDefault(s, (-1, false)),
+        (s, on) => _ = on ? watched.Add(s) : watched.Remove(s),
+        () => ready,
+        t => { if (refuse != null) return (0, refuse); placed.Add(t); return (500 + placed.Count, null); },
+        o => events.Add($"{tag}shown {o.Id % 1000} {o.Ticket.Quantity:0}"),
+        (o, problem) => events.Add($"{tag}gone {o.Id % 1000} {problem}"));
+    var hooks = Hooks();
+    IbkrOrderTicket Market(string s, double shares = 1000, bool buy = false) => new(s, buy, shares, "MKT", double.NaN, double.NaN, "DAY");
+    IbkrOrderTicket Limit(string s, double price) => new(s, true, 100, "LMT", price, double.NaN, "DAY");
+
+    Check(held.TryHold(Market("AAA")) == null, "before a connection starts nothing is held");
+    held.Connect(hooks);
+    Check(held.TryHold(Market("BBB")) == null && held.TryHold(Market("CCC")) == null && held.TryHold(Market("ZZZ")) == null, "a stock that's trading, or not known to be halted: not held, so it's sent as ever");
+    var first = held.TryHold(Market("AAA", 2000));
+    Check(first != null && HeldOrders.IsHeldId(first.Id) && !HeldOrders.IsHeldId(800) && watched.Contains("AAA") && events.Count == 1 && placed.Count == 0, "a market order in a halt is held and shown, and the stock's quote kept on");
+    held.Check();
+    now = now.AddMinutes(4);
+    held.Check();
+    Check(placed.Count == 0 && held.All().Count == 1, "it isn't sent while the halt lasts");
+
+    var second = held.TryHold(Limit("AAA", 4.10));
+    Check(held.Modify(second.Id, 300, 4.25, double.NaN) == null && held.All()[1].Ticket is { Quantity: 300, LimitPrice: 4.25 } && events[^1] == $"shown {second.Id % 1000} 300", "a held order can be changed");
+    Check(held.Modify(first.Id, 1500, 9.99, double.NaN) == null && double.IsNaN(held.All()[0].Ticket.LimitPrice) && held.All()[0].Ticket.Quantity == 1500, "and a market order stays one");
+    Check(held.Modify(second.Id, 10.5, 4.25, double.NaN) != null && held.All()[1].Ticket.Quantity == 300 && held.Modify(5, 1, 1, 1) != null, "a change IBKR wouldn't take, or to one that isn't held, is refused");
+    var third = held.TryHold(Market("AAA", 50));
+    Check(held.Cancel(third.Id) == null && held.All().Count == 2 && events[^1] == $"gone {third.Id % 1000} " && held.Cancel(third.Id) != null, "and cancelled, once");
+    Check(watched.Contains("AAA"), "with others still held the quote stays on");
+
+    ready = false;
+    halt["AAA"] = (0, true);
+    held.Check();
+    Check(placed.Count == 0 && held.All().Count == 2, "trading again, but IBKR's trading connection is down: still held");
+    ready = true;
+    held.Check();
+    Check(placed.Count == 2 && placed[0] is { Type: "MKT", Quantity: 1500 } && placed[1] is { Type: "LMT", LimitPrice: 4.25 }, "once it's up they're sent, in the order they were placed");
+    Check(held.All().Count == 0 && !watched.Contains("AAA") && events[^2] == $"gone {first.Id % 1000} " && events[^1] == $"gone {second.Id % 1000} ", "Quantower is told each is gone from here, and the quote is let go");
+    held.Check();
+    Check(placed.Count == 2, "and they're not sent twice");
+
+    // IBKR stops saying, as when its connection drops mid-halt.
+    halt["AAA"] = (2, true);
+    held.TryHold(Market("AAA", 10));
+    halt["AAA"] = (-1, false);
+    now = now.AddMinutes(1);
+    held.Check();
+    Check(placed.Count == 2, "with no quotes and no word of the halt it's held");
+    halt["AAA"] = (-1, true);
+    held.Check();
+    now = now.AddSeconds(4);
+    held.Check();
+    halt["AAA"] = (2, true);
+    held.Check();
+    halt["AAA"] = (-1, true);
+    now = now.AddSeconds(4);
+    held.Check();
+    Check(placed.Count == 2, "quotes back for a few seconds aren't enough, and a word of the halt starts that over");
+    now = now.AddSeconds(5);
+    held.Check();
+    Check(placed.Count == 3, "5 seconds of quotes with no word of it and the stock is taken to be trading");
+
+    // One stock's end isn't another's.
+    halt["AAA"] = (2, true);
+    held.TryHold(Market("AAA", 20));
+    held.TryHold(Market("DDD", 30));
+    halt["DDD"] = (0, true);
+    held.Check();
+    Check(placed.Count == 4 && placed[^1].Symbol == "DDD" && held.All().Single().Ticket.Symbol == "AAA", "only the stock that trades again has its orders sent");
+
+    // A reconnect: what's held is kept, shown again and watched, and nothing goes in between.
+    held.Disconnect(hooks);
+    halt["AAA"] = (0, true);
+    held.Check();
+    Check(placed.Count == 4 && held.All().Count == 1, "nothing is sent between connections");
+    halt["AAA"] = (2, true);
+    watched.Clear();
+    var again = Hooks("new ");
+    held.Connect(again);
+    Check(watched.Contains("AAA") && events[^1].StartsWith("new shown"), "the next connection shows what's held and watches its stock");
+    held.Disconnect(hooks);
+    halt["AAA"] = (0, true);
+    held.Check();
+    Check(placed.Count == 5 && events[^1].StartsWith("new gone"), "an old connection stopping late doesn't stop the new one");
+
+    refuse = "not ready";
+    halt["AAA"] = (2, true);
+    var refused = held.TryHold(Market("AAA", 40));
+    halt["AAA"] = (0, true);
+    held.Check();
+    Check(held.All().Count == 0 && events[^1] == $"new gone {refused.Id % 1000} not ready", "one IBKR won't take when it's sent says why");
+    refuse = null;
+
+    // The session's and the day's ends. 20:59 UTC is 15:59 ET.
+    now = new DateTime(2026, 11, 24, 20, 58, 0, DateTimeKind.Utc);
+    halt["AAA"] = (1, true);
+    var late = held.TryHold(Market("AAA", 60));
+    held.TryHold(new IbkrOrderTicket("AAA", false, 70, "LMT", 4.00, double.NaN, "DAY"));
+    now = new DateTime(2026, 11, 24, 21, 30, 0, DateTimeKind.Utc);
+    halt["AAA"] = (0, true);
+    int before = placed.Count;
+    held.Check();
+    Check(placed.Count == before + 1 && placed[^1].Type == "LMT" && events.Any(e => e.StartsWith($"new gone {late.Id % 1000} it trades again outside")), "after hours a held limit goes, and a market order isn't sent, as IBKR would keep it for the next open");
+    halt["AAA"] = (1, true);
+    var overnight = held.TryHold(new IbkrOrderTicket("AAA", false, 80, "LMT", 4.00, double.NaN, "DAY"));
+    now = new DateTime(2026, 11, 25, 4, 30, 0, DateTimeKind.Utc);
+    held.Check();
+    Check(held.All().Count == 1, "still its day at 23:30 ET");
+    now = new DateTime(2026, 11, 25, 5, 30, 0, DateTimeKind.Utc);
+    held.Check();
+    Check(held.All().Count == 0 && events[^1] == $"new gone {overnight.Id % 1000} the day it was placed is over" && !watched.Contains("AAA"), "and dropped once the day is over, halted or not");
 }
 
 // The float from stockanalysis.com through Firecrawl, against canned answers: nothing is sent anywhere.

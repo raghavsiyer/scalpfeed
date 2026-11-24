@@ -211,6 +211,7 @@ internal sealed class IbkrBridge : IIbkrSink
 
         state.IbkrBid = bid;
         state.IbkrAsk = ask;
+        Volatile.Write(ref state.IbkrQuoteMs, Environment.TickCount64);
         state.RecentQuotes.Add(bid, ask, FeedClock.UtcNowTicks);
         if (!state.QuoteOn)
             return;

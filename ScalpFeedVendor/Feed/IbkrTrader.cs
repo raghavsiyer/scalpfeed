@@ -383,7 +383,8 @@ internal sealed class IbkrTrader
 
     private static bool HasStop(string type) => type is "STP" or "STP LMT";
 
-    private static string Check(IbkrOrderTicket t)
+    /// <summary>What's wrong with an order before it's sent, or null.</summary>
+    internal static string Check(IbkrOrderTicket t)
     {
         if (string.IsNullOrWhiteSpace(t.Symbol))
             return "no symbol";

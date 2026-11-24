@@ -37,22 +37,39 @@ internal sealed class PaperTrading : ITraderSink
     private readonly object startGate = new();
     private readonly ConcurrentDictionary<int, bool> historyStarted = new();
     private readonly ConcurrentDictionary<string, bool> tradesPushed = new();
+    private readonly Func<string, (int Halted, bool Quoting)> halt;
+    private readonly Action<string, bool> holdQuote;
     private IbkrTrader trader;
     private HotkeyBuys buys;
+    private HeldOrders.Hooks held;
 
-    public PaperTrading(Action<Message> push, string vendorKey)
+    /// <param name="halt">IBKR's word on a halt in one of its symbols, and whether its quotes are coming (HeldOrders).</param>
+    /// <param name="holdQuote">Keeps one's quote coming, or lets it go.</param>
+    public PaperTrading(Action<Message> push, string vendorKey, Func<string, (int Halted, bool Quoting)> halt, Action<string, bool> holdQuote)
     {
         this.push = push;
         this.vendorKey = vendorKey;
+        this.halt = halt;
+        this.holdQuote = holdQuote;
     }
 
     public void Start()
     {
         this.trader = TraderSession.Attach(this);
         this.buys = this.trader == null ? null : new HotkeyBuys(this.trader, OrderHotkey.CancelWait);
+        if (this.trader == null)
+            return;
+
+        this.held = new HeldOrders.Hooks(this.halt, this.holdQuote, () => this.trader.Ready, t => this.trader.Place(t), this.OnHeld, this.OnHeldGone);
+        HeldOrders.Shared.Connect(this.held);
     }
 
-    public void Stop() => TraderSession.Detach(this);
+    public void Stop()
+    {
+        if (this.held != null)
+            HeldOrders.Shared.Disconnect(this.held);
+        TraderSession.Detach(this);
+    }
 
     #region Quantower asks
 
@@ -81,7 +98,7 @@ internal sealed class PaperTrading : ITraderSink
     ];
 
     public IList<MessageOpenOrder> GetPendingOrders() =>
-        this.trader?.OpenOrders().Select(this.OrderMessage).ToList() ?? [];
+        this.trader == null ? [] : [.. this.trader.OpenOrders().Select(this.OrderMessage), .. HeldOrders.Shared.All().Select(this.HeldMessage)];
 
     public IList<MessageOpenPosition> GetPositions() =>
         this.trader?.Positions().Select(this.PositionMessage).ToList() ?? [];
@@ -128,6 +145,9 @@ internal sealed class PaperTrading : ITraderSink
             return TradingOperationResult.CreateError(p.RequestId, $"order type {p.OrderTypeId} isn't supported");
 
         var ticket = new IbkrOrderTicket(TradingSymbols.ToIbkr(p.Symbol.Id), p.Side == Side.Buy, p.Quantity, type, p.Price, p.TriggerPrice, ToIbkrTif(p.TimeInForce));
+        if (this.Hold(ticket) is { } held)
+            return TradingOperationResult.CreateSuccess(p.RequestId, held.Id.ToString(CultureInfo.InvariantCulture));
+
         var (id, error) = this.trader.Place(ticket);
         Log.Info(error == null
             ? $"[trade] placed order {id}: {(ticket.Buy ? "buy" : "sell")} {ticket.Quantity} {ticket.Symbol} {ticket.Type} {Describe(ticket)} {ticket.Tif}"
@@ -135,6 +155,19 @@ internal sealed class PaperTrading : ITraderSink
         return error == null
             ? TradingOperationResult.CreateSuccess(p.RequestId, id.ToString(CultureInfo.InvariantCulture))
             : TradingOperationResult.CreateError(p.RequestId, error);
+    }
+
+    /// <summary>Keeps an order from Quantower on a halted stock until it trades again (HeldOrders), or null to send it now.</summary>
+    private HeldOrder Hold(IbkrOrderTicket ticket) =>
+        this.trader.Ready && IbkrTrader.Check(ticket) == null ? HeldOrders.Shared.TryHold(ticket) : null;
+
+    private void OnHeld(HeldOrder held) => this.push(this.HeldMessage(held));
+
+    private void OnHeldGone(HeldOrder held, string problem)
+    {
+        this.push(new MessageCloseOrder { OrderId = held.Id.ToString(CultureInfo.InvariantCulture) });
+        if (problem != null)
+            this.push(MessageDealTicket.CreateRefuseDealTicket(Header, $"{HeldOrders.Describe(held.Ticket)}, held in a halt, wasn't sent: {problem}."));
     }
 
     /// <summary>An order hotkey's order (OrderHotkeys), sent like one from the order entry, to the paper account only.</summary>
@@ -167,9 +200,10 @@ internal sealed class PaperTrading : ITraderSink
 
         double position = this.trader.Positions().Where(p => p.Symbol == ibkrSymbol).Sum(p => p.Quantity);
         var working = this.trader.OpenOrders().Where(o => o.Symbol == ibkrSymbol).ToList();
+        var waiting = HeldOrders.Shared.All().Where(o => o.Ticket.Symbol == ibkrSymbol).ToList();
         return (position,
-            working.Where(o => o.Buy).Sum(o => Math.Max(0, o.Quantity - o.Filled)),
-            working.Where(o => !o.Buy).Sum(o => Math.Max(0, o.Quantity - o.Filled)));
+            working.Where(o => o.Buy).Sum(o => Math.Max(0, o.Quantity - o.Filled)) + waiting.Where(o => o.Ticket.Buy).Sum(o => o.Ticket.Quantity),
+            working.Where(o => !o.Buy).Sum(o => Math.Max(0, o.Quantity - o.Filled)) + waiting.Where(o => !o.Ticket.Buy).Sum(o => o.Ticket.Quantity));
     }
 
     public TradingOperationResult ModifyOrder(ModifyOrderRequestParameters p)
@@ -177,7 +211,7 @@ internal sealed class PaperTrading : ITraderSink
         if (this.trader == null || !int.TryParse(p.OrderId, NumberStyles.Integer, CultureInfo.InvariantCulture, out int id))
             return TradingOperationResult.CreateError(p.RequestId, $"order {p.OrderId} isn't an IBKR order");
 
-        string error = this.trader.Modify(id, p.Quantity, p.Price, p.TriggerPrice);
+        string error = HeldOrders.IsHeldId(id) ? HeldOrders.Shared.Modify(id, p.Quantity, p.Price, p.TriggerPrice) : this.trader.Modify(id, p.Quantity, p.Price, p.TriggerPrice);
         Log.Info(error == null ? $"[trade] modify order {id}: {p.Quantity} at {p.Price}/{p.TriggerPrice}" : $"[trade] modify order {id} refused: {error}");
         return error == null
             ? TradingOperationResult.CreateSuccess(p.RequestId, p.OrderId)
@@ -190,7 +224,7 @@ internal sealed class PaperTrading : ITraderSink
         if (this.trader == null || !int.TryParse(orderId, NumberStyles.Integer, CultureInfo.InvariantCulture, out int id))
             return TradingOperationResult.CreateError(p.RequestId, $"order {orderId} isn't an IBKR order");
 
-        string error = this.trader.Cancel(id);
+        string error = HeldOrders.IsHeldId(id) ? HeldOrders.Shared.Cancel(id) : this.trader.Cancel(id);
         Log.Info(error == null ? $"[trade] cancel order {id}" : $"[trade] cancel order {id} refused: {error}");
         return error == null
             ? TradingOperationResult.CreateSuccess(p.RequestId, orderId)
@@ -211,6 +245,13 @@ internal sealed class PaperTrading : ITraderSink
 
         double quantity = p.CloseQuantity > 0 ? p.CloseQuantity : position.Quantity;
         var ticket = new IbkrOrderTicket(TradingSymbols.ToIbkr(position.Symbol.Id), position.Side != Side.Buy, quantity, "MKT", double.NaN, double.NaN, "DAY");
+        // In a halt it's held, so pressing it twice mustn't hold two: both would go at the reopening.
+        double waiting = HeldOrders.Shared.All().Where(o => o.Ticket.Symbol == ticket.Symbol && o.Ticket.Buy == ticket.Buy).Sum(o => o.Ticket.Quantity);
+        if (waiting + quantity > position.Quantity && this.halt(ticket.Symbol).Halted > 0)
+            return TradingOperationResult.CreateError(p.RequestId, $"{waiting:#,0} of {position.Quantity:#,0} shares are already in orders held for the halt");
+        if (this.Hold(ticket) is { } held)
+            return TradingOperationResult.CreateSuccess(p.RequestId, held.Id.ToString(CultureInfo.InvariantCulture));
+
         var (id, error) = this.trader.Place(ticket);
         Log.Info(error == null ? $"[trade] closing {position.Symbol.Id} with market order {id} for {quantity}" : $"[trade] close refused: {error}");
         return error == null
@@ -481,6 +522,16 @@ internal sealed class PaperTrading : ITraderSink
             OpenPrice = p.AvgCost,
             OpenTime = this.positionOpened.GetOrAdd(id, _ => DateTime.UtcNow),
         };
+    }
+
+    /// <summary>An order held in a halt, as a working order that says so.</summary>
+    private MessageOpenOrder HeldMessage(HeldOrder held)
+    {
+        var t = held.Ticket;
+        var message = this.OrderMessage(new IbkrOrder(held.Id, this.trader?.Account ?? "", t.Symbol, t.Buy, t.Quantity, t.Type, t.LimitPrice, t.StopPrice, t.Tif,
+            IbkrTrader.OutsideRthFor(t.Type), "PreSubmitted", 0, 0, held.HeldUtc));
+        message.Comment = "held until the halt ends";
+        return message;
     }
 
     private MessageOpenOrder OrderMessage(IbkrOrder o)

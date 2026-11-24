@@ -67,6 +67,9 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
     private DxLinkLink live;
     private HistoryClient history;
     private IbkrBridge ibkr;
+    // A quote this recent means IBKR's are coming.
+    private const long HeldQuoteFreshMs = 5000;
+
     private FloatSource floats;
     private SplitSource splits;
     private OfferingSource offerings;
@@ -506,6 +509,32 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
             .Select(s => new HotkeyQuote(IbkrClient.ToIbkrSymbol(s.Streamer), s.IbkrQuotes ? s.IbkrBid : double.NaN, s.IbkrQuotes ? s.IbkrAsk : double.NaN, s.IbkrHalted > 0))
             .ToList();
 
+    /// <summary>
+    /// For HeldOrders, about a symbol by IBKR's name: IBKR's word on a halt (more than 0 halted, 0 trading, -1 not
+    /// known) and whether its quotes are coming.
+    /// </summary>
+    public (int Halted, bool Quoting) HaltOf(string ibkrSymbol) =>
+        this.statesByStreamer.TryGetValue(this.StreamerOfIbkr(ibkrSymbol), out var state)
+            ? (Volatile.Read(ref state.IbkrHalted), Environment.TickCount64 - Volatile.Read(ref state.IbkrQuoteMs) < HeldQuoteFreshMs)
+            : (-1, false);
+
+    /// <summary>Keeps the symbol's IBKR quote on for orders held in its halt, whatever Quantower has on screen, or lets it go.</summary>
+    public void HoldQuote(string ibkrSymbol, bool on)
+    {
+        string streamer = this.StreamerOfIbkr(ibkrSymbol);
+        var state = this.GetState(streamer);
+        state.Id ??= IbkrClient.FromIbkrSymbol(ibkrSymbol);
+        state.OrdersHeld = on;
+        if (!state.QuoteOn)
+            this.ibkr?.SetQuote(state, on);
+    }
+
+    private string StreamerOfIbkr(string ibkrSymbol)
+    {
+        string id = IbkrClient.FromIbkrSymbol(ibkrSymbol);
+        return this.streamerById.GetValueOrDefault(id, id);
+    }
+
     private static List<VariableTick> ToVariableTicks(IReadOnlyList<TickBand> bands) =>
         PriceBands.ForDisplay(bands).Select(b => new VariableTick(b.Low, b.High, true, b.TickSize, 1, b.Decimals)).ToList();
 
@@ -545,7 +574,7 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
             }
 
             state.QuoteOn = on;
-            this.ibkr?.SetQuote(state, on);
+            this.ibkr?.SetQuote(state, on || state.OrdersHeld);
         }
         else
         {
