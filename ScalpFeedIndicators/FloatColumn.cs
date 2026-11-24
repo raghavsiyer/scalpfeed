@@ -37,7 +37,7 @@ internal static class FloatCacheFile
     private static readonly object Gate = new();
     private static Dictionary<string, FloatFacts> cache = new();
     private static DateTime fileTimeUtc;
-    private static long checkedMs = long.MinValue;
+    private static long? checkedMs;
 
     public static FloatFacts Get(string symbol)
     {
@@ -47,7 +47,7 @@ internal static class FloatCacheFile
         lock (Gate)
         {
             long now = Environment.TickCount64;
-            if (now - checkedMs >= 2000)
+            if (checkedMs is not long at || now - at >= 2000)
             {
                 checkedMs = now;
                 string path = FloatFacts.CachePath;

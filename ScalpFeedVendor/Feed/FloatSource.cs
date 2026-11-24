@@ -48,7 +48,10 @@ internal sealed class FloatSource : IDisposable
     private bool keyMissingLogged;
     private int working;
     private DateTime fileTimeUtc;
-    private long fileCheckedMs = long.MinValue;
+
+    // Null to look at the file next time, whenever that is. It was long.MinValue until 2026-11-24, and now minus that
+    // overflows to a negative number, so what the bot wrote went unseen until the first fetch here.
+    private long? fileCheckedMs;
 
     /// <summary>How often symbols held back by a missing key or a pause are asked for again.</summary>
     public static readonly TimeSpan RetryHeldEvery = TimeSpan.FromSeconds(30);
@@ -90,7 +93,7 @@ internal sealed class FloatSource : IDisposable
         lock (this.fileGate)
         {
             long nowMs = Environment.TickCount64;
-            if (!force && nowMs - this.fileCheckedMs < 2000)
+            if (!force && this.fileCheckedMs is long at && nowMs - at < 2000)
                 return;
 
             this.fileCheckedMs = nowMs;
@@ -276,7 +279,7 @@ internal sealed class FloatSource : IDisposable
         lock (this.fileGate)
         {
             // Anything the bot wrote since we last looked goes into the file too, not over it.
-            this.fileCheckedMs = long.MinValue;
+            this.fileCheckedMs = null;
             this.Reload(force: true);
             this.cache[symbol] = facts;
             FloatFacts.WriteCache(this.cachePath, this.cache);

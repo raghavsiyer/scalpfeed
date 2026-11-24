@@ -157,3 +157,36 @@ internal sealed record ReverseSplits(long FetchedMs, IReadOnlyDictionary<string,
 
     private static string Plain(double n) => n.ToString("0.####", CultureInfo.InvariantCulture);
 }
+
+/// <summary>split-cache.json as a chart reads it: again when it changes, looked at no more than every 2 seconds.</summary>
+internal sealed class ReverseSplitFile(string path, Func<long> nowMs = null)
+{
+    private readonly object gate = new();
+    private ReverseSplits splits = ReverseSplits.None;
+    private DateTime fileTimeUtc;
+
+    // Null until the first look. It was long.MinValue, and now minus that overflows to a negative number, so the file
+    // was never looked at.
+    private long? checkedMs;
+
+    /// <summary>The symbol's reverse splits, newest first.</summary>
+    public IReadOnlyList<ReverseSplit> Of(string symbol)
+    {
+        lock (this.gate)
+        {
+            long now = nowMs?.Invoke() ?? Environment.TickCount64;
+            if (this.checkedMs is not long at || now - at >= 2000)
+            {
+                this.checkedMs = now;
+                var time = File.Exists(path) ? File.GetLastWriteTimeUtc(path) : default;
+                if (time != this.fileTimeUtc)
+                {
+                    this.fileTimeUtc = time;
+                    this.splits = ReverseSplits.Read(path);
+                }
+            }
+
+            return this.splits.Of(symbol);
+        }
+    }
+}

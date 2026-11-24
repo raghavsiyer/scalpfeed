@@ -585,6 +585,21 @@ async Task RunSplits(string mode)
     Check(damaged && ReverseSplits.Read(path) == ReverseSplits.None, "a damaged file, or one from before 2026-11-24, reads as none");
     File.Delete(path);
 
+    // As a chart reads it. Until 2026-11-24 it never looked at the file, so no marker was ever drawn.
+    long clock = 474_000_000;
+    var chart = new ReverseSplitFile(path, () => clock);
+    bool noFile = chart.Of("AAA").Count == 0;
+    parsed.Write(path);
+    bool tooSoon = chart.Of("AAA").Count == 0;
+    clock += 2000;
+    Check(noFile && tooSoon && chart.Of("AAA").Count == 2, "a chart finds the file once it's there, looking every 2 seconds");
+    Check(new ReverseSplitFile(path).Of("AAA").Count == 2, "and at its first look when it's already there");
+    await Task.Delay(20);
+    Parse(Row("AAA", "2026-06-01", "100", "1")).Write(path);
+    clock += 2000;
+    Check(chart.Of("AAA").Count == 1, "and again when it changes");
+    File.Delete(path);
+
     // Which daily bar, with Monday the 7th a holiday.
     DateTime[] days = [.. new[] { "2026-08-28", "2026-08-31", "2026-09-01", "2026-09-02", "2026-09-03", "2026-09-04", "2026-09-08", "2026-09-09" }.Select(Day)];
     string Bar(string d)
@@ -743,6 +758,15 @@ async Task RunFloat()
     floats.Want("BOTX");
     await floats.IdleAsync();
     Check(sent.IsEmpty && floats.Get("BOTX")?.Float == 3_300_000, "a float the bot wrote to the file is used, not fetched again");
+    string freshPath = Path.Combine(dir, "fresh.json");
+    using (var fresh = new FloatSource(null, freshPath, Send, () => key, () => now, Timeout.InfiniteTimeSpan))
+    {
+        FloatFacts.WriteCache(freshPath, new Dictionary<string, FloatFacts> { ["BOTZ"] = new(FloatFacts.DayOf(now), 5_500_000, 6_000_000, double.NaN, botMs) });
+        fresh.Want("BOTZ");
+        await fresh.IdleAsync();
+        Check(sent.IsEmpty && fresh.Get("BOTZ")?.Float == 5_500_000, "even one written before anything is fetched here");
+    }
+    sent.Clear();
     shared = FloatFacts.ReadCache(cachePath);
     shared["BOTY"] = new FloatFacts(FloatFacts.DayOf(now), 7_700_000, 9_000_000, double.NaN, botMs);
     FloatFacts.WriteCache(cachePath, shared);

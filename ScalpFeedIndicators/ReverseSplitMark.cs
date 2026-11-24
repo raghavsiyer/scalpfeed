@@ -17,6 +17,7 @@ internal sealed class ReverseSplitMark
 {
     private static readonly Color Ring = Color.FromArgb(255, 152, 0);
     private static readonly Color Inside = Color.FromArgb(43, 30, 10);
+    private static readonly ReverseSplitFile Splits = new(ReverseSplits.CachePath);
     private string logged;
     private bool failureLogged;
 
@@ -26,10 +27,24 @@ internal sealed class ReverseSplitMark
         {
             var window = chart?.MainWindow;
             var graphics = args?.Graphics;
-            if (window == null || graphics == null || history?.Aggregation is not HistoryAggregationTime time || time.Period != Period.DAY1)
+            if (window == null || graphics == null || string.IsNullOrEmpty(symbol))
                 return;
-            if (ReverseSplits.Latest(SplitCacheFile.Get(symbol), history.Count, i => history[i, SeekOriginHistory.Begin].TimeLeft) is not var (bar, split))
+
+            // Which timeframe it took the chart for, and whether it found a split, go in the log too: without them a
+            // marker that never draws says nothing about why.
+            if (history?.Aggregation is not HistoryAggregationTime time || time.Period != Period.DAY1)
+            {
+                this.LogOnce($"{symbol} not a daily chart ({history?.Aggregation?.GetType().Name} {(history?.Aggregation as HistoryAggregationTime)?.Period})");
                 return;
+            }
+
+            var splits = Splits.Of(symbol);
+            if (ReverseSplits.Latest(splits, history.Count, i => history[i, SeekOriginHistory.Begin].TimeLeft) is not var (bar, split))
+            {
+                this.LogOnce($"{symbol} no reverse split to mark: {splits.Count} listed, {history.Count} daily bars");
+                return;
+            }
+
 
             // GetChartX is a bar's left edge (Quantower's DrawOnBars sample), so half a bar more is its middle.
             var barTime = history[bar, SeekOriginHistory.Begin].TimeLeft;
@@ -42,7 +57,7 @@ internal sealed class ReverseSplitMark
         {
             // The bars can change under a repaint, and a marker must never stop the chart: the next paint tries again.
             if (!this.failureLogged)
-                this.LogOnce($"{symbol} reverse split not drawn: {ex.GetType().Name} {ex.Message}");
+                this.LogOnce($"{symbol} marker not drawn: {ex.GetType().Name} {ex.Message}");
             this.failureLogged = true;
         }
     }
@@ -89,11 +104,12 @@ internal sealed class ReverseSplitMark
     /// <summary>Once per stock, into Quantower's log: where it went, to check against the chart.</summary>
     private void LogOnce(string what)
     {
-        string stock = what.Split(' ')[0];
-        if (stock == this.logged)
+        // The same stock again only when what's said of it changes, as when the splits arrive after the chart.
+        string about = string.Join(' ', what.Split(' ').Take(3));
+        if (about == this.logged)
             return;
 
-        this.logged = stock;
+        this.logged = about;
         try
         {
             Core.Instance.Loggers.Log($"Key Moving Averages: {what}", LoggingLevel.System);
@@ -101,36 +117,6 @@ internal sealed class ReverseSplitMark
         catch
         {
             // Logging must never stop the chart.
-        }
-    }
-}
-
-/// <summary>split-cache.json, read again when it changes, looked at no more than every 2 seconds.</summary>
-internal static class SplitCacheFile
-{
-    private static readonly object Gate = new();
-    private static ReverseSplits cache = ReverseSplits.None;
-    private static DateTime fileTimeUtc;
-    private static long checkedMs = long.MinValue;
-
-    public static IReadOnlyList<ReverseSplit> Get(string symbol)
-    {
-        lock (Gate)
-        {
-            long now = Environment.TickCount64;
-            if (now - checkedMs >= 2000)
-            {
-                checkedMs = now;
-                string path = ReverseSplits.CachePath;
-                var time = File.Exists(path) ? File.GetLastWriteTimeUtc(path) : default;
-                if (time != fileTimeUtc)
-                {
-                    fileTimeUtc = time;
-                    cache = ReverseSplits.Read(path);
-                }
-            }
-
-            return cache.Of(symbol);
         }
     }
 }
