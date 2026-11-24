@@ -14,8 +14,9 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- The float cache's format and RVOL's arithmetic, shared with the connection. -->
+    <!-- The float and split caches' formats and RVOL's arithmetic, shared with the connection. -->
     <Compile Include="..\ScalpFeedVendor\Feed\FloatFacts.cs" LinkBase="Shared" />
+    <Compile Include="..\ScalpFeedVendor\Feed\SplitFacts.cs" LinkBase="Shared" />
     <Compile Include="..\ScalpFeedVendor\Feed\RelativeVolumeMath.cs" LinkBase="Shared" />
   </ItemGroup>
 

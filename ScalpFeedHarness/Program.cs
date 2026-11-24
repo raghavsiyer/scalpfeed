@@ -524,8 +524,8 @@ async Task RunRvol(string[] symbols)
 async Task RunFloat()
 {
     // Trimmed from Firecrawl's answers on 2026-11-16.
-    static string Stats(string symbol, string flt, string shares, string volume) =>
-        $$$"""{"success":true,"data":{"alexandria":[{"provider":"stockanalysis-com","capability":"securities/stock_statistics","creditsCost":5,"data":{"name":"{{{symbol}}}","sections":[ {"id":"shares","items":[{"hover":"{{{shares}}}","id":"sharesout","title":"Shares Outstanding","value":"x"},{"hover":"{{{flt}}}","id":"float","title":"Float","value":"x"}]}, {"id":"stockPrice","items":[{"hover":"{{{volume}}}","id":"averageVolume","title":"Average Volume (20 Days)","value":"x"}]}],"symbol":"{{{symbol}}}"}}]}}""";
+    static string Stats(string symbol, string flt, string shares, string volume, string more = "") =>
+        $$$"""{"success":true,"data":{"alexandria":[{"provider":"stockanalysis-com","capability":"securities/stock_statistics","creditsCost":5,"data":{"name":"{{{symbol}}}","sections":[ {"id":"shares","items":[{"hover":"{{{shares}}}","id":"sharesout","title":"Shares Outstanding","value":"x"},{"hover":"{{{flt}}}","id":"float","title":"Float","value":"x"}]}, {"id":"stockPrice","items":[{"hover":"{{{volume}}}","id":"averageVolume","title":"Average Volume (20 Days)","value":"x"}]}{{{more}}}],"symbol":"{{{symbol}}}"}}]}}""";
     const string NotFound = """{"success":true,"data":{"alexandria":[{"provider":"stockanalysis-com","capability":"securities/stock_statistics","error":{"code":"not_found","message":"The workflow could not find that resource.","status":404}}]}}""";
 
     long ms = 1_794_860_000_000;
@@ -545,6 +545,45 @@ async Task RunFloat()
     string dir = Path.Combine(Path.GetTempPath(), "scalpfeed-float-" + Environment.ProcessId);
     Directory.CreateDirectory(dir);
     string cachePath = Path.Combine(dir, "float-cache.json");
+
+    // The last split, in the same answer. FGL's section as Firecrawl sent it on 2026-11-23; what the site says for a
+    // stock that has never split hasn't been seen, so both its usual n/a and no section at all are read as none.
+    static string Split(string date, string type, string ratio) =>
+        $$$""", {"id":"stockSplits","items":[{"hover":"{{{date}}}","id":"lastSplitDate","title":"Last Split Date","value":"Sep 1, 2026"},{"hover":"{{{type}}}","id":"lastSplitType","title":"Split Type","value":"{{{type}}}"},{"hover":"{{{ratio}}}","id":"splitRatio","title":"Split Ratio","value":"{{{ratio}}}"}],"text":""}""";
+    SplitFacts Read(string more) => SplitFacts.FromStatistics(JsonNode.Parse(Stats("FGL", "1", "1", "1", more))["data"]["alexandria"][0]["data"], ms);
+    string fglSection = Split("September 1, 2026", "Reverse", "1:100");
+    var fglSplit = Read(fglSection);
+    var forward = Read(Split("June 10, 2024", "Forward", "10:1"));
+    Check(fglSplit == new SplitFacts(new DateTime(2026, 9, 1), true, "1:100", ms), $"the last split's date, type and ratio ({fglSplit.Describe()})");
+    Check(forward is { Reverse: false, Ratio: "10:1" } && forward.Date == new DateTime(2024, 6, 10), "a forward split isn't a reverse one");
+    Check(Read("").Date == null && Read(Split("n/a", "n/a", "n/a")).Date == null && Read("").Describe() == "no split listed", "none listed is none");
+    Check(Read(fglSection.Replace("\"hover\":\"September 1, 2026\",", "")).Date == new DateTime(2026, 9, 1), "the short date does when there's no exact one");
+
+    string splitPath = Path.Combine(dir, SplitFacts.FileName);
+    SplitFacts.WriteCache(splitPath, new Dictionary<string, SplitFacts> { ["FGL"] = fglSplit, ["NONE"] = new(null, false, null, ms) });
+    var splitsBack = SplitFacts.ReadCache(splitPath);
+    Check(splitsBack["fgl"] == fglSplit && splitsBack["NONE"] == new SplitFacts(null, false, null, ms), "the split file reads back the same, none included, whatever the case");
+    var reading = new FileStream(splitPath, FileMode.Open, FileAccess.Read, FileShare.Read);
+    var letGo = Task.Run(async () => { await Task.Delay(60); reading.Dispose(); });
+    splitsBack["MORE"] = forward;
+    SplitFacts.WriteCache(splitPath, splitsBack);
+    await letGo;
+    Check(SplitFacts.ReadCache(splitPath).Count == 3, "a chart reading it only holds up the swap until it's done");
+    File.WriteAllText(splitPath, "{\"FGL\": {");
+    Check(SplitFacts.ReadCache(splitPath).Count == 0, "a damaged file reads as empty");
+    File.Delete(splitPath);
+
+    // Which daily bar it goes under: FGL's week, with Labor Day (Monday the 7th) closed.
+    DateTime[] days = [.. new[] { "08-28", "08-31", "09-01", "09-02", "09-03", "09-04", "09-08", "09-09" }.Select(d => DateTime.ParseExact("2026-" + d, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal))];
+    string Bar(string d)
+    {
+        int i = SplitFacts.BarFor(DateTime.ParseExact("2026-" + d, "yyyy-MM-dd", CultureInfo.InvariantCulture), days.Length, n => days[n]);
+        return i < 0 ? "none" : days[i].ToString("MM-dd", CultureInfo.InvariantCulture);
+    }
+    Check(days.All(d => Bar(d.ToString("MM-dd", CultureInfo.InvariantCulture)) == d.ToString("MM-dd", CultureInfo.InvariantCulture)), "a split goes under its own day's bar, first and last included");
+    Check(Bar("09-05") == "09-08" && Bar("09-07") == "09-08", "on a weekend or holiday, under the next bar");
+    Check(Bar("08-27") == "none" && Bar("09-10") == "none" && SplitFacts.BarFor(days[0], 0, n => days[n]) == -1, "nothing when the bars don't reach back to it, it's still to come, or there are no bars");
+
     FloatFacts.WriteCache(cachePath, new Dictionary<string, FloatFacts> { ["GDHG"] = gdhg, ["ZZZZ"] = new("2026-11-16", double.NaN, double.NaN, double.NaN, ms) });
     var back = FloatFacts.ReadCache(cachePath);
     Check(back["gdhg"] == gdhg && !back["ZZZZ"].Known && back["ZZZZ"].Day == "2026-11-16", "the cache file reads back the same, a missing symbol included, whatever the case");
@@ -594,6 +633,36 @@ async Task RunFloat()
     floats.Want("ZQZQX");
     await floats.IdleAsync();
     Check(sent.IsEmpty, "not asked again the same day, found or not");
+
+    // The split is kept with the float, in its own file, before the connection is told; a stock fetched without one
+    // has none, and a stock the site doesn't have isn't in it.
+    SplitFacts whenTold = null;
+    answers["FGL"] = (200, Stats("FGL", "1,728,837", "1,731,736", "1,460,667", fglSection));
+    using (var split = new FloatSource(s => whenTold = SplitFacts.ReadCache(splitPath).GetValueOrDefault(s), cachePath, Send, () => key, () => now, Timeout.InfiniteTimeSpan))
+    {
+        split.Want("FGL");
+        await split.IdleAsync();
+    }
+    var kept = SplitFacts.ReadCache(splitPath);
+    Check(sent.SequenceEqual(new[] { "FGL" }) && whenTold is { Reverse: true, Ratio: "1:100" }, "one lookup brings the float and the split, saved before the connection is told");
+    Check(kept["FGL"].Date == new DateTime(2026, 9, 1) && kept["GDHG"].Date == null && !kept.ContainsKey("ZQZQX"), $"every stock fetched is in the split file, one without a split too ({string.Join(" ", kept.Keys)})");
+    Check(!File.ReadAllText(cachePath).Contains("split", StringComparison.OrdinalIgnoreCase) && FloatFacts.ReadCache(cachePath).ContainsKey("FGL"), "the float file momo-algo shares is as before");
+
+    // Not being able to save the split (its path is a folder here) doesn't cost the float.
+    string unwritable = Path.Combine(dir, "folder");
+    Directory.CreateDirectory(unwritable);
+    using (var stuck = new FloatSource(null, cachePath, Send, () => key, () => now, Timeout.InfiniteTimeSpan, unwritable))
+    {
+        stuck.Want("STUCK");
+        await stuck.IdleAsync();
+        Check(stuck.Get("STUCK") is { Known: true }, "a split that can't be saved doesn't cost the float");
+    }
+    answers["ODD"] = (200, Stats("ODD", "1,000,000", "2,000,000", "500,000", """, {"id":"stockSplits","items":{"lastSplitDate":5}}"""));
+    floats.Want("ODD");
+    await floats.IdleAsync();
+    Check(floats.Get("ODD") is { Known: true } && !SplitFacts.ReadCache(splitPath).ContainsKey("ODD"), "nor does a split section in a shape it can't read");
+    sent.Clear();
+
     using (var reopened = new FloatSource(null, cachePath, Send, () => key, () => now))
     {
         reopened.Want("GDHG");
