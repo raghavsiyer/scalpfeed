@@ -125,16 +125,27 @@ switch (args[0])
         break;
     case "pricebands":
         var usual = PriceBands.ForDisplay([new TickBand(1.0, 0.0001), new TickBand(double.PositiveInfinity, 0.01)]);
-        Check(usual.Count == 3 && usual[0] == (0.0, 0.10, 0.0001, 4) && usual[1] == (0.10, 1.0, 0.0001, 4) && usual[2] == (1.0, double.PositiveInfinity, 0.01, 2),
-            $"4 decimals under a dollar (a $0.0001 tick needs 4), 2 from a dollar up, tick sizes untouched ({string.Join(" ", usual)})");
+        Check(usual.Count == 3 && usual[0] == (0.0, 0.10, 0.0001, 4) && usual[1] == (0.10, 1.0, 0.001, 3) && usual[2] == (1.0, double.PositiveInfinity, 0.01, 2),
+            $"4 decimals under 10 cents, 3 to a dollar with a $0.001 tick, 2 from a dollar up ({string.Join(" ", usual)})");
         Check(PriceBands.ForDisplay([]).SequenceEqual(usual), "a lookup with no tick sizes gets the same bands");
         var across = PriceBands.ForDisplay([new TickBand(double.PositiveInfinity, 0.01)]);
         Check(across.Count == 3 && across[0] == (0.0, 0.10, 0.01, 4) && across[1] == (0.10, 1.0, 0.01, 3) && across[2] == (1.0, double.PositiveInfinity, 0.01, 2), "one band across both lines splits at each, keeping its tick size");
         var several = PriceBands.ForDisplay([new TickBand(0.05, 0.0001), new TickBand(0.5, 0.0005), new TickBand(1.0, 0.001), new TickBand(10.0, 0.01), new TickBand(double.PositiveInfinity, 0.05)]);
-        Check(several.Select(b => b.Decimals).SequenceEqual(new[] { 4, 4, 4, 3, 2, 2 }) && several.Select(b => b.TickSize).SequenceEqual(new[] { 0.0001, 0.0005, 0.0005, 0.001, 0.01, 0.05 }),
-            $"several bands each keep their tick size, and the one across 10 cents splits ({string.Join(" ", several)})");
+        Check(several.Select(b => b.Decimals).SequenceEqual(new[] { 4, 4, 3, 3, 2, 2 }) && several.Select(b => b.TickSize).SequenceEqual(new[] { 0.0001, 0.0005, 0.001, 0.001, 0.01, 0.05 }),
+            $"several bands keep their tick sizes where the decimals can write them, and the one across 10 cents splits ({string.Join(" ", several)})");
+        Check(PriceBands.ForDisplay([new TickBand(1.0, 0.0025), new TickBand(double.PositiveInfinity, 0.005)]).Select(b => b.TickSize).SequenceEqual(new[] { 0.0025, 0.003, 0.01 }), "a tick too fine for its decimals goes up to the next they can write");
         Check(new[] { usual, across, several }.All(list => list.All(b => b.Decimals >= PriceBands.DecimalsOf(b.TickSize))),
-            "no band writes fewer decimals than its tick size needs (Quantower's DOM recursed forever on 3 decimals with a $0.0001 tick)");
+            "no band writes fewer decimals than its tick size needs (Quantower recursed forever on 3 decimals with a $0.0001 tick)");
+        // Two steps of one tick from any price, on the tick or off it, each rounded to the band's decimals either way,
+        // must each move: a step that rounds back to where it was is what Quantower never got out of. From a price off
+        // the tick the first can move (0.7135 to 0.714) where the second can't.
+        static bool Moves(double price, double tick, int decimals) => new[] { MidpointRounding.ToEven, MidpointRounding.AwayFromZero }.All(mode => new[] { (decimal)tick, -(decimal)tick }.All(step =>
+        {
+            decimal from = (decimal)price, one = Math.Round(from + step, decimals, mode), two = Math.Round(one + step, decimals, mode);
+            return step > 0 ? one > from && two > one : one < from && two < one;
+        }));
+        Check(Enumerable.Range(1, 19_999).Select(n => n / 10_000.0).All(p => { var b = usual.First(b => p < b.High); return Moves(p, b.TickSize, b.Decimals); }), "one-tick steps always move, from every $0.0001 price to $2");
+        Check(!Enumerable.Range(1000, 9000).Any(n => Moves(n / 10_000.0, 0.0001, 3)), "where with 3 decimals and the $0.0001 tick, as before 11-23, they get stuck from every price between 10 cents and a dollar");
         Check(PriceBands.DecimalsOf(0.0001) == 4 && PriceBands.DecimalsOf(0.0005) == 4 && PriceBands.DecimalsOf(0.001) == 3 && PriceBands.DecimalsOf(0.01) == 2 && PriceBands.DecimalsOf(0.05) == 2 && PriceBands.DecimalsOf(1) == 0,
             "tick sizes' decimals are counted exactly");
         Check(several.Zip(several.Skip(1)).All(p => p.First.High == p.Second.Low) && several[0].Low == 0, "the bands run on from 0 with no gaps or overlaps");
