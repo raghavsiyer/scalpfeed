@@ -124,30 +124,13 @@ internal sealed record ReverseSplits(long FetchedMs, IReadOnlyDictionary<string,
         }
     }
 
-    /// <summary>
-    /// Writes the whole file beside it, then swaps it in, so a reader never sees half of one. Windows refuses the swap
-    /// while a chart has the old one open to read, which is for a few milliseconds, so it's tried a few times.
-    /// </summary>
     public void Write(string path)
     {
         var stocks = new JsonObject();
         foreach (var (ticker, splits) in this.Stocks.OrderBy(p => p.Key, StringComparer.OrdinalIgnoreCase))
             stocks[ticker] = new JsonArray([.. splits.Select(s => (JsonNode)new JsonArray(s.Day.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture), s.Ratio))]);
 
-        string temp = path + ".tmp";
-        File.WriteAllText(temp, new JsonObject { ["fetchedMs"] = this.FetchedMs, ["splits"] = stocks }.ToJsonString());
-        for (int attempt = 1; ; attempt++)
-        {
-            try
-            {
-                File.Move(temp, path, true);
-                return;
-            }
-            catch (Exception ex) when (attempt < 10 && (ex is IOException or UnauthorizedAccessException))
-            {
-                Thread.Sleep(20);
-            }
-        }
+        CacheFile.Replace(path, new JsonObject { ["fetchedMs"] = this.FetchedMs, ["splits"] = stocks }.ToJsonString());
     }
 
     private static bool TryDay(string text, out DateTime day) =>
@@ -156,37 +139,4 @@ internal sealed record ReverseSplits(long FetchedMs, IReadOnlyDictionary<string,
     private static double Number(JsonNode node) => node is JsonValue v && v.TryGetValue(out double d) ? d : double.NaN;
 
     private static string Plain(double n) => n.ToString("0.####", CultureInfo.InvariantCulture);
-}
-
-/// <summary>split-cache.json as a chart reads it: again when it changes, looked at no more than every 2 seconds.</summary>
-internal sealed class ReverseSplitFile(string path, Func<long> nowMs = null)
-{
-    private readonly object gate = new();
-    private ReverseSplits splits = ReverseSplits.None;
-    private DateTime fileTimeUtc;
-
-    // Null until the first look. It was long.MinValue, and now minus that overflows to a negative number, so the file
-    // was never looked at.
-    private long? checkedMs;
-
-    /// <summary>The symbol's reverse splits, newest first.</summary>
-    public IReadOnlyList<ReverseSplit> Of(string symbol)
-    {
-        lock (this.gate)
-        {
-            long now = nowMs?.Invoke() ?? Environment.TickCount64;
-            if (this.checkedMs is not long at || now - at >= 2000)
-            {
-                this.checkedMs = now;
-                var time = File.Exists(path) ? File.GetLastWriteTimeUtc(path) : default;
-                if (time != this.fileTimeUtc)
-                {
-                    this.fileTimeUtc = time;
-                    this.splits = ReverseSplits.Read(path);
-                }
-            }
-
-            return this.splits.Of(symbol);
-        }
-    }
 }

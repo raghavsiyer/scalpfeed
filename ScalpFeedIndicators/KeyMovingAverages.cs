@@ -11,7 +11,7 @@ namespace ScalpFeedIndicators;
 /// chart's own bars and by default starts over at each session, 4:00, 9:30 and 16:00 ET, with a break
 /// in its line at each restart (SessionVwap says why Quantower's own wasn't used). It can also draw the rolling
 /// candle (RollingCandleView), on by default, so a Free licence's two indicators a chart can still have it, and for
-/// the same reason the reverse split marker on daily charts (ReverseSplitMark), also on by default.
+/// the same reason the reverse split and offerings on daily charts (DailyMarks), also on by default.
 /// </summary>
 public sealed class KeyMovingAverages : Indicator
 {
@@ -119,8 +119,11 @@ public sealed class KeyMovingAverages : Indicator
     [InputParameter("Show the last reverse split (daily charts)", 95)]
     public bool ShowReverseSplit = true;
 
+    [InputParameter("Show offerings filed (daily charts)", 96)]
+    public bool ShowOfferings = true;
+
     private RollingCandleView rollingCandle;
-    private readonly ReverseSplitMark reverseSplit = new();
+    private readonly DailyMarks dailyMarks = new();
 
     // One per moving average line, in the order the lines were added.
     private readonly Indicator[] averages = new Indicator[5];
@@ -138,7 +141,7 @@ public sealed class KeyMovingAverages : Indicator
     public KeyMovingAverages()
     {
         this.Name = "Key Moving Averages";
-        this.Description = "EMA 9, 20 and 200, simple MA 50 and 200, and a session VWAP, each on or off, with its own colour, width and style; a live rolling candle of the last N seconds; and the last reverse split, marked on daily charts";
+        this.Description = "EMA 9, 20 and 200, simple MA 50 and 200, and a session VWAP, each on or off, with its own colour, width and style; a live rolling candle of the last N seconds; and the last reverse split and offerings filed, marked on daily charts";
 
         this.AddLineSeries("EMA 9", Color.Gold, 1, LineStyle.Solid);
         this.AddLineSeries("EMA 20", Color.DeepSkyBlue, 1, LineStyle.Solid);
@@ -241,8 +244,8 @@ public sealed class KeyMovingAverages : Indicator
     public override void OnPaintChart(PaintChartEventArgs args)
     {
         base.OnPaintChart(args);
-        if (this.ShowReverseSplit)
-            this.reverseSplit.Paint(args, this.CurrentChart, this.HistoricalData, this.Symbol?.Name);
+        if (this.ShowReverseSplit || this.ShowOfferings)
+            this.dailyMarks.Paint(args, this.CurrentChart, this.HistoricalData, this.Symbol?.Name, this.ShowReverseSplit, this.ShowOfferings);
         if (this.ShowRollingCandle)
             this.rollingCandle?.Paint(args);
     }

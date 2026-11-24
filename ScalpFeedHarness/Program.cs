@@ -239,6 +239,9 @@ switch (args[0])
     case "splits":
         await RunSplits(args.Length > 1 ? args[1] : null);
         break;
+    case "offerings":
+        await RunOfferings(args.Length > 1 ? args[1] : null);
+        break;
     case "charted":
         RunCharted();
         break;
@@ -587,17 +590,17 @@ async Task RunSplits(string mode)
 
     // As a chart reads it. Until 2026-11-24 it never looked at the file, so no marker was ever drawn.
     long clock = 474_000_000;
-    var chart = new ReverseSplitFile(path, () => clock);
-    bool noFile = chart.Of("AAA").Count == 0;
+    var chart = new WatchedFile<ReverseSplits>(path, ReverseSplits.Read, () => clock);
+    bool noFile = chart.Value.Of("AAA").Count == 0;
     parsed.Write(path);
-    bool tooSoon = chart.Of("AAA").Count == 0;
+    bool tooSoon = chart.Value.Of("AAA").Count == 0;
     clock += 2000;
-    Check(noFile && tooSoon && chart.Of("AAA").Count == 2, "a chart finds the file once it's there, looking every 2 seconds");
-    Check(new ReverseSplitFile(path).Of("AAA").Count == 2, "and at its first look when it's already there");
+    Check(noFile && tooSoon && chart.Value.Of("AAA").Count == 2, "a chart finds the file once it's there, looking every 2 seconds");
+    Check(new WatchedFile<ReverseSplits>(path, ReverseSplits.Read).Value.Of("AAA").Count == 2, "and at its first look when it's already there");
     await Task.Delay(20);
     Parse(Row("AAA", "2026-06-01", "100", "1")).Write(path);
     clock += 2000;
-    Check(chart.Of("AAA").Count == 1, "and again when it changes");
+    Check(chart.Value.Of("AAA").Count == 1, "and again when it changes");
     File.Delete(path);
 
     // Which daily bar, with Monday the 7th a holiday.
@@ -665,6 +668,127 @@ async Task RunSplits(string mode)
     }
 
     Check(!File.ReadAllText(Log.FilePath).Contains("mv-test-key-123"), "the key is never in the log");
+    Directory.Delete(dir, true);
+}
+
+// Offering prospectuses from Massive's filings index, against answers made up here (its terms keep its data out of a
+// public repo), and nothing is sent anywhere. With "live", real requests with the key in massive.json, into a temporary
+// folder; with "fill", into the file the charts read, as the connection does.
+async Task RunOfferings(string mode)
+{
+    string dir = Path.Combine(Path.GetTempPath(), "scalpfeed-offerings-" + Environment.ProcessId);
+    Directory.CreateDirectory(dir);
+    string path = Path.Combine(dir, Offerings.FileName);
+    if (mode != null)
+    {
+        using var real = new OfferingSource(mode == "fill" ? null : path, checkEvery: Timeout.InfiniteTimeSpan);
+        await real.CheckAsync();
+        var got = Offerings.Read(mode == "fill" ? Offerings.CachePath : path);
+        Check(got.Complete && got.Stocks.Count >= OfferingSource.FewestStocks, $"Massive answered: {got.Stocks.Count} stocks, {got.Stocks.Values.Sum(d => d.Count)} days, {got.Stocks.Values.SelectMany(d => d).Min():yyyy-MM-dd} to {got.Stocks.Values.SelectMany(d => d).Max():yyyy-MM-dd}, {new FileInfo(mode == "fill" ? Offerings.CachePath : path).Length / 1024} KB");
+        Directory.Delete(dir, true);
+        return;
+    }
+
+    static string Row(string ticker, string day, string form = "424B5") =>
+        $$$"""{"ticker":{{{(ticker == null ? "null" : "\"" + ticker + "\"")}}},"filing_date":"{{{day}}}","form_type":"{{{form}}}","issuer_name":"x","accession_number":"1"}""";
+    static string Page(string next, params string[] rows) => "{\"status\":\"OK\",\"results\":[" + string.Join(",", rows) + "]" + (next == null ? "" : ",\"next_url\":\"" + next + "\"") + "}";
+    static DateTime Day(string d) => DateTime.ParseExact(d, "yyyy-MM-dd", CultureInfo.InvariantCulture);
+    var far = Day("2020-01-01");
+
+    var rows = Offerings.FromAnswer(JsonNode.Parse(Page(null, Row("AAA", "2026-06-01"), Row("AAA", "2026-05-01", "424B4"), Row("BBB", "2026-06-01", "424B3"), Row(null, "2026-06-01"), Row("CCC", "soon"), "null", "{}")));
+    Check(rows.SequenceEqual(new[] { ("AAA", Day("2026-06-01")), ("AAA", Day("2026-05-01")) }), "424B4 and 424B5 filings with a ticker and a day, and no others");
+    var list = Offerings.None.With(rows, far, 5, false).With([("aaa", Day("2026-05-20")), ("AAA", Day("2026-06-01")), ("GG.A", Day("2026-01-05")), ("OLD", Day("2019-01-01"))], far, 7, true);
+    Check(list.Of("AAA").SequenceEqual(new[] { Day("2026-06-01"), Day("2026-05-20"), Day("2026-05-01") }) && list.FetchedMs == 7 && list.Complete, "added to what's kept: each day once, newest first");
+    Check(list.Of("GG/A").Count == 1 && list.Of("OLD").Count == 0 && list.Of("ZZZ").Count == 0 && list.Of(null).Count == 0, "a share class by its slash, and days too old left out");
+    Check(Offerings.FromAnswer(JsonNode.Parse("{\"results\":{}}")).Count == 0 && Offerings.FromAnswer(null).Count == 0, "no results is none");
+
+    list.Write(path);
+    var back = Offerings.Read(path);
+    Check(back.FetchedMs == 7 && back.Complete && back.Of("AAA").SequenceEqual(list.Of("AAA")) && back.Stocks.Count == list.Stocks.Count, "the file reads back the same");
+    File.WriteAllText(path, "{\"stocks\": {");
+    bool damaged = Offerings.Read(path) == Offerings.None;
+    File.Delete(path);
+    Check(damaged && Offerings.Read(path) == Offerings.None, "a damaged file, or none, reads as none");
+
+    string Groups(params float[] places) => string.Join(" ", Offerings.Group(places, 22).Select(g => $"{g.X:0}x{g.Count}"));
+    Check(Groups(10, 100, 50) == "100x1 50x1 10x1" && Groups() == "", "circles with room apart are one each");
+    Check(Groups(100, 78, 79, 90) == "100x3 78x1" && Groups(5, 5) == "5x2", "those that would overlap become one at the newest, with how many");
+    var spread = Offerings.Group(Enumerable.Range(0, 300).Select(n => n * 1.7f), 22);
+    Check(spread.Zip(spread.Skip(1)).All(p => p.First.X - p.Second.X >= 22) && spread.Sum(g => g.Count) == 300, "however many there are, none overlap and none go uncounted");
+
+    // The fetcher, with a stand-in for Massive.
+    var now = new DateTime(2026, 11, 24, 13, 0, 0, DateTimeKind.Utc);
+    string key = "mv-test-key-456";
+    var asked = new List<string>();
+    var answers = new Queue<(int, string)>();
+    string Market(string next, int stocks, string day, string prefix = "T") => Page(next, [.. Enumerable.Range(0, stocks).Select(n => Row(prefix + n, day))]);
+    async Task<(int, string)> Send(string url, string k, CancellationToken ct)
+    {
+        asked.Add(url);
+        await Task.Delay(2, ct);
+        return answers.Dequeue();
+    }
+
+    OfferingSource Make() => new(path, Send, () => key, () => now, Timeout.InfiniteTimeSpan);
+    using (var source = Make())
+    {
+        answers.Enqueue((200, Market(MassiveSource.Host + "next?cursor=a", 300, "2026-06-01")));
+        answers.Enqueue((500, ""));
+        await source.CheckAsync();
+        var part = Offerings.Read(path);
+        Check(asked.Count == 2 && asked[0].StartsWith(MassiveSource.Host) && asked[0].Contains("filing_date.gte=2023-11-") && !asked[0].Contains(key) && asked[1].EndsWith("cursor=a"), $"the first fetch asks for 3 years and follows the pages, with the key apart from the address ({asked[0]})");
+        Check(part.Stocks.Count == 300 && !part.Complete, "what's come so far is kept when a page fails");
+        now = now.AddMinutes(11);
+        answers.Enqueue((200, Market(MassiveSource.Host + "next?cursor=a", 300, "2026-06-01")));
+        answers.Enqueue((200, Market(null, 250, "2024-02-02", "U")));
+        await source.CheckAsync();
+        Check(Offerings.Read(path) is { Complete: true, Stocks.Count: 550 }, "and it's started over 10 minutes later, to the last page");
+        await source.CheckAsync();
+        now = now.AddHours(5.9);
+        await source.CheckAsync();
+        Check(asked.Count == 4, "kept for 6 hours");
+    }
+
+    using (var source = Make())
+    {
+        now = now.AddHours(0.2);
+        answers.Enqueue((200, Page(null, Row("T0", "2026-11-23"), Row("NEW", "2026-11-24"))));
+        await source.CheckAsync();
+        var more = Offerings.Read(path);
+        Check(asked.Count == 5 && asked[4].Contains("filing_date.gte=2026-11-19"), $"after a restart only the last days are asked for ({asked[4]})");
+        Check(more.Of("T0").SequenceEqual(new[] { Day("2026-11-23"), Day("2026-06-01") }) && more.Of("NEW").Count == 1 && more.Stocks.Count == 551 && more.Complete, "and added to what's kept");
+
+        foreach (var bad in new[] { (401, ""), (429, ""), (200, "<html>"), (302, ""), (200, Page(null)) })
+        {
+            now = now.AddHours(7);
+            answers.Enqueue(bad);
+            await source.CheckAsync();
+        }
+        Check(asked.Count == 10 && Offerings.Read(path).Stocks.Count == 551, "a refused key, a rate limit, a page that isn't data, a redirect or an empty answer leaves the file alone");
+
+        now = now.AddHours(7);
+        answers.Enqueue((200, Page("https://elsewhere.example/next", Row("T1", "2026-11-25"))));
+        await source.CheckAsync();
+        Check(asked.Count == 11 && asked.All(u => u.StartsWith(MassiveSource.Host)), "a next page anywhere but Massive isn't asked for, so the key goes nowhere else");
+        Check(Offerings.Read(path).Stocks.Count == 551 && Offerings.Read(path).Of("T1").Count == 1, "and that fetch changes nothing");
+    }
+
+    File.Delete(path);
+    using (var source = Make())
+    {
+        now = now.AddHours(7);
+        answers.Enqueue((200, Market(null, OfferingSource.FewestStocks - 1, "2026-06-01")));
+        await source.CheckAsync();
+        Check(!File.Exists(path), "a first page with too few stocks isn't kept");
+        now = now.AddHours(7);
+        for (int i = 0; i < OfferingSource.MostPages; i++)
+            answers.Enqueue((200, Market(MassiveSource.Host + "next?cursor=" + i, 300, "2026-06-01")));
+        int before = asked.Count;
+        await source.CheckAsync();
+        Check(asked.Count - before == OfferingSource.MostPages && !Offerings.Read(path).Complete, $"pages that never end stop at {OfferingSource.MostPages}");
+    }
+
+    Check(!File.ReadAllText(Log.FilePath).Contains(key), "the key is never in the log");
     Directory.Delete(dir, true);
 }
 
