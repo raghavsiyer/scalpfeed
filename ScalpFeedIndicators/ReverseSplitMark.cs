@@ -65,9 +65,9 @@ internal sealed class ReverseSplitMark
     /// <summary>The circle centred on x along the bottom of area, and the ratio to its right, or left with no room.</summary>
     internal static void Draw(Graphics graphics, Rectangle area, float x, string ratio)
     {
-        using var font = new Font("Segoe UI", 7.5f, FontStyle.Bold);
-        using var small = new Font("Segoe UI", 7.5f, FontStyle.Regular);
-        float size = MathF.Ceiling(font.GetHeight(graphics)) + 3;
+        using var font = new Font("Segoe UI", 9f, FontStyle.Bold);
+        using var small = new Font("Segoe UI", 9f, FontStyle.Regular);
+        float size = MathF.Ceiling(font.GetHeight(graphics)) + 5;
         if (x + (size / 2) < area.Left || x - (size / 2) > area.Right)
             return;
 
@@ -78,7 +78,7 @@ internal sealed class ReverseSplitMark
             graphics.SmoothingMode = SmoothingMode.AntiAlias;
             var circle = new RectangleF(MathF.Round(x - (size / 2)), area.Bottom - size - 2, size, size);
             using var fill = new SolidBrush(Inside);
-            using var ring = new Pen(Ring, 1.5f);
+            using var ring = new Pen(Ring, 1.75f);
             using var text = new SolidBrush(Ring);
             graphics.FillEllipse(fill, circle);
             graphics.DrawEllipse(ring, circle);
