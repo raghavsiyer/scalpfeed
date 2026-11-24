@@ -1194,6 +1194,7 @@ async Task RunDepthPacing()
 // the client against the stand-in for Gateway.
 async Task RunVenueTops()
 {
+    Check(VenueTops.Label("DRCTEDGE") == "EDGX" && new[] { "EDGEA", "NSDQ", "ARCA", "BATS", "EDGX", "", null }.All(v => VenueTops.Label(v) == v), "DRCTEDGE shows as EDGX, and every other venue as IBKR names it");
     string Venues(List<IbkrDepthRow> rows) => string.Join(" ", rows.Select(r => r.Venue));
     var merged = new List<IbkrDepthRow>();
     var bids = new List<IbkrDepthRow> { new(5.00, 300, "NASDAQ"), new(4.99, 200, "BATS") };

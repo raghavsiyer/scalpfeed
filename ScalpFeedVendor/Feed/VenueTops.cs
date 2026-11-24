@@ -36,6 +36,12 @@ internal static class VenueTops
         }
     }
 
+    /// <summary>
+    /// What a depth row shows as its venue: IBKR's name, but EDGX for DRCTEDGE, its old name for that Cboe exchange
+    /// (your request, 2026-11-24). Only for showing: everything here goes by IBKR's own names.
+    /// </summary>
+    public static string Label(string venue) => venue == "DRCTEDGE" ? "EDGX" : venue;
+
     private static bool HasVenue(List<IbkrDepthRow> rows, string venue)
     {
         foreach (var row in rows)

@@ -554,7 +554,7 @@ internal sealed class IbkrBridge : IIbkrSink
             {
                 // The Res row's size is already what it should read. A Limit row's 100 shares read 1.
                 double size = res ? row.Size : DepthSizes.ToHundreds(row.Size);
-                target.Add(new Level2Quote(side, symbolId, ids[target.Count], row.Price, size, now) { Broker = row.Venue });
+                target.Add(new Level2Quote(side, symbolId, ids[target.Count], row.Price, size, now) { Broker = VenueTops.Label(row.Venue) });
             }
         }
     }
