@@ -1902,6 +1902,16 @@ async Task RunHotkey()
     Check(OrderHotkeys.TryParseKeys("Alt+2", out m, out vk) && m == HotkeyListener.Alt && vk == '2', "Alt+2 is Alt and the 2 key");
     Check(OrderHotkeys.Decide(alt2, [svre], rth).Ticket == new IbkrOrderTicket("SVRE", true, 2000, "LMT", 0.9024, double.NaN, "IOC"),
         "Alt+2, one depth open: buy 2,000 SVRE, IOC limit 0.9024");
+    var alt3 = OrderHotkey.BuyFourThousand;
+    Check(alt3 is { Keys: "Alt+3", Buy: true, Shares: 4000, Offset: 0.025, Tif: "IOC", OfPosition: 0 }, "Alt+3 buys 4,000 shares at the ask plus 2.5%, immediate or cancel");
+    Check(OrderHotkeys.TryParseKeys("Alt+3", out m, out vk) && m == HotkeyListener.Alt && vk == '3', "Alt+3 is Alt and the 3 key");
+    Check(OrderHotkeys.Decide(alt3, [svre], rth).Ticket == new IbkrOrderTicket("SVRE", true, 4000, "LMT", 0.9024, double.NaN, "IOC")
+        && OrderHotkeys.Decide(alt3, [svre], Utc(18, 12, 0)).Ticket?.Tif == "DAY",
+        "Alt+3, one depth open: buy 4,000 SVRE, IOC limit 0.9024, DAY premarket");
+    var withAlt3 = new List<(uint, uint)> { (HotkeyListener.Alt, '1'), (HotkeyListener.Alt, '2'), (HotkeyListener.Alt, '3') };
+    Check(OrderHotkeys.OnKeyDown(withAlt3, '3', HotkeyListener.Alt, false, true, true) == (2, true) && OrderHotkeys.OnKeyDown(withAlt3, '3', 0, false, true, false) == (-1, false)
+        && OrderHotkeys.OnKeyDown(withAlt3, '3', HotkeyListener.Alt, false, false, false) == (-1, false),
+        "Alt+3 fires as its own key, even with a text cursor; 3 alone types a 3, and Alt+3 in another program does nothing");
     var alt0 = OrderHotkey.BuyOne;
     Check(alt0 is { Keys: "Alt+0", Buy: true, Shares: 1, Offset: 0.025, Tif: "IOC", OfPosition: 0 }, "Alt+0 buys 1 share at the ask plus 2.5%, immediate or cancel");
     Check(OrderHotkeys.TryParseKeys("Alt+0", out m, out vk) && m == HotkeyListener.Alt && vk == '0', "Alt+0 is Alt and the 0 key");
