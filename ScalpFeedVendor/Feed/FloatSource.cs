@@ -268,6 +268,9 @@ internal sealed class FloatSource : IDisposable
         else if (result?["data"] is JsonObject statistics)
         {
             facts = FloatFacts.FromStatistics(statistics, day, fetchedMs);
+            double scale = FloatFacts.AdsScale(statistics);
+            if (scale != 1)
+                Log.Info($"[float] {symbol}'s shares on the site are the ordinary ones, about {1 / scale:#,0} to each ADS that trades, so they're counted in ADSs");
         }
         else
         {

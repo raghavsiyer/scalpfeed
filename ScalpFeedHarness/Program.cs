@@ -953,6 +953,21 @@ async Task RunFloat()
     Check(FloatFacts.DayOf(new DateTime(2026, 11, 16, 3, 0, 0, DateTimeKind.Utc)) == "2026-11-15" && FloatFacts.DayOf(new DateTime(2026, 11, 16, 9, 0, 0, DateTimeKind.Utc)) == "2026-11-16", "a day is an Eastern day");
     Check(FloatFacts.SiteSymbol("BRK/B") == "BRK.B", "share classes are asked for with a dot");
 
+    // An ADS whose shares the site counts in ordinary ones, told by its short interest, which counts ADSs.
+    static JsonNode Shares(string flt, string outstanding, string shorted, string percent) => JsonNode.Parse(
+        $$$"""{"sections":[{"id":"shares","items":[{"hover":"{{{outstanding}}}","id":"sharesout"},{"hover":"{{{flt}}}","id":"float"}]},{"id":"stockPrice","items":[{"hover":"9,000,000","id":"averageVolume"}]},{"id":"shortSelling","items":[{"hover":"{{{shorted}}}","id":"shortInterest"},{"hover":"{{{percent}}}","id":"shortShares"}]}]}""");
+    FloatFacts Facts(JsonNode s) => FloatFacts.FromStatistics(s, "2026-11-24", ms);
+    var ads = Facts(Shares("80,000,000,000", "100,000,000,000", "40,000", "1.600%"));
+    Check(ads is { SharesOut: 2_500_000, Float: 2_000_000, AverageVolume: 9_000_000 } && FloatFacts.Short(ads) == "2.0M", $"an ADS whose float the site has in ordinary shares, 40,000 to one, is counted in ADSs ({ads.Float:#,0} of {ads.SharesOut:#,0})");
+    var saverOne = Facts(Shares("83,560,053,168", "101,814,335,346", "37,917", "1.520%"));
+    Check(saverOne.SharesOut is > 2_400_000 and < 2_600_000 && saverOne.Float is > 1_900_000 and < 2_150_000, $"SVRE's 83.56B is about 2 million ADSs ({saverOne.Float:#,0} of {saverOne.SharesOut:#,0}; its filings make it 43,200 to one)");
+    Check(FloatFacts.AdsScale(Shares("1,728,837", "1,731,736", "28,526", "1.647%")) == 1, "a share count the short interest agrees with is left alone");
+    Check(FloatFacts.AdsScale(Shares("20,000,000", "200,000,000", "1,000,000", "4.000%")) == 1, "so is one with another class that doesn't trade: more shares out, but not float");
+    Check(FloatFacts.AdsScale(Shares("8,557", "11,456", "28,526", "1.647%")) == 1, "and a float that's too small, out of date after a reverse split");
+    Check(FloatFacts.AdsScale(Shares("80,000,000,000", "100,000,000,000", "n/a", "n/a")) == 1 && FloatFacts.AdsScale(Shares("80,000,000,000", "100,000,000,000", "0", "0.000%")) == 1
+          && FloatFacts.AdsScale(Shares("80,000,000,000", "100,000,000,000", "40", "1.600%")) == 1 && FloatFacts.AdsScale(Shares("n/a", "100,000,000,000", "40,000", "1.600%")) == 1 && FloatFacts.AdsScale(null) == 1,
+        "with no short interest to go by, or too little, or no float, nothing is changed");
+
     string dir = Path.Combine(Path.GetTempPath(), "scalpfeed-float-" + Environment.ProcessId);
     Directory.CreateDirectory(dir);
     string cachePath = Path.Combine(dir, "float-cache.json");
