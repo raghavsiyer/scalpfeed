@@ -244,6 +244,9 @@ switch (args[0])
     case "float":
         await RunFloat();
         break;
+    case "macdv":
+        RunMacdV();
+        break;
     case "held":
         RunHeld();
         break;
@@ -929,6 +932,89 @@ void RunHeld()
     now = new DateTime(2026, 11, 25, 5, 30, 0, DateTimeKind.Utc);
     held.Check();
     Check(held.All().Count == 0 && events[^1] == $"new gone {overnight.Id % 1000} the day it was placed is over" && !watched.Contains("AAA"), "and dropped once the day is over, halted or not");
+}
+
+// MACD-V and where it crosses its signal line, for the marks on the price chart.
+void RunMacdV()
+{
+    DateTime Min(int n) => new DateTime(2026, 11, 24, 14, 30, 0, DateTimeKind.Utc).AddMinutes(n);
+    var m = new MacdV();
+    m.Update(Min(0), 5, 5, 5);
+    m.Update(Min(1), 5, 5, 5);
+    Check(m.Line == 0 && m.Signal == 0, "flat from the start: 0, not a division by no range");
+
+    // Against the same thing the long way: EMAs and Wilder's range over the whole series.
+    var rng = new Random(11);
+    var highs = new List<double>();
+    var lows = new List<double>();
+    var closes = new List<double>();
+    double price = 4;
+    for (int i = 0; i < 400; i++)
+    {
+        price *= 1 + ((rng.NextDouble() - 0.49) * 0.02);
+        closes.Add(price);
+        highs.Add(price * (1 + (rng.NextDouble() * 0.01)));
+        lows.Add(price * (1 - (rng.NextDouble() * 0.01)));
+    }
+
+    (double[] Line, double[] Signal) LongWay()
+    {
+        double[] Ema(IReadOnlyList<double> v, double alpha)
+        {
+            var e = new double[v.Count];
+            for (int i = 0; i < v.Count; i++)
+                e[i] = i == 0 ? v[0] : (alpha * v[i]) + ((1 - alpha) * e[i - 1]);
+            return e;
+        }
+
+        var ranges = closes.Select((c, i) => i == 0 ? highs[0] - lows[0] : new[] { highs[i] - lows[i], Math.Abs(highs[i] - closes[i - 1]), Math.Abs(lows[i] - closes[i - 1]) }.Max()).ToList();
+        var fastLine = Ema(closes, 2.0 / 13);
+        var slowLine = Ema(closes, 2.0 / 27);
+        var range = Ema(ranges, 1.0 / 26);
+        var line = closes.Select((_, i) => 100 * (fastLine[i] - slowLine[i]) / range[i]).ToArray();
+        return (line, Ema(line, 2.0 / 10));
+    }
+
+    var (want, wantSignal) = LongWay();
+    m.Clear();
+    var gaps = new Crossovers();
+    double worst = 0;
+    for (int i = 0; i < closes.Count; i++)
+    {
+        // Each bar forms first, so a bar's own earlier prices mustn't count.
+        m.Update(Min(i), closes[i] * 1.02, closes[i] * 0.97, closes[i] * 1.01);
+        m.Update(Min(i), highs[i], lows[i], closes[i]);
+        worst = Math.Max(worst, Math.Max(Math.Abs(m.Line - want[i]), Math.Abs(m.Signal - wantSignal[i])));
+        gaps.Set(Min(i), m.Line - m.Signal);
+    }
+    Check(worst < 1e-9, $"MACD-V and its signal are the EMAs' difference over Wilder's range, and its EMA, however often a bar changes (off by {worst:0.0e0})");
+
+    int ups = 0, downs = 0, wrong = 0;
+    for (int i = 1; i < closes.Count; i++)
+    {
+        int at = gaps.At(Min(i - 1), Min(i));
+        double was = want[i - 1] - wantSignal[i - 1], now = want[i] - wantSignal[i];
+        wrong += at != (was <= 0 && now > 0 ? 1 : was >= 0 && now < 0 ? -1 : 0) ? 1 : 0;
+        ups += at > 0 ? 1 : 0;
+        downs += at < 0 ? 1 : 0;
+    }
+    Check(wrong == 0 && ups > 3 && Math.Abs(ups - downs) <= 1, $"each crossing is found, up and down in turn ({ups} up, {downs} down)");
+
+    var c = new Crossovers();
+    c.Set(Min(0), -1);
+    c.Set(Min(1), 0);
+    c.Set(Min(2), 2);
+    c.Set(Min(3), 3);
+    c.Set(Min(4), -0.5);
+    Check(c.At(Min(0), Min(1)) == 0 && c.At(Min(1), Min(2)) == 1 && c.At(Min(2), Min(3)) == 0 && c.At(Min(3), Min(4)) == -1, "up from 0 or less to more, down from 0 or more to less, and nothing between");
+    Check(c.At(Min(4), Min(5)) == 0 && c.At(Min(9), Min(4)) == 0, "a bar it hasn't got is no crossing");
+    c.Set(Min(4), 1);
+    Check(c.At(Min(3), Min(4)) == 0, "a forming bar that crosses back loses its mark");
+    c.Clear();
+    Check(c.At(Min(1), Min(2)) == 0, "and starting over forgets them");
+
+    m.Update(Min(5), 4, 4, 4);
+    Check(m.Line == 0 && m.Signal == 0, "an earlier bar, as when the chart reloads, starts it over");
 }
 
 // The float from stockanalysis.com through Firecrawl, against canned answers: nothing is sent anywhere.

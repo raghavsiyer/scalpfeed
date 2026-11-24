@@ -11,7 +11,8 @@ namespace ScalpFeedIndicators;
 /// chart's own bars and by default starts over at each session, 4:00, 9:30 and 16:00 ET, with a break
 /// in its line at each restart (SessionVwap says why Quantower's own wasn't used). It can also draw the rolling
 /// candle (RollingCandleView), on by default, so a Free licence's two indicators a chart can still have it, and for
-/// the same reason the reverse split and offerings on daily charts (DailyMarks), also on by default.
+/// the same reason the reverse split and offerings on daily charts (DailyMarks), also on by default, and MACD-V's
+/// crossovers on the candles (MacdVMarks), on 1-minute charts by default.
 /// </summary>
 public sealed class KeyMovingAverages : Indicator
 {
@@ -122,8 +123,23 @@ public sealed class KeyMovingAverages : Indicator
     [InputParameter("Show offerings filed (daily charts)", 96)]
     public bool ShowOfferings = true;
 
+    [InputParameter("MACD-V crossovers", 97, variants: new object[]
+    {
+        "On 1-minute charts", MacdVOneMinute,
+        "On every chart", MacdVEveryChart,
+        "Off", MacdVOff,
+    })]
+    public int MacdVCrossovers = MacdVOneMinute;
+
+    private const int MacdVOff = 0;
+    private const int MacdVOneMinute = 1;
+    private const int MacdVEveryChart = 2;
+
     private RollingCandleView rollingCandle;
     private readonly DailyMarks dailyMarks = new();
+    private readonly MacdVMarks macdV = new();
+    private Indicator macdVBuiltIn;
+    private bool showMacdV;
 
     // One per moving average line, in the order the lines were added.
     private readonly Indicator[] averages = new Indicator[5];
@@ -141,7 +157,7 @@ public sealed class KeyMovingAverages : Indicator
     public KeyMovingAverages()
     {
         this.Name = "Key Moving Averages";
-        this.Description = "EMA 9, 20 and 200, simple MA 50 and 200, and a session VWAP, each on or off, with its own colour, width and style; a live rolling candle of the last N seconds; and the last reverse split and offerings filed, marked on daily charts";
+        this.Description = "EMA 9, 20 and 200, simple MA 50 and 200, and a session VWAP, each on or off, with its own colour, width and style; a live rolling candle of the last N seconds; the last reverse split and offerings filed, marked on daily charts; and MACD-V's crossovers, marked on the candles";
 
         this.AddLineSeries("EMA 9", Color.Gold, 1, LineStyle.Solid);
         this.AddLineSeries("EMA 20", Color.DeepSkyBlue, 1, LineStyle.Solid);
@@ -236,6 +252,16 @@ public sealed class KeyMovingAverages : Indicator
             shown.Add($"{Math.Max(1, this.RollingCandleSeconds)}s candle");
         }
 
+        this.showMacdV = this.MacdVCrossovers == MacdVEveryChart
+            || (this.MacdVCrossovers == MacdVOneMinute && this.HistoricalData?.Aggregation is HistoryAggregationTime time && time.Period == Period.MIN1);
+        if (this.showMacdV)
+        {
+            this.macdVBuiltIn = this.macdV.Start();
+            if (this.macdVBuiltIn != null)
+                this.AddIndicator(this.macdVBuiltIn);
+            shown.Add("MACD-V crossovers");
+        }
+
         this.shortName = shown.Count > 0 ? $"MAs ({string.Join(", ", shown)})" : "MAs (none)";
         this.Trace("init done", this.LineColours());
         this.seenColours = this.LinesSeries.Select(l => l.Color).ToArray();
@@ -246,6 +272,8 @@ public sealed class KeyMovingAverages : Indicator
         base.OnPaintChart(args);
         if (this.ShowReverseSplit || this.ShowOfferings)
             this.dailyMarks.Paint(args, this.CurrentChart, this.HistoricalData, this.Symbol?.Name, this.ShowReverseSplit, this.ShowOfferings);
+        if (this.showMacdV)
+            this.macdV.Paint(args, this.CurrentChart, this.HistoricalData, this.Symbol?.Name);
         if (this.ShowRollingCandle)
             this.rollingCandle?.Paint(args);
     }
@@ -274,6 +302,9 @@ public sealed class KeyMovingAverages : Indicator
             if (this.averages[i] != null && this.Count >= this.periods[i])
                 this.SetValue(this.averages[i].GetValue(), i);
         }
+
+        if (this.showMacdV)
+            this.macdV.Update(this.Time(), this.GetPrice(PriceType.High), this.GetPrice(PriceType.Low), this.GetPrice(PriceType.Close));
 
         if (this.vwap != null)
         {
@@ -357,6 +388,14 @@ public sealed class KeyMovingAverages : Indicator
             this.averages[i] = null;
         }
 
+        if (this.macdVBuiltIn != null)
+        {
+            this.RemoveIndicator(this.macdVBuiltIn);
+            this.macdVBuiltIn.Dispose();
+            this.macdVBuiltIn = null;
+        }
+
+        this.macdV.Stop();
         this.vwap?.Clear();
         this.vwap = null;
         this.vwapStartsLogged.Clear();
