@@ -14,11 +14,13 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- The float, split and offering files' formats and RVOL's arithmetic, shared with the connection. -->
+    <!-- The float, split and offering files' formats, RVOL's arithmetic and the way to volume at price, shared with the
+         connection. -->
     <Compile Include="..\ScalpFeedVendor\Feed\FloatFacts.cs" LinkBase="Shared" />
     <Compile Include="..\ScalpFeedVendor\Feed\ReverseSplits.cs" LinkBase="Shared" />
     <Compile Include="..\ScalpFeedVendor\Feed\Offerings.cs" LinkBase="Shared" />
     <Compile Include="..\ScalpFeedVendor\Feed\CacheFile.cs" LinkBase="Shared" />
+    <Compile Include="..\ScalpFeedVendor\Feed\VolumeAtPriceShare.cs" LinkBase="Shared" />
     <Compile Include="..\ScalpFeedVendor\Feed\RelativeVolumeMath.cs" LinkBase="Shared" />
   </ItemGroup>
 

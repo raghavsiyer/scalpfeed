@@ -178,6 +178,8 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
             this.live.Start();
 
             this.history = new HistoryClient(this.GetTokenAsync);
+            VolumeAtPriceFeed.Shared.Start(this, this.GetTokenAsync, id => this.streamerById.GetValueOrDefault(id, id));
+            VolumeAtPriceShare.Offered = VolumeAtPriceFeed.Shared.Subscribe;
             this.flushTimer = new System.Threading.Timer(this.FlushBook, null, Timeout.Infinite, Timeout.Infinite);
             this.housekeepingTimer = new System.Threading.Timer(this.Housekeeping, null, 1000, 1000);
             this.pingMeter = new PingMeter(Header, this.currentToken.Url.Replace("wss://", "https://", StringComparison.Ordinal));
@@ -1451,6 +1453,7 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
 
         if (client != null)
             StopQuietly(client.StopAsync);
+        StopQuietly(() => VolumeAtPriceFeed.Shared.StopAsync(this));
 
         this.api?.Dispose();
         this.api = null;

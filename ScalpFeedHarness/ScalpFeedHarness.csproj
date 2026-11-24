@@ -12,5 +12,7 @@
     <!-- The indicators' Quantower-free maths. -->
     <Compile Include="..\ScalpFeedIndicators\SessionVwap.cs" LinkBase="Indicators" />
     <Compile Include="..\ScalpFeedIndicators\MacdV.cs" LinkBase="Indicators" />
+    <Compile Include="..\ScalpFeedIndicators\DynamicVpoc.cs" LinkBase="Indicators" />
+    <Compile Include="..\ScalpFeedIndicators\VpocSource.cs" LinkBase="Indicators" />
   </ItemGroup>
 </Project>

@@ -12,7 +12,7 @@ namespace ScalpFeedIndicators;
 /// in its line at each restart (SessionVwap says why Quantower's own wasn't used). It can also draw the rolling
 /// candle (RollingCandleView), on by default, so a Free licence's two indicators a chart can still have it, and for
 /// the same reason the reverse split and offerings on daily charts (DailyMarks), also on by default, and MACD-V's
-/// crossovers on the candles (MacdVMarks), on 1-minute charts by default.
+/// crossovers on the candles (MacdVMarks), on 1-minute charts by default, and a dynamic VPOC on intraday ones (VpocView).
 /// </summary>
 public sealed class KeyMovingAverages : Indicator
 {
@@ -131,6 +131,38 @@ public sealed class KeyMovingAverages : Indicator
     })]
     public int MacdVCrossovers = MacdVOneMinute;
 
+    [InputParameter("Show dynamic VPOC (intraday charts)", 98)]
+    public bool ShowVpoc = true;
+
+    [InputParameter("VPOC starts over", 99, variants: new object[]
+    {
+        "Once a day, at 4:00 ET", VwapFrom4,
+        "Each session: 4:00, 9:30 and 16:00 ET", VwapEachSession,
+        "Once a day, at 9:30 ET", VwapFrom930,
+    })]
+    public int VpocStarts = VwapFrom4;
+
+    [InputParameter("VPOC trading days", 100, 1, 10, 1, 0)]
+    public int VpocDays = 3;
+
+    [InputParameter("VPOC price step (0 = automatic)", 101, 0, 1000, 0.01, 4)]
+    public double VpocStep = 0;
+
+    [InputParameter("VPOC colour", 102)]
+    public Color VpocColour = Color.FromArgb(255, 64, 255);
+
+    [InputParameter("VPOC width", 103, 1, 10, 1, 0)]
+    public int VpocWidth = 2;
+
+    [InputParameter("VPOC value area", 104)]
+    public bool ShowVpocValueArea = true;
+
+    [InputParameter("VPOC value area (% of volume)", 105, 1, 100, 1, 0)]
+    public int VpocValueAreaPercent = 70;
+
+    [InputParameter("VPOC value area colour", 106)]
+    public Color VpocValueAreaColour = Color.FromArgb(64, 200, 200);
+
     private const int MacdVOff = 0;
     private const int MacdVOneMinute = 1;
     private const int MacdVEveryChart = 2;
@@ -138,6 +170,7 @@ public sealed class KeyMovingAverages : Indicator
     private RollingCandleView rollingCandle;
     private readonly DailyMarks dailyMarks = new();
     private readonly MacdVMarks macdV = new();
+    private VpocView vpoc;
     private Indicator macdVBuiltIn;
     private bool showMacdV;
 
@@ -157,7 +190,7 @@ public sealed class KeyMovingAverages : Indicator
     public KeyMovingAverages()
     {
         this.Name = "Key Moving Averages";
-        this.Description = "EMA 9, 20 and 200, simple MA 50 and 200, and a session VWAP, each on or off, with its own colour, width and style; a live rolling candle of the last N seconds; the last reverse split and offerings filed, marked on daily charts; and MACD-V's crossovers, marked on the candles";
+        this.Description = "EMA 9, 20 and 200, simple MA 50 and 200, and a session VWAP, each on or off, with its own colour, width and style; a live rolling candle of the last N seconds; the last reverse split and offerings filed, marked on daily charts; MACD-V's crossovers, marked on the candles; and a dynamic VPOC with its value area on intraday charts";
 
         this.AddLineSeries("EMA 9", Color.Gold, 1, LineStyle.Solid);
         this.AddLineSeries("EMA 20", Color.DeepSkyBlue, 1, LineStyle.Solid);
@@ -262,6 +295,22 @@ public sealed class KeyMovingAverages : Indicator
             shown.Add("MACD-V crossovers");
         }
 
+        if (this.ShowVpoc)
+        {
+            TimeSpan premarket = new(4, 0, 0), open = new(9, 30, 0), afterHours = new(16, 0, 0);
+            TimeSpan[] starts = this.VpocStarts switch
+            {
+                VwapEachSession => [premarket, open, afterHours],
+                VwapFrom930 => [open],
+                _ => [premarket],
+            };
+            this.vpoc ??= new VpocView(this);
+            this.vpoc.Start(
+                new VpocSettings(this.VpocStep > 0 ? Math.Max(0.0001, this.VpocStep) : 0, this.VpocValueAreaPercent / 100.0, starts, Math.Max(1, this.VpocDays)),
+                new VpocLook(this.VpocColour, Math.Max(1, this.VpocWidth), this.ShowVpocValueArea, this.VpocValueAreaColour));
+            shown.Add("VPOC");
+        }
+
         this.shortName = shown.Count > 0 ? $"MAs ({string.Join(", ", shown)})" : "MAs (none)";
         this.Trace("init done", this.LineColours());
         this.seenColours = this.LinesSeries.Select(l => l.Color).ToArray();
@@ -272,6 +321,8 @@ public sealed class KeyMovingAverages : Indicator
         base.OnPaintChart(args);
         if (this.ShowReverseSplit || this.ShowOfferings)
             this.dailyMarks.Paint(args, this.CurrentChart, this.HistoricalData, this.Symbol?.Name, this.ShowReverseSplit, this.ShowOfferings);
+        if (this.ShowVpoc)
+            this.vpoc?.Paint(args);
         if (this.showMacdV)
             this.macdV.Paint(args, this.CurrentChart, this.HistoricalData, this.Symbol?.Name);
         if (this.ShowRollingCandle)
@@ -396,6 +447,7 @@ public sealed class KeyMovingAverages : Indicator
         }
 
         this.macdV.Stop();
+        this.vpoc?.Stop();
         this.vwap?.Clear();
         this.vwap = null;
         this.vwapStartsLogged.Clear();

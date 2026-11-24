@@ -244,6 +244,12 @@ switch (args[0])
     case "float":
         await RunFloat();
         break;
+    case "vpoc":
+        await RunVpoc();
+        break;
+    case "vpoclive":
+        await RunVpocLive(args[1].Split(','));
+        break;
     case "macdv":
         RunMacdV();
         break;
@@ -932,6 +938,251 @@ void RunHeld()
     now = new DateTime(2026, 11, 25, 5, 30, 0, DateTimeKind.Utc);
     held.Check();
     Check(held.All().Count == 0 && events[^1] == $"new gone {overnight.Id % 1000} the day it was placed is over" && !watched.Contains("AAA"), "and dropped once the day is over, halted or not");
+}
+
+// The dynamic VPOC: its arithmetic, then the rows it's worked out from against a stand-in for tastytrade's server.
+async Task RunVpoc()
+{
+    long Et(int month, int day, int hour, int minute) =>
+        new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(new DateTime(2026, month, day, hour, minute, 0), TimeZoneInfo.FindSystemTimeZoneById("Eastern Standard Time"))).ToUnixTimeMilliseconds();
+    const long Minute = 60_000;
+    var four = new TimeSpan(4, 0, 0);
+    TimeSpan[] each = [four, new(9, 30, 0), new(16, 0, 0)];
+
+    // Sessions and steps.
+    var day = new EtSessions(four);
+    Check(day.Of(Et(11, 24, 4, 0)) == (Et(11, 24, 4, 0), Et(11, 25, 4, 0)) && day.Of(Et(11, 24, 3, 59)) == (Et(11, 23, 4, 0), Et(11, 24, 4, 0)), "a day runs from 4:00 ET to the next 4:00, so overnight is the day before's");
+    Check(day.Of(Et(11, 1, 12, 0)) == (Et(11, 1, 4, 0), Et(11, 2, 4, 0)) && day.Of(Et(10, 31, 23, 0)).EndMs - day.Of(Et(10, 31, 23, 0)).StartMs == 25 * 60 * Minute, "and the day the clocks go back is an hour longer");
+    var parts = new EtSessions(each);
+    Check(parts.Of(Et(11, 24, 9, 29)) == (Et(11, 24, 4, 0), Et(11, 24, 9, 30)) && parts.Of(Et(11, 24, 9, 30)).EndMs == Et(11, 24, 16, 0)
+        && parts.Of(Et(11, 24, 2, 0)) == (Et(11, 23, 16, 0), Et(11, 24, 4, 0)), "with three starts, each session runs to the next's start");
+    Check(EtSessions.DayStart(Et(11, 24, 12, 0), 0) == Et(11, 24, 4, 0) && EtSessions.DayStart(Et(11, 24, 12, 0), 2) == Et(11, 20, 4, 0)
+        && EtSessions.DayStart(Et(11, 24, 3, 0), 0) == Et(11, 23, 4, 0) && EtSessions.DayStart(Et(11, 22, 12, 0), 0) == Et(11, 20, 4, 0), "three trading days from a Tuesday start on the Friday before");
+    Check(new (double Price, double Step)[] { (0.05, 0.0001), (0.5, 0.001), (0.99, 0.001), (1.2, 0.01), (5, 0.01), (20, 0.01), (25, 0.02), (80, 0.05), (153, 0.1), (900, 0.5) }
+        .All(t => DynamicVpoc.AutoStep(t.Price) == t.Step), "the step is the stock's tick to $20, then about a twentieth of a percent");
+
+    // One bar of shares at each price, worked by hand: 40 at 13 is the most of 100; the two below have 30 and the two
+    // above 23, and 70 is 70%.
+    DynamicVpoc One(double step = 1) => new(step, 0.7, new EtSessions(four)) { CoveredFromMs = 0 };
+    long t0 = Et(11, 24, 4, 0);
+    var v = One();
+    foreach (var (price, shares) in new[] { (10, 5), (11, 10), (12, 20), (13, 40), (14, 15), (15, 8), (16, 2) })
+        v.Set(t0, Minute, price * 2, shares);
+    Check(v.Points() is [var only] && only == new VpocPoint(t0 + Minute, t0, Et(11, 25, 4, 0), 13, 13, 11), "the price with the most shares, and the prices around it with 70% of them");
+
+    v.Set(t0 + Minute, Minute, 24, 20);
+    Check(v.Points().Length == 1 || v.Points()[^1].Poc == 13, "a price that only draws level doesn't take over");
+    v.Set(t0 + Minute, Minute, 24, 21);
+    Check(v.Points()[^1] is { Poc: 12 } moved && moved.EndMs == t0 + (2 * Minute), "one that passes it does, from that minute on");
+    v.Set(t0 + Minute, Minute, 24, 5);
+    Check(v.Points()[^1].Poc == 13, "and a row sent again takes its old one's place");
+
+    var half = One(0.01);
+    foreach (var (level, price, shares) in new[] { (249, "1.2497", 10), (250, "1.25 and 1.2549", 20), (251, "1.2551", 12), (248, "1.2402", 25) })
+        half.Set(t0, Minute, level, shares);
+    Check(half.Points()[^1].Poc == 1.25, "prints count at the nearest cent: 1.2497 and 1.2549 at 1.25");
+
+    var two = One();
+    two.Set(Et(11, 24, 19, 59), Minute, 20, 1000);
+    two.Set(Et(11, 25, 4, 0), Minute, 30, 5);
+    var both = two.Points();
+    Check(both.Length == 2 && both[0].Poc == 10 && both[1].Poc == 15, "a new day starts over");
+    Check(DynamicVpoc.At(both, Et(11, 24, 20, 0), false)?.Poc == 10 && DynamicVpoc.At(both, Et(11, 25, 4, 1), false)?.Poc == 15, "each bar shows its own day's");
+    Check(DynamicVpoc.At(both, Et(11, 24, 19, 59), false) == null && DynamicVpoc.At(both, Et(11, 25, 4, 0) + 10_000, false) == null, "and nothing before its day has any, not the day before's");
+    Check(DynamicVpoc.At(both, Et(11, 25, 4, 0) + 10_000, true)?.Poc == 15, "but the chart's latest bar shows the minute still running");
+    Check(DynamicVpoc.At([], t0, true) == null, "no points, nothing to show");
+    two.CoveredFromMs = Et(11, 25, 4, 0);
+    Check(two.Points() is [{ Poc: 15 }], "a day that isn't complete isn't shown");
+
+    var bySession = new DynamicVpoc(1, 0.7, new EtSessions(each)) { CoveredFromMs = 0 };
+    bySession.Set(Et(11, 24, 9, 29), Minute, 20, 1000);
+    bySession.Set(Et(11, 24, 9, 30), Minute, 30, 5);
+    Check(bySession.Points()[^1].Poc == 15, "by session, regular hours start over too");
+
+    var far = One(0.01);
+    far.Set(t0, Minute, 100, 5);
+    far.Set(t0 + Minute, Minute, 100_000_000, 1);
+    Check(far.Points().Length == 0, "a price absurdly far off isn't worked out, rather than run out of memory");
+
+    // A made-up stock's whole day of trades, as a stand-in server splits it by price.
+    var rng = new Random(5);
+    var tape = new List<(long Time, double Price, double Size)>();
+    double last = 4;
+    long open = Et(11, 24, 4, 0);
+    for (int minute = 0; minute < 500; minute++)
+    {
+        last = Math.Max(1, last * (1 + ((rng.NextDouble() - 0.5) * 0.02)));
+        for (int n = rng.Next(0, 9); n > 0; n--)
+        {
+            double price = Math.Round(last * (1 + ((rng.NextDouble() - 0.5) * 0.01)), rng.Next(3) == 0 ? 4 : 2);
+            tape.Add((open + (minute * Minute) + rng.Next(0, 60_000), price, 1 + rng.Next(0, 900)));
+        }
+    }
+
+    // The long way: every trade to the end of each minute, at its nearest cent.
+    (double Poc, double Volume) LongWay(long endMs)
+    {
+        double poc = 0;
+        var at = new SortedDictionary<long, double>();
+        foreach (var minute in tape.Where(t => t.Time < endMs).GroupBy(t => t.Time / Minute).OrderBy(g => g.Key))
+        {
+            foreach (var (_, price, size) in minute)
+            {
+                long cent = ((long)Math.Floor((price / 0.005) + 1e-6) + 1) / 2;
+                at[cent] = at.GetValueOrDefault(cent) + size;
+            }
+
+            double best = at.Values.Max();
+            if (poc == 0 || at[(long)Math.Round(poc * 100)] < best)
+                poc = at.First(a => a.Value == best).Key / 100.0;
+        }
+
+        return (poc, at.Values.Sum());
+    }
+
+    foreach (int limit in new[] { 100_000, 1_000, 700 })
+    {
+        string how = limit > 10_000 ? "all in one snapshot" : $"a server that sends only the newest {limit:#,0} rows";
+        using var server = new StandInCandles(limit, tape);
+        var feed = new VolumeAtPriceFeed(cap: limit - 20, linger: TimeSpan.FromSeconds(1), quietLimit: TimeSpan.FromSeconds(20));
+        var owner = new object();
+        feed.Start(owner, server.Token, id => id);
+        var got = new VpocRows();
+        using var stop = feed.Subscribe("TEST", 0.01, open, got.Take);
+        await Until(() => got.CoveredFromMs == open, 10_000);
+        Check(got.CoveredFromMs == open, $"{how}: the whole day is covered ({string.Join(", ", server.Asked)})");
+        Check(Math.Abs(got.Rows.Values.Sum() - tape.Sum(t => t.Size)) < 0.5, $"{how}: every share once ({got.Rows.Values.Sum():#,0})");
+
+        var vpoc = got.Vpoc();
+        var points = vpoc.Points();
+        int wrong = 0, tried = 0;
+        foreach (long lengthMs in got.Rows.Keys.Select(k => k.LengthMs).Distinct())
+        {
+            foreach (long end in got.Rows.Keys.Where(k => k.LengthMs == lengthMs).Select(k => k.TimeMs + k.LengthMs).Distinct())
+            {
+                tried++;
+                wrong += DynamicVpoc.At(points, end, false) is { } p && Math.Abs(p.Poc - LongWay(end).Poc) < 1e-9 ? 0 : 1;
+            }
+        }
+
+        // Coarser rows can settle a tie differently from the minutes in them, and only then.
+        Check(tried > 60 && wrong <= (limit > 10_000 ? 0 : 1), $"{how}: at the end of each of {tried} periods it's the price with the most shares ({wrong} not)");
+
+        // Live: the last minute's row grows, and the far end of the day trades.
+        long lastMinute = open + (500 * Minute);
+        server.Trade("TEST", (lastMinute + 5_000, 2.5, 5_000_000));
+        await Until(() => got.Vpoc().Points()[^1].Poc == 2.5, 5_000);
+        Check(got.Vpoc().Points()[^1] is { Poc: 2.5 } lived && lived.EndMs == lastMinute + Minute && got.WholeCount <= 3, $"{how}: a live trade big enough moves it, sent as a change");
+        server.Trade("TEST", (lastMinute + 6_000, 2.6, 9_000_000));
+        await Until(() => got.Vpoc().Points()[^1].Poc == 2.6, 5_000);
+        Check(got.Vpoc().Points()[^1].Poc == 2.6, $"{how}: and again in the same minute");
+
+        // A second chart gets what's there at once, and asks the server for nothing.
+        int asked = server.Asked.Count;
+        var second = new VpocRows();
+        var stopSecond = feed.Subscribe("TEST", 0.01, open, second.Take);
+        Check(second.CoveredFromMs == open && second.Rows.Values.Sum() == got.Rows.Values.Sum() && server.Asked.Count == asked, $"{how}: a second chart has it at once, from what the first one asked for");
+        stopSecond.Dispose();
+
+        // The socket drops with trades missed meanwhile.
+        int wholes = got.WholeCount;
+        server.Drop();
+        server.Trade("TEST", (lastMinute + 70_000, 2.7, 20_000_000));
+        await Until(() => got.WholeCount > wholes && got.CoveredFromMs == open && got.Vpoc().Points()[^1].Poc == 2.7, 8_000);
+        Check(got.Vpoc().Points()[^1].Poc == 2.7 && Math.Abs(got.Rows.Values.Sum() - server.Volume) < 0.5, $"{how}: after a dropped socket it has what it missed, and every share once");
+
+        stop.Dispose();
+        await Until(() => server.Dropped.Contains("TEST{=m,pl=0.005}"), 5_000);
+        Check(server.Dropped.Contains("TEST{=m,pl=0.005}"), $"{how}: with no chart on it any more, the server is told to stop");
+        await feed.StopAsync(new object());
+        Check(server.Sockets == 1, $"{how}: another connection's stop leaves it be");
+        await feed.StopAsync(owner);
+        await Until(() => server.Sockets == 0, 3_000);
+        Check(server.Sockets == 0, $"{how}: and its own stops it");
+    }
+
+    using (var server = new StandInCandles(200, tape))
+    {
+        var feed = new VolumeAtPriceFeed(cap: 180);
+        var owner = new object();
+        feed.Start(owner, server.Token, id => id);
+        var got = new VpocRows();
+        using var stop = feed.Subscribe("TEST", 0.01, open, got.Take);
+        await Until(() => got.WholeCount == 3, 8_000);
+        Check(got.WholeCount == 3 && got.CoveredFromMs > open && got.Rows.Keys.All(k => k.TimeMs >= got.CoveredFromMs) && got.Vpoc().Points().Length == 0,
+            "a day even the coarsest rows can't cover isn't drawn from part of it");
+        await feed.StopAsync(owner);
+    }
+
+    Check(VolumeAtPriceFeed.CandleSymbol("F", 0.00005, 1) == "F{=5m,pl=0.00005}" && VolumeAtPriceFeed.CandleSymbol("F", 0.25, 0) == "F{=m,pl=0.25}", "the rows are asked for in plain decimals");
+    Check(VolumeAtPriceFeed.WholeFrom(t0 + (3 * Minute), Minute, 5 * Minute) == t0 + (5 * Minute) && VolumeAtPriceFeed.WholeFrom(t0 + (4 * Minute), Minute, 5 * Minute) == t0 + (5 * Minute),
+        "past the oldest minute, which may be cut short, the finer rows take over at a coarser one's start");
+
+    // Through the process to the chart's side: nothing before the connection offers it, then the one source for every chart.
+    using (var server = new StandInCandles(100_000, tape))
+    {
+        long today = EtSessions.DayStart(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), 0);
+        server.Shift(today - open);
+        var settings = new VpocSettings(0.01, 0.7, [four], 1);
+        VolumeAtPriceShare.Offered = null;
+        var source = VpocSource.For("TEST", settings);
+        await Task.Delay(700);
+        Check(source.Points.Length == 0 && !VpocSource.Offered, "with no connection to ask, there's no line");
+
+        var feed = new VolumeAtPriceFeed(linger: TimeSpan.FromSeconds(1));
+        var owner = new object();
+        feed.Start(owner, server.Token, id => id);
+        VolumeAtPriceShare.Offered = feed.Subscribe;
+        int changes = 0;
+        source.Changed += () => Interlocked.Increment(ref changes);
+        await Until(() => source.Points.Length > 0, 8_000);
+        Check(source.Points.Length > 0 && changes > 0 && source.Points[^1].Poc == LongWay(long.MaxValue).Poc, "once it's offered, the line comes by itself");
+        var again = VpocSource.For("TEST", new VpocSettings(0.01, 0.7, [four], 1));
+        Check(ReferenceEquals(source, again) && !ReferenceEquals(source, VpocSource.For("TEST", settings with { ValueAreaShare = 0.6 })), "charts with the same settings share one, others don't");
+        again.Close();
+        source.Close();
+        VpocSource.For("TEST", settings with { ValueAreaShare = 0.6 }).Close();
+        VpocSource.For("TEST", settings with { ValueAreaShare = 0.6 }).Close();
+        VolumeAtPriceShare.Offered = null;
+        await feed.StopAsync(owner);
+    }
+}
+
+async Task Until(Func<bool> done, int ms)
+{
+    for (var clock = Stopwatch.StartNew(); clock.ElapsedMilliseconds < ms && !done(); )
+        await Task.Delay(20);
+}
+
+// The rows behind the VPOC from tastytrade itself, against its plain candles' volume. Read-only.
+async Task RunVpocLive(string[] symbols)
+{
+    using var client = api();
+    var history = new HistoryClient(async (force, ct) => await client.GetQuoteTokenAsync(ct));
+    var feed = new VolumeAtPriceFeed();
+    var owner = new object();
+    feed.Start(owner, async (force, ct) => await client.GetQuoteTokenAsync(ct), id => id);
+    foreach (var symbol in symbols)
+    {
+        long from = EtSessions.DayStart(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), 2);
+        var plain = await history.LoadAsync(symbol + "{=1m}", DateTimeOffset.FromUnixTimeMilliseconds(from).UtcDateTime, DateTime.UtcNow, CancellationToken.None);
+        double step = DynamicVpoc.AutoStep(plain[^1].Close);
+        var got = new VpocRows { Step = step };
+        var clock = Stopwatch.StartNew();
+        using var stop = feed.Subscribe(symbol, step, from, got.Take);
+        await Until(() => got.CoveredFromMs == from, 30_000);
+        long ms = clock.ElapsedMilliseconds;
+        var lengths = got.Rows.GroupBy(r => r.Key.LengthMs).OrderBy(g => g.Key).Select(g => $"{g.Key / 60_000}m: {g.Count():#,0} rows from {DateTimeOffset.FromUnixTimeMilliseconds(g.Min(r => r.Key.TimeMs)):MM-dd HH:mm}");
+        long until = plain[^1].TimeMs;
+        double rows = got.Rows.Where(r => r.Key.TimeMs < until).Sum(r => r.Value), bars = plain.Where(b => b.TimeMs < until).Sum(b => b.Volume);
+        Console.WriteLine($"{symbol} by {step} in {ms} ms, covered from {DateTimeOffset.FromUnixTimeMilliseconds(got.CoveredFromMs):MM-dd HH:mm} UTC; {string.Join("; ", lengths)}");
+        Check(got.CoveredFromMs == from && Math.Abs(rows - bars) <= bars * 0.001, $"{symbol}: {rows:#,0} shares by price, {bars:#,0} in the plain 1-minute bars");
+        foreach (var p in got.Vpoc().Points().GroupBy(p => p.SessionStartMs).Select(g => g.Last()))
+            Console.WriteLine($"   day from {DateTimeOffset.FromUnixTimeMilliseconds(p.SessionStartMs):MM-dd HH:mm} UTC: VPOC {p.Poc}, value area {p.Low} to {p.High}");
+    }
+
+    await feed.StopAsync(owner);
+    await history.StopAsync();
 }
 
 // MACD-V and where it crosses its signal line, for the marks on the price chart.
@@ -4960,4 +5211,279 @@ internal static class SilentSound
     private static extern bool PlaySound(byte[] sound, IntPtr module, uint flags);
 
     public static bool Play(byte[] wav) => PlaySound(wav, IntPtr.Zero, 0x0004 | 0x0002);
+}
+
+/// <summary>A chart's side of VolumeAtPriceFeed: the rows it was handed.</summary>
+internal sealed class VpocRows
+{
+    private readonly object gate = new();
+    private readonly Dictionary<(long TimeMs, long LengthMs, long Level), double> rows = new();
+
+    public double Step { get; init; } = 0.01;
+
+    public long CoveredFromMs { get; private set; } = long.MaxValue;
+
+    public int WholeCount { get; private set; }
+
+    public Dictionary<(long TimeMs, long LengthMs, long Level), double> Rows
+    {
+        get
+        {
+            lock (this.gate)
+                return new(this.rows);
+        }
+    }
+
+    public void Take(bool whole, long coveredFromMs, (long TimeMs, long LengthMs, long Level, double Volume)[] given)
+    {
+        lock (this.gate)
+        {
+            if (whole)
+            {
+                this.rows.Clear();
+                this.WholeCount++;
+            }
+
+            foreach (var (time, length, level, volume) in given)
+                this.rows[(time, length, level)] = volume;
+            this.CoveredFromMs = coveredFromMs;
+        }
+    }
+
+    public DynamicVpoc Vpoc()
+    {
+        var vpoc = new DynamicVpoc(this.Step, 0.7, new EtSessions(new TimeSpan(4, 0, 0))) { CoveredFromMs = this.CoveredFromMs };
+        foreach (var ((time, length, level), volume) in this.Rows)
+            vpoc.Set(time, length, level, volume);
+        return vpoc;
+    }
+}
+
+/// <summary>
+/// A stand-in for tastytrade's DXLink server that splits a tape into candles by price, as its own does: a snapshot of
+/// the newest rows up to a limit, newest first, ending with a removed row, then each row again as it changes.
+/// </summary>
+internal sealed class StandInCandles : IDisposable
+{
+    private readonly System.Net.HttpListener listener = new();
+    private readonly int limit;
+    private readonly int port;
+    private readonly object gate = new();
+    private readonly List<(long Time, double Price, double Size)> tape;
+    private readonly Dictionary<System.Net.WebSockets.WebSocket, HashSet<string>> sockets = new();
+
+    public StandInCandles(int limit, List<(long Time, double Price, double Size)> tape)
+    {
+        this.limit = limit;
+        this.tape = [.. tape];
+        var probe = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+        probe.Start();
+        this.port = ((System.Net.IPEndPoint)probe.LocalEndpoint).Port;
+        probe.Stop();
+        this.listener.Prefixes.Add($"http://localhost:{this.port}/");
+        this.listener.Start();
+        _ = Task.Run(this.AcceptAsync);
+    }
+
+    public ConcurrentQueue<string> Asked { get; } = new();
+
+    public ConcurrentQueue<string> Dropped { get; } = new();
+
+    public int Sockets
+    {
+        get
+        {
+            lock (this.gate)
+                return this.sockets.Count;
+        }
+    }
+
+    public double Volume
+    {
+        get
+        {
+            lock (this.gate)
+                return this.tape.Sum(t => t.Size);
+        }
+    }
+
+    public Task<QuoteToken> Token(bool forceNew, CancellationToken ct) => Task.FromResult(new QuoteToken("fresh", $"ws://localhost:{this.port}/", "api", DateTime.UtcNow));
+
+    public void Shift(long ms)
+    {
+        lock (this.gate)
+        {
+            for (int i = 0; i < this.tape.Count; i++)
+                this.tape[i] = this.tape[i] with { Time = this.tape[i].Time + ms };
+        }
+    }
+
+    /// <summary>A trade: on the tape, and its row again to whoever is watching it.</summary>
+    public void Trade(string symbol, (long Time, double Price, double Size) trade)
+    {
+        List<(System.Net.WebSockets.WebSocket Socket, string Candle)> watching;
+        lock (this.gate)
+        {
+            this.tape.Add(trade);
+            watching = this.sockets.SelectMany(s => s.Value.Where(c => c.StartsWith(symbol + "{", StringComparison.Ordinal)).Select(c => (s.Key, c))).ToList();
+        }
+
+        foreach (var (socket, candle) in watching)
+        {
+            var (length, level) = Parse(candle);
+            var row = this.Rows(candle, 0).First(r => r.Time == trade.Time / length * length && r.Bucket == (long)Math.Floor(trade.Price / level));
+            Send(socket, Frame(candle, [(0, row)]));
+        }
+    }
+
+    public void Drop()
+    {
+        lock (this.gate)
+        {
+            foreach (var socket in this.sockets.Keys)
+                socket.Abort();
+            this.sockets.Clear();
+        }
+    }
+
+    public void Dispose()
+    {
+        this.listener.Stop();
+        this.listener.Close();
+    }
+
+    private static (long Length, double Level) Parse(string candle)
+    {
+        var parts = candle[(candle.IndexOf('{') + 1)..^1].Split(',');
+        long length = parts[0] switch { "=m" => 60_000, "=5m" => 300_000, "=30m" => 1_800_000, _ => throw new InvalidOperationException(candle) };
+        return (length, double.Parse(parts[1][3..], CultureInfo.InvariantCulture));
+    }
+
+    private List<(long Time, long Bucket, double Low, double Volume)> Rows(string candle, long from)
+    {
+        var (length, level) = Parse(candle);
+        lock (this.gate)
+        {
+            return this.tape.Where(t => t.Time >= from)
+                .GroupBy(t => (Time: t.Time / length * length, Bucket: (long)Math.Floor(t.Price / level)))
+                .Select(g => (g.Key.Time, g.Key.Bucket, g.Min(t => t.Price), g.Sum(t => t.Size)))
+                .OrderByDescending(r => r.Time).ThenByDescending(r => r.Bucket)
+                .ToList();
+        }
+    }
+
+    private static string Frame(string candle, IEnumerable<(int Flags, (long Time, long Bucket, double Low, double Volume) Row)> rows)
+    {
+        // The server spells the symbol its own way.
+        string name = candle.Replace("pl=0.00005", "pl=5.0E-5", StringComparison.Ordinal);
+        var values = rows.Select(r => string.Create(CultureInfo.InvariantCulture,
+            $"\"Candle\",\"{name}\",{r.Flags},{(r.Row.Time * 1000) + (r.Row.Bucket % 1000)},{r.Row.Time},{(double.IsNaN(r.Row.Low) ? "\"NaN\"" : r.Row.Low.ToString(CultureInfo.InvariantCulture))},{(double.IsNaN(r.Row.Volume) ? "\"NaN\"" : r.Row.Volume.ToString(CultureInfo.InvariantCulture))}"));
+        return $"{{\"type\":\"FEED_DATA\",\"channel\":1,\"data\":[\"Candle\",[{string.Join(",", values)}]]}}";
+    }
+
+    private static void Send(System.Net.WebSockets.WebSocket socket, string json)
+    {
+        lock (socket)
+        {
+            try
+            {
+                socket.SendAsync(Encoding.UTF8.GetBytes(json), WebSocketMessageType.Text, true, CancellationToken.None).GetAwaiter().GetResult();
+            }
+            catch (Exception ex) when (ex is WebSocketException or ObjectDisposedException or OperationCanceledException or InvalidOperationException)
+            {
+                // Dropped.
+            }
+        }
+    }
+
+    private async Task AcceptAsync()
+    {
+        while (this.listener.IsListening)
+        {
+            try
+            {
+                var context = await this.listener.GetContextAsync();
+                _ = Task.Run(() => this.ServeAsync(context));
+            }
+            catch (Exception ex) when (ex is System.Net.HttpListenerException or ObjectDisposedException or InvalidOperationException)
+            {
+                return;
+            }
+        }
+    }
+
+    private async Task ServeAsync(System.Net.HttpListenerContext context)
+    {
+        var socket = (await context.AcceptWebSocketAsync(null)).WebSocket;
+        lock (this.gate)
+            this.sockets[socket] = new HashSet<string>();
+        var buffer = new byte[64 * 1024];
+        try
+        {
+            while (socket.State == WebSocketState.Open)
+            {
+                var received = await socket.ReceiveAsync(buffer, CancellationToken.None);
+                if (received.MessageType == WebSocketMessageType.Close)
+                    break;
+
+                using var message = JsonDocument.Parse(buffer.AsMemory(0, received.Count));
+                var root = message.RootElement;
+                switch (root.GetProperty("type").GetString())
+                {
+                    case "SETUP":
+                        Send(socket, """{"type":"SETUP","channel":0,"keepaliveTimeout":60,"acceptKeepaliveTimeout":60,"version":"stand-in"}""");
+                        Send(socket, """{"type":"AUTH_STATE","channel":0,"state":"UNAUTHORIZED"}""");
+                        break;
+                    case "AUTH":
+                        Send(socket, """{"type":"AUTH_STATE","channel":0,"state":"AUTHORIZED","userId":"stand-in"}""");
+                        break;
+                    case "CHANNEL_REQUEST":
+                        Send(socket, """{"type":"CHANNEL_OPENED","channel":1,"service":"FEED","parameters":{"contract":"AUTO"}}""");
+                        break;
+                    case "FEED_SETUP":
+                        Send(socket, """{"type":"FEED_CONFIG","channel":1,"dataFormat":"COMPACT","aggregationPeriod":1,"eventFields":{"Candle":["eventType","eventSymbol","eventFlags","index","time","low","volume"]}}""");
+                        break;
+                    case "FEED_SUBSCRIPTION":
+                        if (root.TryGetProperty("remove", out var remove))
+                        {
+                            foreach (var item in remove.EnumerateArray())
+                            {
+                                string candle = item.GetProperty("symbol").GetString();
+                                this.Dropped.Enqueue(candle);
+                                lock (this.gate)
+                                    this.sockets.GetValueOrDefault(socket)?.Remove(candle);
+                            }
+                        }
+
+                        if (root.TryGetProperty("add", out var add))
+                        {
+                            foreach (var item in add.EnumerateArray())
+                            {
+                                string candle = item.GetProperty("symbol").GetString();
+                                this.Asked.Enqueue(candle);
+                                lock (this.gate)
+                                    this.sockets.GetValueOrDefault(socket)?.Add(candle);
+                                var rows = this.Rows(candle, item.GetProperty("fromTime").GetInt64()).Take(this.limit).ToList();
+                                var marker = (Time: rows.Count > 0 ? rows[^1].Time - 1 : 0, Bucket: 0L, Low: double.NaN, Volume: double.NaN);
+                                var all = rows.Select((r, i) => (i == 0 ? EventFlags.SnapshotBegin : 0, r)).Append((EventFlags.SnapshotSnip | EventFlags.Remove | (rows.Count == 0 ? EventFlags.SnapshotBegin : 0), marker)).ToList();
+                                foreach (var part in all.Chunk(400))
+                                    Send(socket, Frame(candle, part));
+                            }
+                        }
+
+                        break;
+                }
+            }
+        }
+        catch (Exception ex) when (ex is WebSocketException or OperationCanceledException or ObjectDisposedException)
+        {
+            // The client hung up, or the test is over.
+        }
+        finally
+        {
+            lock (this.gate)
+                this.sockets.Remove(socket);
+            socket.Dispose();
+        }
+    }
 }
