@@ -38,6 +38,7 @@ internal sealed class PaperTrading : ITraderSink
     private readonly ConcurrentDictionary<int, bool> historyStarted = new();
     private readonly ConcurrentDictionary<string, bool> tradesPushed = new();
     private IbkrTrader trader;
+    private HotkeyBuys buys;
 
     public PaperTrading(Action<Message> push, string vendorKey)
     {
@@ -45,7 +46,11 @@ internal sealed class PaperTrading : ITraderSink
         this.vendorKey = vendorKey;
     }
 
-    public void Start() => this.trader = TraderSession.Attach(this);
+    public void Start()
+    {
+        this.trader = TraderSession.Attach(this);
+        this.buys = this.trader == null ? null : new HotkeyBuys(this.trader, OrderHotkey.CancelWait);
+    }
 
     public void Stop() => TraderSession.Detach(this);
 
@@ -135,6 +140,13 @@ internal sealed class PaperTrading : ITraderSink
     /// <summary>An order hotkey's order (OrderHotkeys), sent like one from the order entry, to the paper account only.</summary>
     public (int Id, string Error) PlaceFromHotkey(IbkrOrderTicket ticket) =>
         this.trader == null ? (0, "IBKR is turned off in ibkr.json") : this.trader.Place(ticket);
+
+    /// <summary>A buy hotkey's order, which works for a while in regular hours, one open at a time in a stock (HotkeyBuys).</summary>
+    public HotkeyBuys.Result BuyFromHotkey(string ibkrSymbol, TimeSpan workFor, Func<(IbkrOrderTicket, double, string)> decide) =>
+        this.buys?.Press(ibkrSymbol, workFor, decide) ?? new HotkeyBuys.Result(0, null, double.NaN, "IBKR is turned off in ibkr.json", null);
+
+    /// <summary>A sell hotkey, before anything else: buy hotkeys pressed before it that are still waiting don't go.</summary>
+    public void SellPressed() => this.buys?.SellPressed();
 
     /// <summary>
     /// Before a position hotkey's order: cancels the stock's working orders on the other side (a sell key's buys) and

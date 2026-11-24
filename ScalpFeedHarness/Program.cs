@@ -940,12 +940,12 @@ async Task RunFloat()
     answers["BROKE"] = (402, "");
     floats.Want("BROKE");
     await floats.IdleAsync();
-    floats.Want("OTHER");
+    floats.Want("TESTB");
     await floats.IdleAsync();
     now = now.AddMinutes(61);
-    floats.Want("OTHER");
+    floats.Want("TESTB");
     await floats.IdleAsync();
-    Check(sent.SequenceEqual(new[] { "BROKE", "OTHER" }), $"out of credits stops all fetches for an hour ({string.Join(" ", sent)})");
+    Check(sent.SequenceEqual(new[] { "BROKE", "TESTB" }), $"out of credits stops all fetches for an hour ({string.Join(" ", sent)})");
 
     sent.Clear();
     answers.TryRemove("BROKE", out _);
@@ -1613,6 +1613,111 @@ async Task RunTrader()
     TapeFill("OLDY", 7, "0003.02", 100);
     await WaitFor(() => trader.Fills().Any(f => f.ExecId == "0003.02"));
     Check(!trader.PositionCountsFills("OLDY"), "a fill as it happens does, until IBKR's position comes in");
+
+    // Buy hotkeys in regular hours: an order works for a moment and is then cancelled, one at a time in a stock.
+    void BuyStatus(int oid, string symbol, string status, int filled) =>
+        gateway.Send("3", Num(oid), status, Num(filled), Num(1000 - filled), filled > 0 ? "4.1" : "0", "300", "0", "4.1", "79", "", "0");
+    var buys = new HotkeyBuys(trader, TimeSpan.FromMilliseconds(600), TimeSpan.FromMilliseconds(300));
+    var shortWork = TimeSpan.FromMilliseconds(250);
+    (IbkrOrderTicket, double, string) Buy(string symbol) => (new IbkrOrderTicket(symbol, true, 1000, "LMT", 4.10, double.NaN, "DAY"), 4.00, null);
+    int Cancels(int oid) => gateway.All("4").Count(f => f[2] == Num(oid));
+
+    var first = buys.Press("TESTA", shortWork, () => Buy("TESTA"));
+    BuyStatus(first.Id, "TESTA", "Submitted", 0);
+    Check(first.Problem == null && first.Cleared == null && trader.Order(first.Id) is { Tif: "DAY", Symbol: "TESTA", Quantity: 1000 }, "a buy key's order goes, as DAY");
+    await Task.Delay(100);
+    Check(Cancels(first.Id) == 0, "it's left alone while its time runs");
+    await WaitFor(() => Cancels(first.Id) == 1, 1);
+    Check(Cancels(first.Id) == 1, "and cancelled when it's up");
+    BuyStatus(first.Id, "TESTA", "Cancelled", 300);
+    await Task.Delay(700);
+    Check(Cancels(first.Id) == 1 && trader.Order(first.Id) is { IsDone: true, Filled: 300 }, "once confirmed, with 300 filled, it's not asked for again");
+
+    var quick = buys.Press("TESTA", shortWork, () => Buy("TESTA"));
+    BuyStatus(quick.Id, "TESTA", "Filled", 1000);
+    await Task.Delay(600);
+    Check(Cancels(quick.Id) == 0, "one that fills in time is never cancelled");
+
+    var silent = buys.Press("TESTA", shortWork, () => Buy("TESTA"));
+    BuyStatus(silent.Id, "TESTA", "Submitted", 0);
+    await WaitFor(() => Cancels(silent.Id) >= 3, 3);
+    Check(Cancels(silent.Id) >= 3, "while IBKR doesn't confirm a cancel, it's asked for again");
+    var blockedClock = Stopwatch.StartNew();
+    int placed = gateway.Count("3");
+    var refusedPress = buys.Press("TESTA", shortWork, () => Buy("TESTA"));
+    Check(refusedPress.Problem == $"the last buy, order {silent.Id}, isn't cancelled yet" && gateway.Count("3") == placed && blockedClock.ElapsedMilliseconds is >= 600 and < 1100,
+        $"and a press then sends nothing, after its wait ({refusedPress.Problem}; {blockedClock.ElapsedMilliseconds} ms)");
+    BuyStatus(silent.Id, "TESTA", "Cancelled", 0);
+    await WaitFor(() => trader.Order(silent.Id).IsDone);
+
+    var long1 = buys.Press("TESTA", TimeSpan.FromSeconds(30), () => Buy("TESTA"));
+    BuyStatus(long1.Id, "TESTA", "Submitted", 0);
+    await WaitFor(() => trader.Order(long1.Id).Status == "Submitted");
+    var (resting, _) = trader.Place(new IbkrOrderTicket("TESTA", true, 500, "LMT", 3.00, double.NaN, "DAY"));
+    BuyStatus(resting, "TESTA", "Submitted", 0);
+    var elsewhere = buys.Press("TESTB", TimeSpan.FromSeconds(30), () => Buy("TESTB"));
+    BuyStatus(elsewhere.Id, "TESTB", "Submitted", 0);
+    await WaitFor(() => trader.Order(elsewhere.Id).Status == "Submitted" && trader.Order(resting).Status == "Submitted");
+    Check(Cancels(long1.Id) == 0 && elsewhere.Cleared == null, "a buy in another stock leaves the first stock's open");
+    bool decidedEarly = false;
+    var second = Task.Run(() => buys.Press("TESTA", TimeSpan.FromSeconds(30), () => { decidedEarly = !trader.Order(long1.Id).IsDone; return Buy("TESTA"); }));
+    await WaitFor(() => Cancels(long1.Id) == 1, 2);
+    placed = gateway.Count("3");
+    await Task.Delay(100);
+    Check(!second.IsCompleted && gateway.Count("3") == placed, "a second press in the stock cancels the open buy and waits for IBKR to confirm");
+    BuyStatus(long1.Id, "TESTA", "Cancelled", 0);
+    var secondResult = await second;
+    Check(secondResult.Problem == null && !decidedEarly && secondResult.Cleared?.Contains($"order {long1.Id}") == true && gateway.Count("3") == placed + 1,
+        $"then goes, priced after that ({secondResult.Cleared})");
+    Check(Cancels(resting) == 0 && Cancels(elsewhere.Id) == 0, "your own resting buy in the stock, and the other stock's, are left alone");
+
+    BuyStatus(secondResult.Id, "TESTA", "Submitted", 0);
+    await WaitFor(() => trader.Order(secondResult.Id).Status == "Submitted");
+    var overtaken = Task.Run(() => buys.Press("TESTA", TimeSpan.FromSeconds(30), () => Buy("TESTA")));
+    await WaitFor(() => Cancels(secondResult.Id) == 1, 2);
+    placed = gateway.Count("3");
+    buys.SellPressed();
+    BuyStatus(secondResult.Id, "TESTA", "Cancelled", 0);
+    var overtakenResult = await overtaken;
+    Check(overtakenResult.Problem == "a sell key was pressed after it" && gateway.Count("3") == placed, "a sell key pressed while a buy waits: the buy isn't sent");
+    var after = buys.Press("TESTA", TimeSpan.FromSeconds(30), () => Buy("TESTA"));
+    Check(after.Problem == null, "a buy pressed after the sell key goes");
+    BuyStatus(after.Id, "TESTA", "Submitted", 0);
+    await WaitFor(() => trader.Order(after.Id).Status == "Submitted");
+
+    // Five presses at once, with IBKR confirming each cancel 40 ms after it's asked: one order left open.
+    using (var confirming = new CancellationTokenSource())
+    {
+        var confirmed = new HashSet<string>();
+        var confirmer = Task.Run(async () =>
+        {
+            while (!confirming.IsCancellationRequested)
+            {
+                foreach (var f in gateway.All("4").Where(f => confirmed.Add(f[2])).ToList())
+                {
+                    await Task.Delay(40);
+                    gateway.Send("3", f[2], "Cancelled", "0", "1000", "0", "300", "0", "0", "79", "", "0");
+                }
+                await Task.Delay(5);
+            }
+        });
+        var five = await Task.WhenAll(Enumerable.Range(0, 5).Select(_ => Task.Run(() => buys.Press("TESTA", TimeSpan.FromSeconds(30), () => Buy("TESTA")))));
+        await WaitFor(() => five.Count(r => r.Problem == null && trader.Order(r.Id) is { IsDone: false }) == 1);
+        Check(five.All(r => r.Problem == null) && five.Count(r => !trader.Order(r.Id).IsDone) == 1 && trader.Order(after.Id).IsDone, "five presses at once leave one order open, not five");
+        int lastOpen = five.Single(r => !trader.Order(r.Id).IsDone).Id;
+        trader.Cancel(lastOpen);
+        await WaitFor(() => trader.Order(lastOpen).IsDone);
+        confirming.Cancel();
+        await confirmer;
+    }
+
+    placed = gateway.Count("3");
+    var early1 = buys.Press("TESTC", TimeSpan.Zero, () => Buy("TESTC"));
+    var early2 = buys.Press("TESTC", TimeSpan.Zero, () => Buy("TESTC"));
+    await Task.Delay(700);
+    Check(early1.Problem == null && early2.Problem == null && gateway.Count("3") == placed + 2 && Cancels(early1.Id) == 0 && Cancels(early2.Id) == 0, "outside regular hours each is left working, and two presses are two orders, as before");
+    var undecided = buys.Press("TESTC", TimeSpan.Zero, () => (null, double.NaN, "TESTC is halted"));
+    Check(undecided.Problem == "TESTC is halted" && undecided.Id == 0 && gateway.Count("3") == placed + 2, "why an order isn't decided is why nothing goes");
     await trader.StopAsync();
 
     // A live account: nothing but startApi, and every order refused.
@@ -1860,22 +1965,27 @@ async Task RunHotkey()
     var alt1 = OrderHotkey.BuyAsk;
     var shiftZ = OrderHotkey.SellAll;
     var shiftX = OrderHotkey.SellHalf;
-    Check(alt1 is { Keys: "Alt+1", Buy: true, Shares: 1000, Offset: 0.025, Tif: "IOC", OfPosition: 0 }, "Alt+1 buys 1,000 shares at the ask plus 2.5%, immediate or cancel");
+    Check(alt1 is { Keys: "Alt+1", Buy: true, Shares: 1000, Offset: 0.025, OfPosition: 0, WorkSeconds: 1 }, "Alt+1 buys 1,000 shares at the ask plus 2.5%, working for 1 second");
     Check(shiftZ is { Keys: "Shift+Z", Buy: false, Offset: 0.025, Tif: "IOC", OfPosition: 1 }, "Shift+Z sells the whole position at the bid minus 2.5%, immediate or cancel");
     Check(shiftX is { Keys: "Shift+X", Buy: false, Offset: 0.025, Tif: "IOC", OfPosition: 0.5 }, "Shift+X sells half the position at the bid minus 2.5%, immediate or cancel");
-    Check(alt1.Describe() == "buy 1,000 shares, IOC (DAY outside 9:30-16:00 ET) limit at the ask plus 2.5%, at most 0.15" && shiftZ.Size() == "the whole position" && shiftX.Size() == "half the position",
+    Check(shiftZ.WorkSeconds == 0 && shiftX.WorkSeconds == 0, "the sell keys don't wait");
+    Check(alt1.Describe() == "buy 1,000 shares, DAY for 1 s (left working outside 9:30-16:00 ET) limit at the ask plus 2.5%, at most 0.15" && shiftZ.Describe() == "sell the whole position, IOC (DAY outside 9:30-16:00 ET) limit at the bid minus 2.5%, at most 0.15" && shiftZ.Size() == "the whole position" && shiftX.Size() == "half the position",
         $"each says what it does ({alt1.Describe()}; {shiftZ.Describe()}; {shiftX.Describe()})");
 
     // IOC in the regular session, DAY outside it: IBKR ignores outsideRth on a SMART IOC (warning 2109, 11-18).
     // 2026-11-18 is a Wednesday in EST, so 9:30 ET is 14:30 UTC.
     DateTime Utc(int day, int h, int min) => new(2026, 11, day, h, min, 0, DateTimeKind.Utc);
     var rth = Utc(18, 15, 0);
-    Check(OrderHotkeys.TifAt(alt1, Utc(18, 14, 30)) == "IOC" && OrderHotkeys.TifAt(alt1, rth) == "IOC" && OrderHotkeys.TifAt(alt1, Utc(18, 20, 59)) == "IOC",
-        "IOC from 9:30 to just before 16:00 ET");
-    Check(OrderHotkeys.TifAt(alt1, Utc(18, 14, 29)) == "DAY" && OrderHotkeys.TifAt(alt1, Utc(18, 21, 0)) == "DAY" && OrderHotkeys.TifAt(alt1, Utc(18, 9, 0)) == "DAY",
+    Check(OrderHotkeys.TifAt(shiftZ, Utc(18, 14, 30)) == "IOC" && OrderHotkeys.TifAt(shiftZ, rth) == "IOC" && OrderHotkeys.TifAt(shiftZ, Utc(18, 20, 59)) == "IOC",
+        "a sell key is IOC from 9:30 to just before 16:00 ET");
+    Check(OrderHotkeys.TifAt(shiftZ, Utc(18, 14, 29)) == "DAY" && OrderHotkeys.TifAt(shiftZ, Utc(18, 21, 0)) == "DAY" && OrderHotkeys.TifAt(shiftZ, Utc(18, 9, 0)) == "DAY",
         "DAY premarket (4:00 ET as well as 9:29) and from 16:00 after hours");
-    Check(OrderHotkeys.TifAt(alt1, Utc(21, 15, 0)) == "DAY", "DAY all weekend, so nothing sits there as an IOC that can't fill");
-    Check(OrderHotkeys.TifAt(alt1 with { Tif = "GTC" }, Utc(18, 9, 0)) == "GTC", "a key that isn't IOC keeps its own time in force");
+    Check(OrderHotkeys.TifAt(shiftZ, Utc(21, 15, 0)) == "DAY", "DAY all weekend, so nothing sits there as an IOC that can't fill");
+    Check(OrderHotkeys.TifAt(shiftZ with { Tif = "GTC" }, Utc(18, 9, 0)) == "GTC", "a key that isn't IOC keeps its own time in force");
+    Check(new[] { alt1, OrderHotkey.BuyTwoThousand, OrderHotkey.BuyFourThousand, OrderHotkey.BuyOne }.All(k => OrderHotkeys.TifAt(k, rth) == "DAY" && OrderHotkeys.WorkFor(k, rth) == TimeSpan.FromSeconds(1)
+        && OrderHotkeys.WorkFor(k, Utc(18, 14, 30)) == TimeSpan.FromSeconds(1) && OrderHotkeys.WorkFor(k, Utc(18, 20, 59)) == TimeSpan.FromSeconds(1)), "each buy key is a DAY order that works for 1 second from 9:30 to just before 16:00 ET");
+    Check(OrderHotkeys.WorkFor(alt1, Utc(18, 14, 29)) == TimeSpan.Zero && OrderHotkeys.WorkFor(alt1, Utc(18, 21, 0)) == TimeSpan.Zero && OrderHotkeys.WorkFor(alt1, Utc(21, 15, 0)) == TimeSpan.Zero && OrderHotkeys.WorkFor(shiftZ, rth) == TimeSpan.Zero,
+        "and is left working outside those hours, as before");
     Check(OrderHotkeys.LimitPrice(0.8804, 0.025) == 0.9024 && OrderHotkeys.LimitPrice(4.00, 0.025) == 4.10 && OrderHotkeys.LimitPrice(6.00, 0.025) == 6.15,
         "the limit is the ask plus 2.5%: 0.8804 makes 0.9024, 4.00 makes 4.10, 6.00 makes 6.15");
     Check(OrderHotkeys.LimitPrice(10, 0.025) == 10.15 && OrderHotkeys.LimitPrice(100, 0.025) == 100.15 && OrderHotkeys.LimitPrice(100, -0.025) == 99.85,
@@ -1893,31 +2003,31 @@ async Task RunHotkey()
 
     var svre = new HotkeyQuote("SVRE", 0.8803, 0.8804, false);
     var (ticket, quote, problem) = OrderHotkeys.Decide(alt1, [svre], rth);
-    Check(problem == null && ticket == new IbkrOrderTicket("SVRE", true, 1000, "LMT", 0.9024, double.NaN, "IOC") && quote == 0.8804,
-        $"Alt+1, one depth open: buy 1,000 SVRE, IOC limit 0.9024 ({ticket})");
+    Check(problem == null && ticket == new IbkrOrderTicket("SVRE", true, 1000, "LMT", 0.9024, double.NaN, "DAY") && quote == 0.8804,
+        $"Alt+1, one depth open: buy 1,000 SVRE, DAY limit 0.9024 ({ticket})");
     Check(OrderHotkeys.Decide(alt1, [svre], Utc(18, 12, 0)).Ticket == new IbkrOrderTicket("SVRE", true, 1000, "LMT", 0.9024, double.NaN, "DAY"),
         "the same press at 7:00 ET premarket sends a DAY limit");
     var alt2 = OrderHotkey.BuyTwoThousand;
-    Check(alt2 is { Keys: "Alt+2", Buy: true, Shares: 2000, Offset: 0.025, Tif: "IOC", OfPosition: 0 }, "Alt+2 buys 2,000 shares at the ask plus 2.5%, immediate or cancel");
+    Check(alt2 is { Keys: "Alt+2", Buy: true, Shares: 2000, Offset: 0.025, OfPosition: 0, WorkSeconds: 1 }, "Alt+2 buys 2,000 shares at the ask plus 2.5%, working for 1 second");
     Check(OrderHotkeys.TryParseKeys("Alt+2", out m, out vk) && m == HotkeyListener.Alt && vk == '2', "Alt+2 is Alt and the 2 key");
-    Check(OrderHotkeys.Decide(alt2, [svre], rth).Ticket == new IbkrOrderTicket("SVRE", true, 2000, "LMT", 0.9024, double.NaN, "IOC"),
-        "Alt+2, one depth open: buy 2,000 SVRE, IOC limit 0.9024");
+    Check(OrderHotkeys.Decide(alt2, [svre], rth).Ticket == new IbkrOrderTicket("SVRE", true, 2000, "LMT", 0.9024, double.NaN, "DAY"),
+        "Alt+2, one depth open: buy 2,000 SVRE, DAY limit 0.9024");
     var alt3 = OrderHotkey.BuyFourThousand;
-    Check(alt3 is { Keys: "Alt+3", Buy: true, Shares: 4000, Offset: 0.025, Tif: "IOC", OfPosition: 0 }, "Alt+3 buys 4,000 shares at the ask plus 2.5%, immediate or cancel");
+    Check(alt3 is { Keys: "Alt+3", Buy: true, Shares: 4000, Offset: 0.025, OfPosition: 0, WorkSeconds: 1 }, "Alt+3 buys 4,000 shares at the ask plus 2.5%, working for 1 second");
     Check(OrderHotkeys.TryParseKeys("Alt+3", out m, out vk) && m == HotkeyListener.Alt && vk == '3', "Alt+3 is Alt and the 3 key");
-    Check(OrderHotkeys.Decide(alt3, [svre], rth).Ticket == new IbkrOrderTicket("SVRE", true, 4000, "LMT", 0.9024, double.NaN, "IOC")
+    Check(OrderHotkeys.Decide(alt3, [svre], rth).Ticket == new IbkrOrderTicket("SVRE", true, 4000, "LMT", 0.9024, double.NaN, "DAY")
         && OrderHotkeys.Decide(alt3, [svre], Utc(18, 12, 0)).Ticket?.Tif == "DAY",
-        "Alt+3, one depth open: buy 4,000 SVRE, IOC limit 0.9024, DAY premarket");
+        "Alt+3, one depth open: buy 4,000 SVRE, DAY limit 0.9024, premarket too");
     var withAlt3 = new List<(uint, uint)> { (HotkeyListener.Alt, '1'), (HotkeyListener.Alt, '2'), (HotkeyListener.Alt, '3') };
     Check(OrderHotkeys.OnKeyDown(withAlt3, '3', HotkeyListener.Alt, false, true, true) == (2, true) && OrderHotkeys.OnKeyDown(withAlt3, '3', 0, false, true, false) == (-1, false)
         && OrderHotkeys.OnKeyDown(withAlt3, '3', HotkeyListener.Alt, false, false, false) == (-1, false),
         "Alt+3 fires as its own key, even with a text cursor; 3 alone types a 3, and Alt+3 in another program does nothing");
     var alt0 = OrderHotkey.BuyOne;
-    Check(alt0 is { Keys: "Alt+0", Buy: true, Shares: 1, Offset: 0.025, Tif: "IOC", OfPosition: 0 }, "Alt+0 buys 1 share at the ask plus 2.5%, immediate or cancel");
+    Check(alt0 is { Keys: "Alt+0", Buy: true, Shares: 1, Offset: 0.025, OfPosition: 0, WorkSeconds: 1 }, "Alt+0 buys 1 share at the ask plus 2.5%, working for 1 second");
     Check(OrderHotkeys.TryParseKeys("Alt+0", out m, out vk) && m == HotkeyListener.Alt && vk == '0', "Alt+0 is Alt and the 0 key");
-    Check(OrderHotkeys.Decide(alt0, [svre], rth).Ticket == new IbkrOrderTicket("SVRE", true, 1, "LMT", 0.9024, double.NaN, "IOC")
+    Check(OrderHotkeys.Decide(alt0, [svre], rth).Ticket == new IbkrOrderTicket("SVRE", true, 1, "LMT", 0.9024, double.NaN, "DAY")
         && OrderHotkeys.Decide(alt0, [svre], Utc(18, 12, 0)).Ticket?.Tif == "DAY",
-        "Alt+0, one depth open: buy 1 SVRE, IOC limit 0.9024, DAY premarket");
+        "Alt+0, one depth open: buy 1 SVRE, DAY limit 0.9024, premarket too");
     var withAlt0 = new List<(uint, uint)> { (HotkeyListener.Alt, '1'), (HotkeyListener.Alt, '2'), (HotkeyListener.Alt, '0') };
     Check(OrderHotkeys.OnKeyDown(withAlt0, '0', HotkeyListener.Alt, false, true, true) == (2, true) && OrderHotkeys.OnKeyDown(withAlt0, '0', 0, false, true, false) == (-1, false),
         "Alt+0 fires as its own key, even with a text cursor; 0 alone types a 0");
@@ -4485,6 +4595,8 @@ internal sealed class FakeTradingGateway : IDisposable
     public int Count(string messageId) => this.Received.Count(r => r[0] == messageId);
 
     public string[] LastOf(string messageId) => this.Received.LastOrDefault(r => r[0] == messageId);
+
+    public List<string[]> All(string messageId) => this.Received.Where(r => r[0] == messageId).ToList();
 
     public void Send(params string[] fields)
     {

@@ -8,8 +8,15 @@ namespace ScalpFeedVendor.Feed;
 /// price (0.05 is 5%), with this time in force (DAY, GTC or IOC). The size is the shares given, or with OfPosition that share of the position it closes
 /// (1 the whole position, 0.5 half), whole shares rounded down: a sell the long position, a buy a short one.
 /// </summary>
-internal sealed record OrderHotkey(string Keys, bool Buy, double Shares, double Offset, string Tif, double OfPosition = 0)
+/// <param name="WorkSeconds">
+/// With more than zero, how long the order works from 9:30 to 16:00 ET before what's left is cancelled, as DAY, instead
+/// of being IOC (HotkeyBuys).
+/// </param>
+internal sealed record OrderHotkey(string Keys, bool Buy, double Shares, double Offset, string Tif, double OfPosition = 0, double WorkSeconds = 0)
 {
+    /// <summary>How long a buy key's order works in regular hours: 1 second (your choice, 2026-11-24, on paper). It was IOC.</summary>
+    public const double BuyWorkSeconds = 1;
+
     /// <summary>
     /// How far through the quote every key's limit goes: 2.5% of the price (your choice, 2026-11-19, after 5% the
     /// same day). It was 10 cents, which on VIVS at $0.25 was 40% past the ask, and IBKR refused each such buy ("We
@@ -29,17 +36,17 @@ internal sealed record OrderHotkey(string Keys, bool Buy, double Shares, double 
     /// <summary>Then how long it waits for IBKR's position to count those orders' last fills before going by the one it has.</summary>
     public static readonly TimeSpan PositionWait = TimeSpan.FromMilliseconds(500);
 
-    /// <summary>Alt+1: buy 1,000 shares, limit at the ask plus 2.5%, immediate or cancel (your requests, 2026-11-18 and 19).</summary>
-    public static OrderHotkey BuyAsk { get; } = new("Alt+1", true, 1000, OffsetShare, "IOC");
+    /// <summary>Alt+1: buy 1,000 shares, limit at the ask plus 2.5%, working for a second (your requests, 2026-11-18, 19 and 24).</summary>
+    public static OrderHotkey BuyAsk { get; } = new("Alt+1", true, 1000, OffsetShare, "IOC", WorkSeconds: BuyWorkSeconds);
 
     /// <summary>Alt+2: buy 2,000 shares, otherwise as Alt+1 (your request, 2026-11-18).</summary>
-    public static OrderHotkey BuyTwoThousand { get; } = new("Alt+2", true, 2000, OffsetShare, "IOC");
+    public static OrderHotkey BuyTwoThousand { get; } = new("Alt+2", true, 2000, OffsetShare, "IOC", WorkSeconds: BuyWorkSeconds);
 
     /// <summary>Alt+3: buy 4,000 shares, otherwise as Alt+1 (your request, 2026-11-24).</summary>
-    public static OrderHotkey BuyFourThousand { get; } = new("Alt+3", true, 4000, OffsetShare, "IOC");
+    public static OrderHotkey BuyFourThousand { get; } = new("Alt+3", true, 4000, OffsetShare, "IOC", WorkSeconds: BuyWorkSeconds);
 
     /// <summary>Alt+0: buy 1 share, otherwise as Alt+1 (your request, 2026-11-23).</summary>
-    public static OrderHotkey BuyOne { get; } = new("Alt+0", true, 1, OffsetShare, "IOC");
+    public static OrderHotkey BuyOne { get; } = new("Alt+0", true, 1, OffsetShare, "IOC", WorkSeconds: BuyWorkSeconds);
 
     /// <summary>Shift+Z: sell the whole position, limit at the bid minus 2.5%, immediate or cancel (your request, 2026-11-18).</summary>
     public static OrderHotkey SellAll { get; } = new("Shift+Z", false, 0, OffsetShare, "IOC", OfPosition: 1);
@@ -57,7 +64,7 @@ internal sealed record OrderHotkey(string Keys, bool Buy, double Shares, double 
     };
 
     public string Describe() =>
-        $"{(this.Buy ? "buy" : "sell")} {this.Size()}, {this.Tif}{(this.Tif == "IOC" ? " (DAY outside 9:30-16:00 ET)" : "")} limit at the {(this.Buy ? "ask plus" : "bid minus")} {this.Offset:0.##%}, at most {OrderHotkey.MaxOffset:0.00}";
+        $"{(this.Buy ? "buy" : "sell")} {this.Size()}, {(this.WorkSeconds > 0 ? $"DAY for {this.WorkSeconds:0.##} s (left working outside 9:30-16:00 ET)" : this.Tif + (this.Tif == "IOC" ? " (DAY outside 9:30-16:00 ET)" : ""))} limit at the {(this.Buy ? "ask plus" : "bid minus")} {this.Offset:0.##%}, at most {OrderHotkey.MaxOffset:0.00}";
 }
 
 /// <summary>
@@ -74,8 +81,9 @@ internal readonly record struct HotkeyQuote(string Symbol, double Bid, double As
 /// The stock is the one with a market depth open, since your DOM follows the stock you've picked; with none or
 /// several it sends nothing and says why. The price is IBKR's NBBO, at the moment of the key, rounded to IBKR's
 /// tick for the price: a cent from a dollar, a hundredth of a cent below. The order is a limit with the key's time in
-/// force, which IbkrTrader sends with outsideRth for premarket and after hours. All the keys are IOC (what doesn't
-/// fill at once is cancelled) from 9:30 to 16:00 ET on weekdays, and DAY outside it (your choice, 2026-11-18): IBKR
+/// force, which IbkrTrader sends with outsideRth for premarket and after hours. The sell keys are IOC (what doesn't
+/// fill at once is cancelled) from 9:30 to 16:00 ET on weekdays, and DAY outside it (your choice, 2026-11-18); the buy
+/// keys were too, and since 2026-11-24 work for a second in regular hours instead (HotkeyBuys). IBKR
 /// ignores outsideRth on an IOC sent to SMART (warning 2109 on every hotkey order that morning), so an IOC wouldn't
 /// work premarket, while a DAY limit does and stays working until it fills or you cancel it. A position key takes its
 /// share of the position as IBKR last said it, never more than the shares not already in working orders on its side,
@@ -96,9 +104,13 @@ internal static class OrderHotkeys
         return et.DayOfWeek is not (DayOfWeek.Saturday or DayOfWeek.Sunday) && et.TimeOfDay >= RegularOpen && et.TimeOfDay < RegularClose;
     }
 
-    /// <summary>The key's time in force at this moment: an IOC key's order is DAY outside regular hours.</summary>
+    /// <summary>The key's time in force at this moment: an IOC key's order is DAY outside regular hours, and in them too when it works for a while.</summary>
     public static string TifAt(OrderHotkey hotkey, DateTime utc) =>
-        hotkey.Tif == "IOC" && !InRegularHours(utc) ? "DAY" : hotkey.Tif;
+        hotkey.Tif == "IOC" && (hotkey.WorkSeconds > 0 || !InRegularHours(utc)) ? "DAY" : hotkey.Tif;
+
+    /// <summary>How long the key's order works at this moment before what's left is cancelled; zero is left as it is.</summary>
+    public static TimeSpan WorkFor(OrderHotkey hotkey, DateTime utc) =>
+        hotkey.WorkSeconds > 0 && InRegularHours(utc) ? TimeSpan.FromSeconds(hotkey.WorkSeconds) : TimeSpan.Zero;
 
     /// <summary>
     /// The order for this key on these depth symbols at this moment (now when not given), or why there's none.

@@ -80,6 +80,9 @@ public sealed class ScalpFeedVendor : MultiVendor
     {
         var market = this.marketData;
         var paper = this.trading;
+        if (!hotkey.Buy)
+            paper?.SellPressed();
+
         // Each depth symbol with the paper account's position and working orders, for a position key.
         List<HotkeyQuote> Depth() => market?.DepthQuotes().Select(q =>
         {
@@ -101,17 +104,39 @@ public sealed class ScalpFeedVendor : MultiVendor
             }
         }
 
-        var (ticket, quote, problem) = depth == null
+        (IbkrOrderTicket Ticket, double Quote, string Problem) Decide() => depth == null
             ? (null, double.NaN, "market data isn't connected")
             : OrderHotkeys.Decide(hotkey, depth, restriction: IbkrRestrictions.Shared.Reason);
 
         int id = 0;
-        if (problem == null)
-            (id, problem) = paper == null ? (0, "trading isn't connected") : paper.PlaceFromHotkey(ticket);
+        IbkrOrderTicket ticket;
+        double quote;
+        string problem;
+        var workFor = OrderHotkeys.WorkFor(hotkey, DateTime.UtcNow);
+        if (hotkey.WorkSeconds > 0 && paper != null && depth is [var stock])
+        {
+            // It may wait for the last buy's cancel, so it's decided then, on the quote then, for the same stock.
+            var bought = paper.BuyFromHotkey(stock.Symbol, workFor, () =>
+            {
+                depth = Depth();
+                return depth is [var now] && now.Symbol != stock.Symbol
+                    ? (null, double.NaN, $"the depth changed from {stock.Symbol} to {now.Symbol} before it went")
+                    : Decide();
+            });
+            (id, ticket, quote, problem) = (bought.Id, bought.Ticket, bought.Quote, bought.Problem);
+            if (bought.Cleared != null)
+                Log.Info($"[hotkey] {hotkey.Keys}: {bought.Cleared}");
+        }
+        else
+        {
+            (ticket, quote, problem) = Decide();
+            if (problem == null)
+                (id, problem) = paper == null ? (0, "trading isn't connected") : paper.PlaceFromHotkey(ticket);
+        }
 
         if (problem == null)
         {
-            string what = $"{(ticket.Buy ? "buy" : "sell")} {ticket.Quantity:#,0} {ticket.Symbol} {ticket.Tif} limit {ticket.LimitPrice} ({(ticket.Buy ? "ask" : "bid")} {quote} {(ticket.Buy ? "+" : "-")} {hotkey.Offset:0.##%}, at most {OrderHotkey.MaxOffset:0.00})";
+            string what = $"{(ticket.Buy ? "buy" : "sell")} {ticket.Quantity:#,0} {ticket.Symbol} {ticket.Tif}{(workFor > TimeSpan.Zero ? $" for {workFor.TotalSeconds:0.##} s" : "")} limit {ticket.LimitPrice} ({(ticket.Buy ? "ask" : "bid")} {quote} {(ticket.Buy ? "+" : "-")} {hotkey.Offset:0.##%}, at most {OrderHotkey.MaxOffset:0.00})";
             // Logged only: a pop-up for every order sent was noise (your request, 2026-11-19). One that sent
             // nothing still pops up, silently since 2026-11-23 (FeedAlarm.Muted).
             Log.Info($"[hotkey] {hotkey.Keys}: order {id}, {what}");

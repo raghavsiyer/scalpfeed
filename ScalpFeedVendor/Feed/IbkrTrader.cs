@@ -299,6 +299,21 @@ internal sealed class IbkrTrader
         return string.Join("; ", said);
     }
 
+    /// <summary>
+    /// Cancels one working order and waits, up to doneWait, for IBKR to say it's done. Returns what happened, for the
+    /// log; done is false while it may still fill.
+    /// </summary>
+    public string CancelAndWait(int id, TimeSpan doneWait, out bool done)
+    {
+        var clock = Stopwatch.StartNew();
+        string error = this.Order(id)?.Status == "PendingCancel" ? null : this.Cancel(id);
+        done = this.WaitUntil(() => this.Order(id)?.IsDone != false, doneWait);
+        var now = this.Order(id);
+        string refused = error != null && !done ? $"; cancel refused ({error})" : "";
+        return $"cancelled the last buy, order {id} ({now?.Filled:#,0} of {now?.Quantity:#,0} filled, {now?.Status}), " +
+               $"{(done ? "done in" : "IBKR hadn't confirmed after")} {clock.ElapsedMilliseconds} ms{refused}";
+    }
+
     /// <summary>Whether IBKR's position in the symbol has come in since its last fill as it happened, so it counts that fill.</summary>
     public bool PositionCountsFills(string symbol)
     {
