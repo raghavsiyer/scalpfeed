@@ -17,6 +17,7 @@ internal sealed class ReverseSplitMark
 {
     private static readonly Color Ring = Color.FromArgb(255, 152, 0);
     private static readonly Color Inside = Color.FromArgb(43, 30, 10);
+    private static readonly Color Back = Color.FromArgb(240, 14, 14, 18);
     private static readonly ReverseSplitFile Splits = new(ReverseSplits.CachePath);
     private string logged;
     private bool failureLogged;
@@ -88,17 +89,32 @@ internal sealed class ReverseSplitMark
 
             if (!string.IsNullOrEmpty(ratio))
             {
-                var width = graphics.MeasureString(ratio, small, PointF.Empty, centred).Width;
-                float left = circle.Right + 3;
-                if (left + width > area.Right)
-                    left = circle.Left - 3 - width;
-                graphics.DrawString(ratio, small, text, new RectangleF(left, circle.Top, width + 1, size), centred);
+                // On a dark box of its own, so it reads over candles and volume (your request, 2026-11-24).
+                var box = new RectangleF(circle.Right + 3, circle.Top + 1.5f, graphics.MeasureString(ratio, small, PointF.Empty, centred).Width + 9, size - 3);
+                if (box.Right > area.Right)
+                    box.X = circle.Left - 3 - box.Width;
+                using var back = new SolidBrush(Back);
+                using var shape = Rounded(box, 4);
+                graphics.FillPath(back, shape);
+                graphics.DrawString(ratio, small, text, box, centred);
             }
         }
         finally
         {
             graphics.Restore(state);
         }
+    }
+
+    private static GraphicsPath Rounded(RectangleF box, float radius)
+    {
+        var path = new GraphicsPath();
+        float d = radius * 2;
+        path.AddArc(box.Left, box.Top, d, d, 180, 90);
+        path.AddArc(box.Right - d, box.Top, d, d, 270, 90);
+        path.AddArc(box.Right - d, box.Bottom - d, d, d, 0, 90);
+        path.AddArc(box.Left, box.Bottom - d, d, d, 90, 90);
+        path.CloseFigure();
+        return path;
     }
 
     /// <summary>Once per stock, into Quantower's log: where it went, to check against the chart.</summary>
