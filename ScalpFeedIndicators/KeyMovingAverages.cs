@@ -148,11 +148,14 @@ public sealed class KeyMovingAverages : Indicator
     [InputParameter("VPOC price step (0 = automatic)", 101, 0, 1000, 0.01, 4)]
     public double VpocStep = 0;
 
-    [InputParameter("VPOC colour", 102)]
-    public Color VpocColour = Color.FromArgb(255, 64, 255);
+    // Calm ones (your choice, 2026-11-25, in place of a bright magenta and teal). New names, not "VPOC colour", "VPOC
+    // width" and "VPOC value area colour": workspaces saved those with the bright ones, and keeping the names would
+    // bring them back.
+    [InputParameter("VPOC line colour", 102)]
+    public Color VpocColour = Color.FromArgb(176, 128, 158);
 
-    [InputParameter("VPOC width", 103, 1, 10, 1, 0)]
-    public int VpocWidth = 2;
+    [InputParameter("VPOC line width", 103, 1, 10, 1, 0)]
+    public int VpocWidth = 1;
 
     [InputParameter("VPOC value area", 104)]
     public bool ShowVpocValueArea = true;
@@ -160,8 +163,8 @@ public sealed class KeyMovingAverages : Indicator
     [InputParameter("VPOC value area (% of volume)", 105, 1, 100, 1, 0)]
     public int VpocValueAreaPercent = 70;
 
-    [InputParameter("VPOC value area colour", 106)]
-    public Color VpocValueAreaColour = Color.FromArgb(64, 200, 200);
+    [InputParameter("VPOC value area line colour", 106)]
+    public Color VpocValueAreaColour = Color.FromArgb(96, 104, 120);
 
     private const int MacdVOff = 0;
     private const int MacdVOneMinute = 1;

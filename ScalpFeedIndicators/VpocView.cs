@@ -97,7 +97,7 @@ internal sealed class VpocView(Indicator owner)
             var latest = points[^1];
             Draw(graphics, area, this.bars, this.look, $"VPOC {symbol.FormatPrice(latest.Poc)}", (float)converter.GetChartY(latest.Poc));
             this.LogOnce($"{symbol.Name} drawn", () => $"{symbol.Name} VPOC {latest.Poc} value area {latest.Low} to {latest.High} on {time}, by {this.source.Step}, {points.Length} points from " +
-                $"{DateTimeOffset.FromUnixTimeMilliseconds(points[0].SessionStartMs):MM-dd HH:mm} UTC, {this.bars.Count(b => !float.IsNaN(b.Poc))} of {this.bars.Count} bars on screen");
+                $"{DateTimeOffset.FromUnixTimeMilliseconds(points[0].SessionStartMs):MM-dd HH:mm} UTC, {this.bars.Count(b => !float.IsNaN(b.Poc))} of {this.bars.Count} bars on screen, in {ColorTranslator.ToHtml(this.look.Vpoc)} and {ColorTranslator.ToHtml(this.look.ValueArea)}");
         }
         catch (Exception ex)
         {
