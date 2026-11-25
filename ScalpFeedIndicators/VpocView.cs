@@ -18,7 +18,8 @@ internal readonly record struct VpocBar(float Left, float Right, long Session, f
 /// so far in the session, dotted ones at the edges of its value area, each bar showing them as they were at its end,
 /// and the price itself in a dark box at the right. The rows it's worked out from are the connection's, not the chart's,
 /// so every timeframe shows the same one; they're a minute long, so a bar shorter than that shows the last whole
-/// minute's, and only the latest bar a running one's.
+/// minute's, and only the latest bar a running one's. They're brought up to the whole market's volume with the same
+/// 1-minute bars a chart loads, which are IBKR's.
 /// </summary>
 internal sealed class VpocView(Indicator owner)
 {
@@ -96,7 +97,7 @@ internal sealed class VpocView(Indicator owner)
 
             var latest = points[^1];
             Draw(graphics, area, this.bars, this.look, $"VPOC {symbol.FormatPrice(latest.Poc)}", (float)converter.GetChartY(latest.Poc));
-            this.LogOnce($"{symbol.Name} drawn", () => $"{symbol.Name} VPOC {latest.Poc} value area {latest.Low} to {latest.High} on {time}, by {this.source.Step}, {points.Length} points from " +
+            this.LogOnce($"{symbol.Name} drawn {Math.Min(this.source.MarketReads, 2)}", () => $"{symbol.Name} VPOC {latest.Poc} value area {latest.Low} to {latest.High} on {time}, by {this.source.Step}, {this.Counted()}, {points.Length} points from " +
                 $"{DateTimeOffset.FromUnixTimeMilliseconds(points[0].SessionStartMs):MM-dd HH:mm} UTC, {this.bars.Count(b => !float.IsNaN(b.Poc))} of {this.bars.Count} bars on screen, in {ColorTranslator.ToHtml(this.look.Vpoc)} and {ColorTranslator.ToHtml(this.look.ValueArea)}");
         }
         catch (Exception ex)
@@ -195,8 +196,25 @@ internal sealed class VpocView(Indicator owner)
 
         double price = history[history.Count - 1, SeekOriginHistory.Begin][PriceType.Close];
         var asked = this.settings.Step > 0 ? this.settings : this.settings with { Step = DynamicVpoc.AutoStep(price) };
-        this.source = VpocSource.For(VolumeAtPriceShare.SymbolOf(symbol.Id), asked);
+        this.source = VpocSource.For(VolumeAtPriceShare.SymbolOf(symbol.Id), asked, (fromMs, toMs) => Minutes(symbol, fromMs, toMs));
         this.source.Changed += this.Redraw;
+    }
+
+    /// <summary>The bars a 1-minute chart loads, not live: IBKR's, over tastytrade's for the hours it hasn't got.</summary>
+    private static RangeBar[] Minutes(Symbol symbol, long fromMs, long toMs)
+    {
+        static DateTime Utc(long ms) => DateTimeOffset.FromUnixTimeMilliseconds(ms).UtcDateTime;
+        using var history = symbol.GetHistory(Period.MIN1, symbol.HistoryType, Utc(fromMs), Utc(toMs));
+        return RangeBars.Read(history, fromMs, toMs).Bars;
+    }
+
+    /// <summary>For the log: what the latest session's shares are.</summary>
+    private string Counted()
+    {
+        var (seen, counted) = this.source.Shares();
+        return this.source.MarketReads == 0
+            ? $"{seen:0} shares by price, the whole market's minutes not in"
+            : $"{seen:0} shares by price brought up to {counted:0} by the whole market's minutes to {DateTimeOffset.FromUnixTimeMilliseconds(this.source.MarketToMs):HH:mm} UTC";
     }
 
     private void Redraw()

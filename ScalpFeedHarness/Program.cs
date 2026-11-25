@@ -250,6 +250,9 @@ switch (args[0])
     case "vpoclive":
         await RunVpocLive(args[1].Split(','));
         break;
+    case "vpocmarketlive":
+        await RunVpocMarketLive(int.Parse(args[1]), args[2].Split(','));
+        break;
     case "fixedprofile":
         RunFixedProfile();
         break;
@@ -1007,6 +1010,133 @@ async Task RunVpoc()
     far.Set(t0 + Minute, Minute, 100_000_000, 1);
     Check(far.Points().Length == 0, "a price absurdly far off isn't worked out, rather than run out of memory");
 
+    // Brought up to the whole market's minutes.
+    RangeBar Bar(int minute, double low, double high, double volume) => new(t0 + (minute * Minute), low, high, low, high, volume);
+    DynamicVpoc Rows(params (int Minute, double Price, double Volume)[] rows)
+    {
+        var made = One(0.01);
+        foreach (var (minute, price, volume) in rows)
+            made.Set(t0 + (minute * Minute), Minute, (long)Math.Round(price * 200), volume);
+        return made;
+    }
+
+    double PocOf(DynamicVpoc of) => of.Points()[^1].Poc;
+    bool Counts(DynamicVpoc of, double seen, double counted) => Math.Abs(of.Shares().Seen - seen) < 1e-6 && Math.Abs(of.Shares().Counted - counted) < 1e-6;
+
+    var market = Rows((0, 1.00, 100), (1, 1.01, 150));
+    Check(PocOf(market) == 1.01 && Counts(market, 250, 250), "by the rows alone, 150 shares pass 100");
+    market.SetMarket([Bar(0, 1, 1, 300), Bar(1, 1.01, 1.01, 200)], t0 + (2 * Minute));
+    Check(PocOf(market) == 1.00 && Counts(market, 250, 500), "but not when the market traded 300 in the first minute and 200 in the second");
+    market.SetMarket([Bar(0, 1, 1, 300), Bar(1, 1.01, 1.01, 301)], t0 + (2 * Minute));
+    Check(PocOf(market) == 1.01 && market.Points()[^1].EndMs == t0 + (2 * Minute), "the market's count read again takes the old one's place");
+    market.SetMarket([Bar(0, 1, 1, 300), Bar(1, 1.01, 1.01, 301)], t0 + (2 * Minute) - 1);
+    Check(Counts(market, 250, 300 + 450), "a minute that isn't over by when it was read counts at the rate of those before it, not by its bar");
+
+    var split = Rows((0, 1.00, 100), (0, 1.02, 300));
+    split.SetMarket([Bar(0, 1, 1.02, 800)], t0 + Minute);
+    Check(PocOf(split) == 1.02 && Counts(split, 400, 800), "a minute's shares go to its prices as its rows have them");
+
+    var thin = Rows((0, 1.00, 10), (1, 1.05, 39.9));
+    thin.SetMarket([Bar(0, 1, 1.09, 1000), Bar(1, 1.05, 1.05, 39.9)], t0 + (2 * Minute));
+    Check(PocOf(thin) == 1.00 && Counts(thin, 49.9, 1039.9), "with 10 of a minute's 1,000 the rows stand for 40, and the rest are 96 at each of its ten prices: 136 at 1.00, over 1.05's 135.9");
+    thin.SetMarket([Bar(0, 1, 1.09, 1000), Bar(1, 1.05, 1.05, 40.1)], t0 + (2 * Minute));
+    Check(PocOf(thin) == 1.05, "and under its 136.1");
+
+    var alone = Rows((0, 1.00, 400), (2, 1.00, 10));
+    alone.SetMarket([Bar(0, 1, 1, 400), Bar(1, 1.02, 1.03, 1000), Bar(2, 1, 1, 10)], t0 + (3 * Minute));
+    Check(Counts(alone, 410, 1410) && alone.Points() is [{ Poc: 1.00 }, { Poc: 1.02 } second2] && second2.EndMs == t0 + (2 * Minute), "a minute with no rows goes evenly over the prices the market traded at in it");
+    var after = Rows((0, 1.00, 400));
+    after.SetMarket([Bar(0, 1, 1, 400), Bar(1, 1.02, 1.02, 1000)], t0 + (2 * Minute));
+    Check(PocOf(after) == 1.02 && Counts(after, 400, 1400), "one after the last row as well");
+    after.SetMarket([Bar(0, 1, 1, 400), Bar(1, 1.02, 1.02, 1000)], t0 + Minute);
+    Check(PocOf(after) == 1.00 && Counts(after, 400, 400), "but not before it's over");
+
+    var rate = Rows([.. Enumerable.Range(0, 12).Select(i => (i, 1.00, 100.0)), (12, 1.01, 100.0)]);
+    rate.SetMarket(Enumerable.Range(0, 12).Select(i => Bar(i, 1, 1, i < 2 ? 400 : 150)), t0 + (12 * Minute));
+    Check(Counts(rate, 1300, 800 + 1500 + 150), "a running minute counts at the rate of the last ten, whatever the ones before them were");
+    var fresh = Rows((0, 1.00, 100));
+    fresh.SetMarket([], t0);
+    Check(Counts(fresh, 100, 100), "with no minute to go by, as its rows are");
+
+    var more = Rows((0, 1.00, 500), (1, 1.01, 50));
+    more.SetMarket([Bar(0, 1, 1, 100)], t0 + (2 * Minute));
+    Check(Counts(more, 550, 150), "rows with more than the market's count come down to it, and a minute it has none for stays as it is");
+
+    var five = One(0.01);
+    five.Set(t0, 5 * Minute, 200, 100);
+    five.Set(t0, 5 * Minute, 204, 50);
+    five.SetMarket(Enumerable.Range(0, 5).Select(i => Bar(i, 1, 1.02, 60)), t0 + (5 * Minute));
+    Check(Counts(five, 150, 300) && PocOf(five) == 1.00, "rows of five minutes go by the market's five");
+
+    // Against the long way, on made-up rows and minutes.
+    var dice = new Random(11);
+    int differ = 0, compared = 0;
+    for (int round = 0; round < 60; round++)
+    {
+        var made = One(0.01);
+        var byMinute = new SortedDictionary<int, Dictionary<long, double>>();
+        var minutes = new List<RangeBar>();
+        int count = 40, known = dice.Next(20, 41);
+        for (int i = 0; i < count; i++)
+        {
+            double centre = 2 + (dice.Next(0, 40) / 100.0);
+            int low = dice.Next(0, 4), high = dice.Next(0, 4);
+            if (dice.Next(8) != 0)
+                minutes.Add(new RangeBar(t0 + (i * Minute), centre, centre + (high / 100.0), centre - (low / 100.0), centre, dice.Next(1, 4000)));
+            if (dice.Next(6) == 0)
+                continue;
+
+            var levels = byMinute[i] = new();
+            for (int n = dice.Next(1, 6); n > 0; n--)
+                levels[(long)Math.Round((centre - (low / 100.0)) * 200) + dice.Next(0, ((low + high) * 2) + 1)] = dice.Next(1, 900);
+            foreach (var (level, volume) in levels)
+                made.Set(t0 + (i * Minute), Minute, level, volume);
+        }
+
+        long toMs = t0 + (known * Minute);
+        made.SetMarket(minutes, toMs);
+        var drawn = made.Points();
+        var at = new SortedDictionary<long, double>();
+        var past = new List<(double Whole, double Seen)>();
+        long poc = long.MinValue;
+        for (int i = 0; i < count; i++)
+        {
+            byMinute.TryGetValue(i, out var levels);
+            var bar = minutes.Where(m => m.TimeMs == t0 + (i * Minute) && i < known).Select(m => (RangeBar?)m).FirstOrDefault();
+            if (levels == null && bar == null)
+                continue;
+
+            double seen = levels?.Values.Sum() ?? 0, whole = bar?.Volume ?? 0;
+            double times = whole > 0 ? seen > 0 ? Math.Min(4, whole / seen) : 0 : i < known || past.Count == 0 ? 1 : Math.Min(4, past.TakeLast(10).Sum(x => x.Whole) / past.TakeLast(10).Sum(x => x.Seen));
+            foreach (var (level, volume) in levels ?? [])
+            {
+                long cent = (long)Math.Floor((level + 1) / 2.0);
+                at[cent] = at.GetValueOrDefault(cent) + (volume * times);
+            }
+
+            if (bar is RangeBar b)
+            {
+                long bottom = (long)Math.Round(b.Low * 100), top = (long)Math.Round(b.High * 100);
+                for (long cent = bottom; cent <= top; cent++)
+                    at[cent] = at.GetValueOrDefault(cent) + (Math.Max(0, whole - (seen * times)) / (top - bottom + 1));
+                if (seen > 0)
+                    past.Add((whole, seen));
+            }
+
+            double best = at.Values.Max();
+            if (poc == long.MinValue || at[poc] < best - 1e-6)
+                poc = at.First(a => a.Value > best - 1e-6).Key;
+            compared++;
+            if (!(DynamicVpoc.At(drawn, t0 + ((i + 1) * Minute), false) is { } shown && Math.Abs(shown.Poc - (poc / 100.0)) < 1e-9))
+                differ++;
+        }
+
+        if (Math.Abs(made.Shares().Counted - at.Values.Sum()) > 1e-3)
+            differ++;
+    }
+
+    Check(compared > 1_500 && differ == 0, $"the long way agrees at the end of each of {compared:#,0} made-up minutes ({differ} not)");
+
     // A made-up stock's whole day of trades, as a stand-in server splits it by price.
     var rng = new Random(5);
     var tape = new List<(long Time, double Price, double Size)>();
@@ -1164,6 +1294,30 @@ async Task RunVpoc()
         source.Close();
         VpocSource.For("TEST", settings with { ValueAreaShare = 0.6 }).Close();
         VpocSource.For("TEST", settings with { ValueAreaShare = 0.6 }).Close();
+
+        // With the whole market's minutes: waited for, then counted; done without when they don't come.
+        int reads = 0;
+        var answer = new TaskCompletionSource<RangeBar[]>();
+        var whole = VpocSource.For("TEST", settings with { ValueAreaShare = 0.5 }, (from, to) =>
+        {
+            Interlocked.Increment(ref reads);
+            return from == today ? answer.Task.Result : [];
+        });
+        await Task.Delay(2_500);
+        Check(whole.Points.Length == 0 && whole.Arrived && reads == 1, "the line waits for the market's minutes, asked for once");
+        answer.SetResult([.. Enumerable.Range(0, 500).Select(i => new RangeBar(today + (i * Minute), 3, 3, 3, 3, 1_000_000))]);
+        await Until(() => whole.Points.Length > 0, 3_000);
+        var counted = whole.Shares();
+        int over = (int)Math.Clamp((whole.MarketToMs - today) / Minute, 0, 500);
+        Check(whole.Points.Length > 0 && whole.MarketReads == 1 && whole.MarketToMs % Minute == 0 && (over == 0 || Math.Abs(counted.Counted - (over * 1_000_000.0)) < counted.Counted * 0.5),
+            $"and counts them when they come ({counted.Seen:#,0} shares by price to {counted.Counted:#,0} by {over} minutes)");
+        whole.Close();
+
+        var clock = Stopwatch.StartNew();
+        var without = VpocSource.For("TEST", settings with { ValueAreaShare = 0.4 }, (_, _) => throw new InvalidOperationException("none to be had"));
+        await Until(() => without.Points.Length > 0, 12_000);
+        Check(without.Points.Length > 0 && without.MarketReads == 0 && clock.ElapsedMilliseconds is > 6_000 and < 11_000, $"without them it's drawn from the rows alone, after {clock.ElapsedMilliseconds / 1000.0:0.0} s");
+        without.Close();
         VolumeAtPriceShare.Offered = null;
         await feed.StopAsync(owner);
     }
@@ -1204,6 +1358,63 @@ async Task RunVpocLive(string[] symbols)
 
     await feed.StopAsync(owner);
     await history.StopAsync();
+}
+
+// The VPOC as a chart gets it, brought up to the whole market's minutes as IBKR has them, through the second reading of
+// them, against the same without. Read-only.
+async Task RunVpocMarketLive(int port, string[] symbols)
+{
+    var ibkr = new IbkrClient(new IbkrConfig(true, "127.0.0.1", port, 88, IbkrConfig.Load().AllowLiveAccount));
+    ibkr.SetSink(new IbkrTestSink());
+    ibkr.Start();
+    await Until(() => ibkr.State == IbkrState.Live, 15_000);
+    Check(ibkr.State == IbkrState.Live, "live on the real Gateway");
+
+    using var client = api();
+    var history = new HistoryClient(async (force, ct) => await client.GetQuoteTokenAsync(ct));
+    var feed = new VolumeAtPriceFeed();
+    var owner = new object();
+    feed.Start(owner, async (force, ct) => await client.GetQuoteTokenAsync(ct), id => id);
+    VolumeAtPriceShare.Offered = feed.Subscribe;
+
+    // As the plugin loads a 1-minute chart.
+    RangeBar[] Minutes(string symbol, long fromMs, long toMs)
+    {
+        var from = DateTimeOffset.FromUnixTimeMilliseconds(fromMs).UtcDateTime;
+        var to = DateTimeOffset.FromUnixTimeMilliseconds(toMs).UtcDateTime;
+        var candles = history.LoadAsync(symbol + "{=1m}", from, to, CancellationToken.None).Result;
+        var bars = ibkr.LoadBarsAsync(symbol, "1 min", IbkrBars.Duration((long)(to - from).TotalSeconds), "", CancellationToken.None).Result;
+        return [.. IbkrBars.Overlay(candles, bars.Where(b => b.TimeMs >= fromMs)).Select(b => new RangeBar(b.TimeMs, b.Open, b.High, b.Low, b.Close, b.Volume))];
+    }
+
+    foreach (var symbol in symbols)
+    {
+        long today = EtSessions.DayStart(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), 0);
+        var plain = await history.LoadAsync(symbol + "{=1m}", DateTimeOffset.FromUnixTimeMilliseconds(today).UtcDateTime, DateTime.UtcNow, CancellationToken.None);
+        var settings = new VpocSettings(DynamicVpoc.AutoStep(plain[^1].Close), 0.7, [new TimeSpan(4, 0, 0)], 3);
+        var without = VpocSource.For(symbol, settings with { ValueAreaShare = 0.7000001 });
+        var whole = VpocSource.For(symbol, settings, (from, to) => Minutes(symbol, from, to));
+        await Until(() => whole.MarketReads == 2 && without.Points.Length > 0, 90_000);
+        var bars = Minutes(symbol, today, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+        await Task.Delay(1_500);
+        var (seen, counted) = whole.Shares();
+        double market = bars.Where(b => b.TimeMs + 60_000 <= whole.MarketToMs).Sum(b => b.Volume);
+        Console.WriteLine($"{symbol} by {settings.Step}: {seen:#,0} shares by price brought up to {counted:#,0}; IBKR's minutes to {DateTimeOffset.FromUnixTimeMilliseconds(whole.MarketToMs):HH:mm} UTC are {market:#,0}");
+        Check(whole.MarketReads == 2 && counted >= market * 0.999 && counted <= market * 1.25, $"{symbol}: read again after a minute, and every share of the market's minutes counted, with the running one");
+        foreach (var (name, source) in new[] { ("rows alone", without), ("whole market", whole) })
+        {
+            foreach (var p in source.Points.GroupBy(p => p.SessionStartMs).Select(g => g.Last()))
+                Console.WriteLine($"   {name,12}, day from {DateTimeOffset.FromUnixTimeMilliseconds(p.SessionStartMs):MM-dd HH:mm} UTC: VPOC {p.Poc}, value area {p.Low} to {p.High}");
+        }
+
+        whole.Close();
+        without.Close();
+    }
+
+    VolumeAtPriceShare.Offered = null;
+    await feed.StopAsync(owner);
+    await history.StopAsync();
+    await ibkr.StopAsync();
 }
 
 // Fixed range volume profiles: the arithmetic against what TradingView publishes about FRVP, and the ranges kept.

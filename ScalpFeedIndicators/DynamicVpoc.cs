@@ -63,17 +63,30 @@ public sealed class EtSessions
 /// value area, the prices around it that hold 70% of the shares. From the shares traded at each price in each period
 /// (VolumeAtPriceFeed); a half step counts toward the nearest step, so a print at 1.2497 counts at 1.25. The value
 /// area grows from the point of control by whichever two prices next above or below have more shares, the usual way.
-/// This depends on nothing in Quantower, so the harness can test it.
+/// Those rows are only tastytrade's part of the market, and not the same part from minute to minute, so each minute's
+/// are brought up to what the whole market traded in it (SetMarket; your request, 2026-11-25). This depends on nothing
+/// in Quantower, so the harness can test it.
 /// </summary>
 public sealed class DynamicVpoc
 {
     // A print so far off that a row per step would be this many is a bad one, and its session isn't worked out.
     private const long MostRows = 200_000;
 
+    // What a share in the rows can stand for. Where they have less than a quarter of a minute's shares, they're too few
+    // to say where the rest traded, which go evenly over the prices the minute traded at.
+    private const double MostTimes = 4;
+
+    // How many minutes back says what a minute's rows stand for while the market's count of it isn't in.
+    private const int RecentMinutes = 10;
+
+    private const long MinuteMs = 60_000;
+
     private readonly double step;
     private readonly double share;
     private readonly EtSessions sessions;
     private readonly SortedDictionary<long, Session> bySession = new();
+    private RangeBar[] market = [];
+    private long marketToMs = long.MinValue;
 
     /// <param name="step">The price step.</param>
     /// <param name="valueAreaShare">How much of the volume the value area holds, 0.7 for 70%.</param>
@@ -91,6 +104,31 @@ public sealed class DynamicVpoc
         public long EndMs;
         public readonly SortedDictionary<(long TimeMs, long LengthMs), Dictionary<long, double>> Periods = new();
         public VpocPoint[] Points;
+        public double Seen;
+        public double Counted;
+    }
+
+    /// <summary>The shares so far at each price, from the lowest up, and where the point of control is.</summary>
+    private sealed class Profile(long first, long last)
+    {
+        public readonly double[] Rows = new double[last - first + 1];
+
+        /// <summary>The rows traded at since the point of control was last looked at.</summary>
+        public readonly List<int> Traded = new();
+        public double Total;
+        public int Poc = -1;
+        public int Lowest = int.MaxValue;
+        public int Highest = -1;
+
+        public void Add(long at, double volume)
+        {
+            int row = (int)(at - first);
+            this.Rows[row] += volume;
+            this.Total += volume;
+            this.Lowest = Math.Min(this.Lowest, row);
+            this.Highest = Math.Max(this.Highest, row);
+            this.Traded.Add(row);
+        }
     }
 
     /// <summary>The rows are complete from here, so a session that began before isn't drawn.</summary>
@@ -124,6 +162,26 @@ public sealed class DynamicVpoc
             session.Periods[(timeMs, lengthMs)] = levels = new Dictionary<long, double>();
         levels[level] = volume;
         session.Points = null;
+    }
+
+    /// <summary>
+    /// What the whole market traded in each minute, in time order and in place of what was there, all in up to a time.
+    /// The minutes after it, and any the market's count has nothing for, aren't known.
+    /// </summary>
+    public void SetMarket(IEnumerable<RangeBar> minutes, long wholeToMs)
+    {
+        this.market = minutes.Where(m => m.Volume > 0 && m.Low > 0 && m.High >= m.Low && m.TimeMs + MinuteMs <= wholeToMs).ToArray();
+        this.marketToMs = wholeToMs;
+        foreach (var session in this.bySession.Values)
+            session.Points = null;
+    }
+
+    /// <summary>The latest session's shares in the rows, and what they've been brought up to.</summary>
+    public (double Seen, double Counted) Shares()
+    {
+        this.Points();
+        var latest = this.bySession.Count > 0 ? this.bySession.Values.Last() : null;
+        return latest == null ? (0, 0) : (latest.Seen, latest.Counted);
     }
 
     /// <summary>In time order; a point each time the point of control or the value area moves.</summary>
@@ -171,62 +229,143 @@ public sealed class DynamicVpoc
 
     private VpocPoint[] Build(Session session)
     {
-        static long Row(long level) => (level + 1) >> 1;
-
+        session.Seen = session.Counted = 0;
+        int from = this.MarketFrom(session.StartMs), to = this.MarketFrom(session.EndMs);
         long first = long.MaxValue, last = long.MinValue;
+        void Reach(long row)
+        {
+            first = Math.Min(first, row);
+            last = Math.Max(last, row);
+        }
+
         foreach (var levels in session.Periods.Values)
         {
             foreach (var (level, volume) in levels)
             {
                 if (volume > 0)
-                {
-                    first = Math.Min(first, Row(level));
-                    last = Math.Max(last, Row(level));
-                }
+                    Reach(Row(level));
             }
+        }
+
+        for (int i = from; i < to; i++)
+        {
+            Reach(this.RowOf(this.market[i].Low));
+            Reach(this.RowOf(this.market[i].High));
         }
 
         if (first > last || last - first >= MostRows)
             return [];
 
-        var rows = new double[last - first + 1];
-        double total = 0;
-        int poc = -1, lowest = rows.Length, highest = -1;
+        var profile = new Profile(first, last);
         var points = new List<VpocPoint>();
-        foreach (var ((timeMs, lengthMs), levels) in session.Periods)
+        var recent = new Queue<(double Whole, double Seen)>();
+        double recentWhole = 0, recentSeen = 0;
+
+        void Spread(RangeBar minute, double volume)
         {
-            foreach (var (level, volume) in levels)
-            {
-                if (!(volume > 0))
-                    continue;
+            long low = this.RowOf(minute.Low), high = this.RowOf(minute.High);
+            for (long row = low; row <= high; row++)
+                profile.Add(row, volume / (high - low + 1));
+        }
 
-                int row = (int)(Row(level) - first);
-                rows[row] += volume;
-                total += volume;
-                lowest = Math.Min(lowest, row);
-                highest = Math.Max(highest, row);
-            }
-
-            if (total <= 0)
-                continue;
+        void Mark(long endMs)
+        {
+            if (profile.Total <= 0)
+                return;
 
             // Only a price that traded this period can pass the point of control; an equal one leaves it be.
-            int best = poc;
-            foreach (var (level, volume) in levels)
+            var rows = profile.Rows;
+            int best = profile.Poc;
+            foreach (int row in profile.Traded)
             {
-                int row = (int)(Row(level) - first);
-                if (volume > 0 && (best < 0 || rows[row] > rows[best] || (best != poc && rows[row] == rows[best] && row < best)))
+                if (best < 0 || rows[row] > rows[best] || (best != profile.Poc && rows[row] == rows[best] && row < best))
                     best = row;
             }
 
-            poc = best;
-            var (up, down) = this.ValueArea(rows, poc, lowest, highest, total);
-            var point = new VpocPoint(timeMs + lengthMs, session.StartMs, session.EndMs, this.Price(first + poc), this.Price(first + up), this.Price(first + down));
+            profile.Traded.Clear();
+            profile.Poc = best;
+            var (up, down) = this.ValueArea(rows, best, profile.Lowest, profile.Highest, profile.Total);
+            var point = new VpocPoint(endMs, session.StartMs, session.EndMs, this.Price(first + best), this.Price(first + up), this.Price(first + down));
             if (points.Count == 0 || points[^1] with { EndMs = point.EndMs } != point)
                 points.Add(point);
         }
 
+        // A minute the market traded in and no row is of.
+        void Alone(RangeBar minute)
+        {
+            Spread(minute, minute.Volume);
+            Mark(minute.TimeMs + MinuteMs);
+        }
+
+        int next = from;
+        foreach (var ((timeMs, lengthMs), levels) in session.Periods)
+        {
+            for (; next < to && this.market[next].TimeMs < timeMs; next++)
+                Alone(this.market[next]);
+
+            int begin = next;
+            double whole = 0, seen = 0;
+            for (; next < to && this.market[next].TimeMs < timeMs + lengthMs; next++)
+                whole += this.market[next].Volume;
+            foreach (double volume in levels.Values)
+                seen += Math.Max(0, volume);
+            session.Seen += seen;
+
+            bool over = timeMs + lengthMs <= this.marketToMs;
+            bool known = over && whole > 0;
+            double times = known ? (seen > 0 ? whole / seen : 0) : over || recentSeen <= 0 ? 1 : recentWhole / recentSeen;
+            times = Math.Min(times, MostTimes);
+            foreach (var (level, volume) in levels)
+            {
+                if (volume > 0)
+                    profile.Add(Row(level), volume * times);
+            }
+
+            if (known)
+            {
+                double rest = whole - (seen * times);
+                for (int i = begin; i < next && rest > whole * 1e-9; i++)
+                    Spread(this.market[i], rest * this.market[i].Volume / whole);
+
+                recent.Enqueue((whole, seen));
+                recentWhole += whole;
+                recentSeen += seen;
+                if (recent.Count > RecentMinutes)
+                {
+                    var old = recent.Dequeue();
+                    recentWhole -= old.Whole;
+                    recentSeen -= old.Seen;
+                }
+            }
+
+            Mark(timeMs + lengthMs);
+        }
+
+        for (; next < to; next++)
+            Alone(this.market[next]);
+
+        session.Counted = profile.Total;
         return [.. points];
+    }
+
+    private static long Row(long level) => (level + 1) >> 1;
+
+    private long RowOf(double price) => Row((long)Math.Floor((price / this.step * 2) + 1e-6));
+
+    /// <summary>The first of the market's minutes at or after a time.</summary>
+    private int MarketFrom(long timeMs)
+    {
+        int low = 0, high = this.market.Length;
+        while (low < high)
+        {
+            int middle = (low + high) / 2;
+            if (this.market[middle].TimeMs < timeMs)
+                low = middle + 1;
+            else
+                high = middle;
+        }
+
+        return low;
     }
 
     private (int Up, int Down) ValueArea(double[] rows, int poc, int lowest, int highest, double total)
