@@ -55,6 +55,7 @@ internal sealed class VpocSource
     public double Step => this.settings.Step;
 
     /// <summary>The one for this stock and these settings, for a chart that's to close it when it's done.</summary>
+    /// <param name="symbolId">The connection's name for it (VolumeAtPriceShare.SymbolOf).</param>
     public static VpocSource For(string symbolId, VpocSettings settings)
     {
         string key = symbolId + "|" + settings.Key;

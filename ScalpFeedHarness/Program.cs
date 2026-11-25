@@ -1114,6 +1114,24 @@ async Task RunVpoc()
         await feed.StopAsync(owner);
     }
 
+    using (var server = new StandInCandles(100_000, tape) { Silent = true })
+    {
+        var feed = new VolumeAtPriceFeed(quietLimit: TimeSpan.FromMilliseconds(500));
+        var owner = new object();
+        feed.Start(owner, server.Token, id => id);
+        var got = new VpocRows();
+        using var stop = feed.Subscribe("TEST", 0.01, open, got.Take);
+        await Task.Delay(6_500);
+        int asked = server.Asked.Count;
+        Check(asked is >= 2 and <= 5, $"a stock the server doesn't answer for is asked for again, less and less often ({asked} times in 6.5 s)");
+        server.Silent = false;
+        await Until(() => got.CoveredFromMs == open, 10_000);
+        Check(got.CoveredFromMs == open, "and comes when it does answer");
+        await feed.StopAsync(owner);
+    }
+
+    Check(VolumeAtPriceShare.SymbolOf("WHLR | tasty") == "WHLR" && VolumeAtPriceShare.SymbolOf("BRK/B | tasty") == "BRK/B" && VolumeAtPriceShare.SymbolOf("WHLR") == "WHLR",
+        "a chart's symbol is asked for by the connection's name for it, without where it came from");
     Check(VolumeAtPriceFeed.CandleSymbol("F", 0.00005, 1) == "F{=5m,pl=0.00005}" && VolumeAtPriceFeed.CandleSymbol("F", 0.25, 0) == "F{=m,pl=0.25}", "the rows are asked for in plain decimals");
     Check(VolumeAtPriceFeed.WholeFrom(t0 + (3 * Minute), Minute, 5 * Minute) == t0 + (5 * Minute) && VolumeAtPriceFeed.WholeFrom(t0 + (4 * Minute), Minute, 5 * Minute) == t0 + (5 * Minute),
         "past the oldest minute, which may be cut short, the finer rows take over at a coarser one's start");
@@ -5285,6 +5303,9 @@ internal sealed class StandInCandles : IDisposable
         _ = Task.Run(this.AcceptAsync);
     }
 
+    /// <summary>Answers no subscription.</summary>
+    public volatile bool Silent;
+
     public ConcurrentQueue<string> Asked { get; } = new();
 
     public ConcurrentQueue<string> Dropped { get; } = new();
@@ -5463,6 +5484,9 @@ internal sealed class StandInCandles : IDisposable
                                 this.Asked.Enqueue(candle);
                                 lock (this.gate)
                                     this.sockets.GetValueOrDefault(socket)?.Add(candle);
+                                if (this.Silent)
+                                    continue;
+
                                 var rows = this.Rows(candle, item.GetProperty("fromTime").GetInt64()).Take(this.limit).ToList();
                                 var marker = (Time: rows.Count > 0 ? rows[^1].Time - 1 : 0, Bucket: 0L, Low: double.NaN, Volume: double.NaN);
                                 var all = rows.Select((r, i) => (i == 0 ? EventFlags.SnapshotBegin : 0, r)).Append((EventFlags.SnapshotSnip | EventFlags.Remove | (rows.Count == 0 ? EventFlags.SnapshotBegin : 0), marker)).ToList();

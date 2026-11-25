@@ -27,6 +27,10 @@ internal sealed class DxLinkLink
     private static readonly double[] BackoffSeconds = [0.25, 0.5, 1, 2, 4, 8, 15, 30];
 
     private readonly string name;
+
+    // What a slow frame is called in the stall diagnostics: a history or volume-at-price snapshot's, on a socket of its
+    // own, isn't the live feed's.
+    private readonly string frameWork;
     private readonly Func<bool, CancellationToken, Task<QuoteToken>> tokenSource;
     private readonly IReadOnlyDictionary<string, string[]> fields;
     private readonly IFeedSink sink;
@@ -59,6 +63,7 @@ internal sealed class DxLinkLink
         double aggregationSeconds = 0)
     {
         this.name = name;
+        this.frameWork = name == "live" ? "tasty frame" : name + " frame";
         this.tokenSource = tokenSource;
         this.fields = fields;
         this.sink = sink;
@@ -347,7 +352,7 @@ internal sealed class DxLinkLink
                     long micros = (Stopwatch.GetTimestamp() - stamp) * 1_000_000 / Stopwatch.Frequency;
                     if (micros > Volatile.Read(ref this.maxHandleMicros))
                         Volatile.Write(ref this.maxHandleMicros, micros);
-                    StallWatch.Note("tasty frame", stamp);
+                    StallWatch.Note(this.frameWork, stamp);
                     Interlocked.Increment(ref this.frameCount);
                     continue;
                 }

@@ -1,6 +1,7 @@
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Runtime.InteropServices;
+using ScalpFeedVendor.Feed;
 using TradingPlatform.BusinessLayer;
 using TradingPlatform.BusinessLayer.Chart;
 
@@ -194,7 +195,7 @@ internal sealed class VpocView(Indicator owner)
 
         double price = history[history.Count - 1, SeekOriginHistory.Begin][PriceType.Close];
         var asked = this.settings.Step > 0 ? this.settings : this.settings with { Step = DynamicVpoc.AutoStep(price) };
-        this.source = VpocSource.For(symbol.Id, asked);
+        this.source = VpocSource.For(VolumeAtPriceShare.SymbolOf(symbol.Id), asked);
         this.source.Changed += this.Redraw;
     }
 

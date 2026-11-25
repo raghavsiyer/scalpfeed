@@ -63,6 +63,9 @@ internal sealed class VolumeAtPriceFeed : IFeedSink
         public bool Begun;
         public DateTime LastRowUtc;
 
+        /// <summary>How many times it's been asked for again without an answer.</summary>
+        public int Unanswered;
+
         /// <summary>The rows are complete from here; none are handed out while it's long.MaxValue.</summary>
         public long CoveredFromMs;
 
@@ -321,6 +324,7 @@ internal sealed class VolumeAtPriceFeed : IFeedSink
 
         watch.Changed.Clear();
         watch.Begun = false;
+        watch.Unanswered = 0;
         watch.Loading = cut && !coarsest ? tier + 1 : Tiers.Length;
         Log.Info($"[volume at price] {watch.Streamer} {Tiers[tier].Code} by {watch.LevelSize * 2:0.######}: {rows.Count} rows, {(cut ? "cut short, " : "")}whole from {DateTimeOffset.FromUnixTimeMilliseconds(watch.CoveredFromMs):MM-dd HH:mm} UTC");
         foreach (var listener in watch.Listeners.ToList())
@@ -421,9 +425,12 @@ internal sealed class VolumeAtPriceFeed : IFeedSink
                     continue;
                 }
 
-                if (watch.Loading < Tiers.Length && this.link?.State == LinkState.Ready && now - watch.LastRowUtc > this.quietLimit)
+                // Twice as long each time, to 16 times, as one the server never answers for isn't worth asking often.
+                var quiet = this.quietLimit * (1 << Math.Min(watch.Unanswered, 4));
+                if (watch.Loading < Tiers.Length && this.link?.State == LinkState.Ready && now - watch.LastRowUtc > quiet)
                 {
-                    Log.Info($"[volume at price] {watch.Streamer} {Tiers[watch.Loading].Code}: no rows for {this.quietLimit.TotalSeconds:0} s, asking again");
+                    Log.Info($"[volume at price] {watch.Streamer} {Tiers[watch.Loading].Code}: no rows for {quiet.TotalSeconds:0} s, asking again");
+                    watch.Unanswered++;
                     this.Load(watch);
                     continue;
                 }
