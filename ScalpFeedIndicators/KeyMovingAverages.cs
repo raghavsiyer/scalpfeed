@@ -12,7 +12,8 @@ namespace ScalpFeedIndicators;
 /// in its line at each restart (SessionVwap says why Quantower's own wasn't used). It can also draw the rolling
 /// candle (RollingCandleView), on by default, so a Free licence's two indicators a chart can still have it, and for
 /// the same reason the reverse split and offerings on daily charts (DailyMarks), also on by default, and MACD-V's
-/// crossovers on the candles (MacdVMarks), on 1-minute charts by default, and a dynamic VPOC on intraday ones (VpocView).
+/// crossovers on the candles (MacdVMarks), on 1-minute charts by default, a dynamic VPOC on intraday ones
+/// (VpocView), and fixed range volume profiles (FixedRangeView).
 /// </summary>
 public sealed class KeyMovingAverages : Indicator
 {
@@ -166,6 +167,68 @@ public sealed class KeyMovingAverages : Indicator
     [InputParameter("VPOC value area line colour", 106)]
     public Color VpocValueAreaColour = Color.FromArgb(96, 104, 120);
 
+    // FRVP's settings, as TradingView names them, with its defaults and the colours of its help pages' screenshots.
+    [InputParameter("FRVP: fixed range volume profiles", 110)]
+    public bool ShowFixedRanges = true;
+
+    [InputParameter("FRVP rows layout", 111, variants: new object[]
+    {
+        "Number of rows", FixedRangeNumberOfRows,
+        "Ticks per row", FixedRangeTicksPerRow,
+    })]
+    public int FixedRangeLayout = FixedRangeNumberOfRows;
+
+    [InputParameter("FRVP row size", 112, 1, 1_000_000, 1, 0)]
+    public int FixedRangeRowSize = 24;
+
+    [InputParameter("FRVP value area volume (%)", 113, 0, 100, 1, 0)]
+    public int FixedRangeValueArea = 70;
+
+    [InputParameter("FRVP width (% of the box)", 114, 1, 100, 1, 0)]
+    public int FixedRangeWidth = 30;
+
+    [InputParameter("FRVP placement", 115, variants: new object[]
+    {
+        "Left", FixedRangeOnLeft,
+        "Right", FixedRangeOnRight,
+    })]
+    public int FixedRangePlacement = FixedRangeOnLeft;
+
+    [InputParameter("FRVP up volume", 116)]
+    public Color FixedRangeUp = Color.FromArgb(107, 0, 188, 212);
+
+    [InputParameter("FRVP down volume", 117)]
+    public Color FixedRangeDown = Color.FromArgb(107, 233, 30, 99);
+
+    [InputParameter("FRVP value area up", 118)]
+    public Color FixedRangeValueUp = Color.FromArgb(161, 0, 188, 212);
+
+    [InputParameter("FRVP value area down", 119)]
+    public Color FixedRangeValueDown = Color.FromArgb(161, 233, 30, 99);
+
+    [InputParameter("FRVP POC", 120)]
+    public bool FixedRangeShowPoc = true;
+
+    [InputParameter("FRVP POC colour", 121)]
+    public Color FixedRangePoc = Color.FromArgb(242, 242, 242);
+
+    [InputParameter("FRVP VAH", 122)]
+    public bool FixedRangeShowVah = false;
+
+    [InputParameter("FRVP VAL", 123)]
+    public bool FixedRangeShowVal = false;
+
+    [InputParameter("FRVP VAH and VAL colour", 124)]
+    public Color FixedRangeValueLines = Color.FromArgb(128, 128, 128);
+
+    [InputParameter("FRVP histogram box", 125)]
+    public Color FixedRangeBox = Color.FromArgb(10, 0, 188, 212);
+
+    private const int FixedRangeNumberOfRows = 0;
+    private const int FixedRangeTicksPerRow = 1;
+    private const int FixedRangeOnLeft = 0;
+    private const int FixedRangeOnRight = 1;
+
     private const int MacdVOff = 0;
     private const int MacdVOneMinute = 1;
     private const int MacdVEveryChart = 2;
@@ -174,6 +237,7 @@ public sealed class KeyMovingAverages : Indicator
     private readonly DailyMarks dailyMarks = new();
     private readonly MacdVMarks macdV = new();
     private VpocView vpoc;
+    private FixedRangeView fixedRanges;
     private Indicator macdVBuiltIn;
     private bool showMacdV;
 
@@ -193,7 +257,7 @@ public sealed class KeyMovingAverages : Indicator
     public KeyMovingAverages()
     {
         this.Name = "Key Moving Averages";
-        this.Description = "EMA 9, 20 and 200, simple MA 50 and 200, and a session VWAP, each on or off, with its own colour, width and style; a live rolling candle of the last N seconds; the last reverse split and offerings filed, marked on daily charts; MACD-V's crossovers, marked on the candles; and a dynamic VPOC with its value area on intraday charts";
+        this.Description = "EMA 9, 20 and 200, simple MA 50 and 200, and a session VWAP, each on or off, with its own colour, width and style; a live rolling candle of the last N seconds; the last reverse split and offerings filed, marked on daily charts; MACD-V's crossovers, marked on the candles; a dynamic VPOC with its value area on intraday charts; and fixed range volume profiles you place";
 
         this.AddLineSeries("EMA 9", Color.Gold, 1, LineStyle.Solid);
         this.AddLineSeries("EMA 20", Color.DeepSkyBlue, 1, LineStyle.Solid);
@@ -314,6 +378,27 @@ public sealed class KeyMovingAverages : Indicator
             shown.Add("VPOC");
         }
 
+        if (this.ShowFixedRanges)
+        {
+            this.fixedRanges ??= new FixedRangeView(this);
+            this.fixedRanges.Start(new FixedRangeLook(
+                this.FixedRangeRowSize,
+                this.FixedRangeLayout == FixedRangeTicksPerRow,
+                this.FixedRangeValueArea / 100.0,
+                this.FixedRangeWidth,
+                this.FixedRangePlacement == FixedRangeOnRight,
+                this.FixedRangeUp,
+                this.FixedRangeDown,
+                this.FixedRangeValueUp,
+                this.FixedRangeValueDown,
+                this.FixedRangeShowPoc,
+                this.FixedRangePoc,
+                this.FixedRangeShowVah,
+                this.FixedRangeShowVal,
+                this.FixedRangeValueLines,
+                this.FixedRangeBox));
+        }
+
         this.shortName = shown.Count > 0 ? $"MAs ({string.Join(", ", shown)})" : "MAs (none)";
         this.Trace("init done", this.LineColours());
         this.seenColours = this.LinesSeries.Select(l => l.Color).ToArray();
@@ -324,6 +409,8 @@ public sealed class KeyMovingAverages : Indicator
         base.OnPaintChart(args);
         if (this.ShowReverseSplit || this.ShowOfferings)
             this.dailyMarks.Paint(args, this.CurrentChart, this.HistoricalData, this.Symbol?.Name, this.ShowReverseSplit, this.ShowOfferings);
+        if (this.ShowFixedRanges)
+            this.fixedRanges?.Paint(args);
         if (this.ShowVpoc)
             this.vpoc?.Paint(args);
         if (this.showMacdV)
@@ -451,6 +538,7 @@ public sealed class KeyMovingAverages : Indicator
 
         this.macdV.Stop();
         this.vpoc?.Stop();
+        this.fixedRanges?.Stop();
         this.vwap?.Clear();
         this.vwap = null;
         this.vwapStartsLogged.Clear();

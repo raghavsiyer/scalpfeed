@@ -250,6 +250,9 @@ switch (args[0])
     case "vpoclive":
         await RunVpocLive(args[1].Split(','));
         break;
+    case "fixedprofile":
+        RunFixedProfile();
+        break;
     case "macdv":
         RunMacdV();
         break;
@@ -1201,6 +1204,115 @@ async Task RunVpocLive(string[] symbols)
 
     await feed.StopAsync(owner);
     await history.StopAsync();
+}
+
+// Fixed range volume profiles: the arithmetic against what TradingView publishes about FRVP, and the ranges kept.
+void RunFixedProfile()
+{
+    const long Minute = 60_000;
+    long t0 = new DateTimeOffset(2026, 11, 25, 9, 0, 0, TimeSpan.Zero).ToUnixTimeMilliseconds();
+
+    // Its own examples: 100 ticks for 25 rows is 4 a row; for 30 it's 3, whose 34 rows are nearer 30 than 4's 25.
+    Check(FixedProfile.TicksEach(100, 25) == 4 && FixedProfile.TicksEach(100, 30) == 3, "100 ticks are 4 a row for 25 rows and 3 for 30");
+    Check(FixedProfile.TicksEach(20, 24) == 1 && FixedProfile.TicksEach(48, 24) == 2 && FixedProfile.TicksEach(1, 24) == 1, "never less than a tick a row");
+    var thirty = FixedProfile.Of([new(t0, 10, 11, 10, 11, 1000)], 0.01, 30, false, 0.7, false);
+    Check(thirty.Rows == 34 && thirty.TicksPerRow == 3 && Math.Abs(thirty.Top(33) - thirty.Bottom(33) - 0.01) < 1e-9 && Math.Abs(thirty.Top(32) - thirty.Bottom(32) - 0.03) < 1e-9,
+        "10 to 11 in 30 rows is 34: 33 of 3 ticks and the last of 1");
+    var each = FixedProfile.Of([new(t0, 200, 300, 200, 300, 1000)], 0.01, 25, true, 0.7, false);
+    Check(each.Rows == 400 && each.TicksPerRow == 25, "200 to 300 at 25 ticks per row is 400 rows");
+
+    // A bar over several rows: each takes the part of its volume that it covers of its price range.
+    var one = FixedProfile.Of([new(t0, 10.00, 10.10, 10.00, 10.05, 1000), new(t0, 10.02, 10.04, 10.02, 10.02, 300), new(t0, 10.03, 10.03, 10.03, 10.02, 50)], 0.01, 5, false, 0.7, false);
+    Check(one.Rows == 5 && one.TicksPerRow == 2 && Enumerable.Range(0, 5).All(i => Math.Abs(one.Up[i] - (i == 1 ? 500 : 200)) < 1e-6) && Math.Abs(one.Down[1] - 50) < 1e-6,
+        "a bar's volume is spread over its rows by price; one at a single price goes to its row");
+    var partly = FixedProfile.Of([new(t0, 10, 10.10, 10, 10.10, 1), new(t0, 10.01, 10.05, 10.01, 10.02, 400)], 0.01, 5, false, 0.7, false);
+    Check(Math.Abs(partly.Up[0] - 100.2) < 1e-6 && Math.Abs(partly.Up[1] - 200.2) < 1e-6 && Math.Abs(partly.Up[2] - 100.2) < 1e-6, "a row a bar reaches halfway into takes half as much of it");
+    var edge = FixedProfile.Of([new(t0, 10, 10.10, 10, 10.10, 1), new(t0, 10.04, 10.04, 10.04, 10.04, 70), new(t0, 10.10, 10.10, 10.10, 10.10, 9)], 0.01, 5, false, 0.7, false);
+    Check(Math.Abs(edge.Up[2] - 70.2) < 1e-6 && Math.Abs(edge.Up[4] - 9.2) < 1e-6, "a price on the line between two rows is the upper's, and the high the top one's");
+
+    // Up and down.
+    var ways = FixedProfile.Of([new(t0, 5, 5.01, 5, 5.01, 10), new(t0, 5.01, 5.01, 5, 5, 20), new(t0, 5, 5.01, 5, 5, 40)], 0.01, 24, false, 0.7, false);
+    Check(ways.Up.Sum() == 50 && ways.Down.Sum() == 20, "a bar that closes at or over its open is up volume, else down");
+    var single = FixedProfile.Of([new(t0, 5, 5.01, 5, 5, 40), new(t0, 5, 5.01, 5, 5.01, 10)], 0.01, 24, false, 0.7, true);
+    Check(single.Up.Sum() == 10 && single.Down.Sum() == 40, "on a range of one chart bar, only over it");
+
+    // The value area, worked by hand: one price a row.
+    FixedProfile Rows(params double[] volumes) => FixedProfile.Of(volumes.Select((v, i) => new RangeBar(t0, 10 + (i * 0.01) + 0.002, 10 + (i * 0.01) + 0.002, 10 + (i * 0.01) + 0.002, 10 + (i * 0.01) + 0.002, v)).ToList(), 0.01, 1, true, 0.7, false);
+    var hand = Rows(5, 10, 20, 40, 15, 8, 2);
+    Check(hand.Poc == 3 && hand.ValueHigh == 3 && hand.ValueLow == 2, "of 100, the 40 and the 20 under it; the 15 over it would pass 70");
+    var level = Rows(10, 10, 50, 10, 10, 10);
+    Check((level.ValueLow, level.ValueHigh) == (1, 3), "equal rows: the upper when they're as near, then the nearer");
+    var level2 = Rows(6, 6, 50, 6, 6, 6, 20);
+    Check((level2.ValueLow, level2.ValueHigh) == (1, 4), "each row once it's taken makes way for the next on its side");
+    Check(Rows(95, 5) is { Poc: 0, ValueHigh: 0, ValueLow: 0 }, "a row with more than 70% is the value area by itself");
+    Check(Rows(5, 9, 5, 9).Poc == 1 && Rows(9, 1, 9).Poc == 2, "a tie for the most: the nearest the middle, then the upper");
+    Check(Math.Abs(hand.Middle(3) - 10.035) < 1e-9, "its line is at the middle of its row");
+
+    Check(FixedProfile.Of([], 0.01, 24, false, 0.7, false) == null && FixedProfile.Of([new(t0, 5, 5, 5, 5, 0), new(t0, 0, 0, 0, 0, 9)], 0.01, 24, false, 0.7, false) == null, "nothing traded is no profile");
+    Check(FixedProfile.Of([new(t0, 1, 1000, 1, 5, 10)], 0.0001, 1, true, 0.7, false) == null, "more than 6,000 rows is none");
+
+    // Against the long way, on made-up bars: every bar cut into slivers of price.
+    var rng = new Random(4);
+    var bars = new List<RangeBar>();
+    double price = 4;
+    for (int i = 0; i < 300; i++)
+    {
+        double open = price;
+        price = Math.Max(1, price * (1 + ((rng.NextDouble() - 0.5) * 0.02)));
+        bars.Add(new RangeBar(t0 + (i * Minute), open, Math.Max(open, price) * 1.004, Math.Min(open, price) * 0.996, price, rng.Next(0, 9000)));
+    }
+
+    var profile = FixedProfile.Of(bars, 0.01, 24, false, 0.7, false);
+    var longWay = new double[profile.Rows];
+    foreach (var bar in bars)
+    {
+        for (int k = 0; k < 4000; k++)
+        {
+            double at = bar.Low + ((bar.High - bar.Low) * (k + 0.5) / 4000);
+            longWay[Math.Clamp((int)((at - profile.Bottom(0)) / (profile.TicksPerRow * 0.01)), 0, profile.Rows - 1)] += bar.Volume / 4000;
+        }
+    }
+
+    double total = bars.Sum(b => b.Volume);
+    Check(Math.Abs(Enumerable.Range(0, profile.Rows).Sum(profile.Total) - total) < 1e-6 * total, "every share once");
+    Check(Enumerable.Range(0, profile.Rows).All(i => Math.Abs(profile.Total(i) - longWay[i]) < total * 2e-4) && profile.Poc == Array.IndexOf(longWay, longWay.Max()), "and each row what the long way gives it");
+    Check(profile.Rows is >= 16 and <= 48 && profile.Bars == bars.Count(b => b.Volume > 0), $"in about 24 rows ({profile.Rows})");
+    double held = Enumerable.Range(profile.ValueLow, profile.ValueHigh - profile.ValueLow + 1).Sum(profile.Total);
+    Check(held <= 0.7 * total && held > 0.5 * total, "with the value area just under 70%");
+
+    // Which bars.
+    long Days(double n) => (long)(n * 1440 * Minute);
+    Check(FixedProfile.FirstTimeframe(t0, t0 + (960 * Minute)) == 1 && FixedProfile.FirstTimeframe(t0, t0 + Days(5)) == 1 && FixedProfile.FirstTimeframe(t0, t0 + Days(30)) == 5
+        && FixedProfile.FirstTimeframe(t0, t0 + Days(365)) == 30 && FixedProfile.FirstTimeframe(t0, t0 + Days(9000)) == 1440, "a day or a week is 1-minute bars, a month 5-minute, and so on to days");
+    Check(FixedProfile.Tick(0.99) == 0.0001 && FixedProfile.Tick(1) == 0.01, "a cent's tick from a dollar up, a hundredth of one under");
+
+    string path = Path.Combine(Path.GetTempPath(), $"fixed-ranges-{Guid.NewGuid():N}.json");
+    try
+    {
+        var ranges = new FixedRanges(path, t0);
+        var changed = new List<string>();
+        ranges.Changed += changed.Add;
+        var a = ranges.Add("AAA", t0, t0 + 9000);
+        var b = ranges.Add("AAA", t0, t0 + 5000);
+        ranges.Add("BBB", t0, t0 + 1000);
+        Check(a.StartMs == t0 && a.EndMs == t0 + 9000 && a.Id != b.Id && ranges.Of("AAA").Length == 2 && ranges.Of("ZZZ").Length == 0, "ranges are kept by stock");
+        ranges.Replace("AAA", a with { StartMs = t0 + 2000, ExtendRight = true });
+        ranges.Remove("AAA", b.Id);
+        ranges.Remove("AAA", 999);
+        Check(ranges.Of("AAA") is [{ } moved] && moved == new FixedRange(a.Id, t0 + 2000, t0 + 9000, true) && changed.SequenceEqual(["AAA", "AAA", "BBB", "AAA", "AAA"]), "they move, extend and go, and every chart of the stock hears of it");
+        var again = new FixedRanges(path, t0);
+        Check(again.Of("AAA").SequenceEqual(ranges.Of("AAA")) && again.Of("BBB").Length == 1 && again.Add("AAA", 1, 2).Id > b.Id, "they're there after a restart, and a new one is its own");
+        Check(new FixedRanges(path, t0 + Days(31)).Of("AAA").Length == 0, "until they're over 30 days old");
+        foreach (string damaged in new[] { "{ not json", "null", "{\"AAA\":null}", "" })
+        {
+            File.WriteAllText(path, damaged);
+            Check(new FixedRanges(path, t0).Of("AAA").Length == 0, $"a damaged file ({damaged}) is no ranges, not a failure");
+        }
+    }
+    finally
+    {
+        File.Delete(path);
+    }
 }
 
 // MACD-V and where it crosses its signal line, for the marks on the price chart.

@@ -14,5 +14,7 @@
     <Compile Include="..\ScalpFeedIndicators\MacdV.cs" LinkBase="Indicators" />
     <Compile Include="..\ScalpFeedIndicators\DynamicVpoc.cs" LinkBase="Indicators" />
     <Compile Include="..\ScalpFeedIndicators\VpocSource.cs" LinkBase="Indicators" />
+    <Compile Include="..\ScalpFeedIndicators\FixedProfile.cs" LinkBase="Indicators" />
+    <Compile Include="..\ScalpFeedIndicators\FixedRanges.cs" LinkBase="Indicators" />
   </ItemGroup>
 </Project>
