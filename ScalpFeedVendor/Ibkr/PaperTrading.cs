@@ -41,6 +41,7 @@ internal sealed class PaperTrading : ITraderSink
     private readonly Action<string, bool> holdQuote;
     private IbkrTrader trader;
     private HotkeyBuys buys;
+    private HotkeySells sells;
     private HeldOrders.Hooks held;
 
     /// <param name="halt">IBKR's word on a halt in one of its symbols, and whether its quotes are coming (HeldOrders).</param>
@@ -57,6 +58,7 @@ internal sealed class PaperTrading : ITraderSink
     {
         this.trader = TraderSession.Attach(this);
         this.buys = this.trader == null ? null : new HotkeyBuys(this.trader, OrderHotkey.CancelWait);
+        this.sells = this.trader == null ? null : new HotkeySells(this.trader);
         if (this.trader == null)
             return;
 
@@ -177,6 +179,10 @@ internal sealed class PaperTrading : ITraderSink
     /// <summary>A buy hotkey's order, which works for a while in regular hours, one open at a time in a stock (HotkeyBuys).</summary>
     public HotkeyBuys.Result BuyFromHotkey(string ibkrSymbol, TimeSpan workFor, Func<(IbkrOrderTicket, double, string)> decide) =>
         this.buys?.Press(ibkrSymbol, workFor, decide) ?? new HotkeyBuys.Result(0, null, double.NaN, "IBKR is turned off in ibkr.json", null);
+
+    /// <summary>A sell hotkey's order, sent again once just inside the price IBKR refuses it for (HotkeySells).</summary>
+    public (int Id, IbkrOrderTicket Ticket, double Quote, string Problem) SellFromHotkey(Func<double, (IbkrOrderTicket, double, string)> decide, Action<HotkeySells.Resent> onResent) =>
+        this.sells?.Press(decide, onResent) ?? (0, null, double.NaN, "IBKR is turned off in ibkr.json");
 
     /// <summary>A sell hotkey, before anything else: buy hotkeys pressed before it that are still waiting don't go.</summary>
     public void SellPressed() => this.buys?.SellPressed();
@@ -339,6 +345,10 @@ internal sealed class PaperTrading : ITraderSink
     /// </summary>
     public void OnTraderOrderMessage(int orderId, int code, string text, bool endedOrder)
     {
+        // A sell key's order refused for its price is decided again, and the key says what came of it.
+        if (code == 202 && this.sells?.OnRefused(orderId, text) == true)
+            return;
+
         string reason = CancelReason(text);
         if (code == 202 ? reason.Length > 0 : endedOrder)
             this.push(MessageDealTicket.CreateRefuseDealTicket(Header, $"IBKR order {orderId}: {(code == 202 ? reason : text)} ({code})"));

@@ -2542,6 +2542,242 @@ async Task RunTrader()
     Check(early1.Problem == null && early2.Problem == null && gateway.Count("3") == placed + 2 && Cancels(early1.Id) == 0 && Cancels(early2.Id) == 0, "outside regular hours each is left working, and two presses are two orders, as before");
     var undecided = buys.Press("TESTC", TimeSpan.Zero, () => (null, double.NaN, "TESTC is halted"));
     Check(undecided.Problem == "TESTC is halted" && undecided.Id == 0 && gateway.Count("3") == placed + 2, "why an order isn't decided is why nothing goes");
+
+    // Sell hotkeys: one IBKR refuses for its price is sent again once, just inside what it takes. The numbers are
+    // NXAT's and ALGS's on 2026-11-25.
+    var regular = new DateTime(2026, 11, 25, 15, 0, 0, DateTimeKind.Utc);
+    var premarket = new DateTime(2026, 11, 25, 12, 0, 0, DateTimeKind.Utc);
+    var sells = new HotkeySells(trader);
+    var taken = new ConcurrentDictionary<int, bool>();
+    sink.Told = (oid, code, text) =>
+    {
+        if (code == 202)
+            taken[oid] = sells.OnRefused(oid, text);
+    };
+    string Refusal(string past, string market, string lineBreak = "<br>") =>
+        $"Order Canceled - reason:We cannot accept an order at a limit price at or more aggressive than {past}. Please submit your order using{lineBreak} a limit price that is closer to the current market price of {market}.";
+    void SellStatus(int oid, string status, int filled, int qty) =>
+        gateway.Send("3", Num(oid), status, Num(filled), Num(qty - filled), filled > 0 ? "0.55" : "0", "400", "0", "0.55", "79", "", "0");
+    void Refuse(int oid, int qty, string past, string market, string lineBreak = "<br>")
+    {
+        SellStatus(oid, "PreSubmitted", 0, qty);
+        SellStatus(oid, "PendingCancel", 0, qty);
+        SellStatus(oid, "Cancelled", 0, qty);
+        gateway.Send("4", "2", Num(oid), "202", Refusal(past, market, lineBreak), "");
+    }
+
+    async Task Holding(string symbol, int shares)
+    {
+        gateway.Send("61", "3", "DU000000", "0", symbol, "STK", "", "0", "", "", "NASDAQ", "USD", symbol, symbol, Num(shares), "1");
+        await WaitFor(() => trader.Positions().Where(p => p.Symbol == symbol).Sum(p => p.Quantity) == shares);
+    }
+
+    // The depth as the plugin gives it: the paper position and what's in working sells with the bid.
+    (IbkrOrderTicket Ticket, double Quote, string Problem) DecideSell(OrderHotkey key, string symbol, double bid, double lowest, DateTime? at = null, double limitDown = double.NaN) =>
+        OrderHotkeys.Decide(key, [new HotkeyQuote(symbol, bid, bid + 0.01, false,
+            trader.Positions().Where(p => p.Symbol == symbol).Sum(p => p.Quantity), 0,
+            trader.OpenOrders().Where(o => o.Symbol == symbol && !o.Buy).Sum(o => o.Quantity - o.Filled), limitDown)], at ?? regular, lowest: lowest);
+    var came = new ConcurrentQueue<HotkeySells.Resent>();
+    async Task<HotkeySells.Resent?> Came()
+    {
+        await WaitFor(() => !came.IsEmpty, 2);
+        return came.TryDequeue(out var got) ? got : null;
+    }
+
+    // How many orders have gone out, once this one has.
+    async Task<int> Gone(int oid)
+    {
+        await WaitFor(() => gateway.All("3").Any(f => f[1] == Num(oid)));
+        return gateway.Count("3");
+    }
+
+    var z = OrderHotkey.SellAll;
+    await Holding("NXAT", 4000);
+    double nxatBid = 0.5574;
+    var sold = sells.Press(lowest => DecideSell(z, "NXAT", nxatBid, lowest), came.Enqueue);
+    await WaitFor(() => gateway.LastOf("3")[1] == Num(sold.Id));
+    Check(sold.Problem == null && gateway.LastOf("3") is var firstSell && firstSell[16] == "SELL" && firstSell[17] == "4000" && firstSell[19] == "0.5435" && firstSell[21] == "IOC", "a sell key's order goes as ever");
+    nxatBid = 0.5560;
+    Refuse(sold.Id, 4000, "0.5549104", "0.6152");
+    var again = await Came();
+    await WaitFor(() => gateway.LastOf("3")[1] == Num(again?.Id ?? 0));
+    var resentFields = gateway.LastOf("3");
+    Check(again is { Outcome: HotkeySells.Outcome.Sent, Lowest: 0.5550, Past: 0.5549104, Quote: 0.5560 } && again.Value.Refused == sold.Id && taken[sold.Id]
+        && resentFields[3] == "NXAT" && resentFields[16] == "SELL" && resentFields[17] == "4000" && resentFields[18] == "LMT" && resentFields[19] == "0.555" && resentFields[21] == "IOC",
+        $"refused at or under 0.5549104 with the bid at 0.5560: sent again, 4,000 at 0.555, IOC ({string.Join(" ", resentFields[16..22])})");
+    placed = await Gone(again.Value.Id);
+    Refuse(again.Value.Id, 4000, "0.5551", "0.6153");
+    await WaitFor(() => taken.ContainsKey(again.Value.Id));
+    await Task.Delay(300);
+    Check(!taken[again.Value.Id] && gateway.Count("3") == placed && came.IsEmpty, "refused again: that's shown as before, and nothing more is sent for the press");
+
+    await Holding("ALGS", 1718);
+    var high = sells.Press(lowest => DecideSell(z, "ALGS", 2.60, lowest), came.Enqueue);
+    placed = await Gone(high.Id);
+    Refuse(high.Id, 1718, "2.6653198", "2.9549", " <br>");
+    var above = await Came();
+    Check(above is { Outcome: HotkeySells.Outcome.AboveBid, Lowest: 2.67, Quote: 2.60 } && above.Value.Ticket.LimitPrice == 2.67 && taken[high.Id] && gateway.Count("3") == placed && trader.OpenOrders().All(o => o.Symbol != "ALGS"),
+        "refused at or under 2.6653198 with the bid at 2.60: nothing is sent, as 2.67 can't fill");
+    var algs = sells.Press(lowest => DecideSell(z, "ALGS", 2.60, lowest), came.Enqueue);
+    Refuse(algs.Id, 1718, "2.57972", "2.86");
+    Check(await Came() is { Outcome: HotkeySells.Outcome.Sent, Lowest: 2.58 } algsAgain && algsAgain.Ticket is { LimitPrice: 2.58, Quantity: 1718, Tif: "IOC" }, "refused at or under 2.57972 with the bid at 2.60: sent again at 2.58");
+    SellStatus(trader.OpenOrders().Single(o => o.Symbol == "ALGS").Id, "Cancelled", 0, 1718);
+    await WaitFor(() => trader.OpenOrders().All(o => o.Symbol != "ALGS"));
+
+    var risen = sells.Press(lowest => DecideSell(z, "ALGS", lowest > 0 ? 2.80 : 2.60, lowest), came.Enqueue);
+    Refuse(risen.Id, 1718, "2.57972", "2.86");
+    Check(await Came() is { Outcome: HotkeySells.Outcome.Sent } risenAgain && risenAgain.Ticket.LimitPrice == 2.73, "with the bid up to 2.80 meanwhile, 2.5% under that is inside it, so that's the price");
+    SellStatus(trader.OpenOrders().Single(o => o.Symbol == "ALGS").Id, "Cancelled", 0, 1718);
+    await WaitFor(() => trader.OpenOrders().All(o => o.Symbol != "ALGS"));
+    var banded = sells.Press(lowest => DecideSell(z, "ALGS", 2.60, lowest, limitDown: lowest > 0 ? 2.59 : double.NaN), came.Enqueue);
+    Refuse(banded.Id, 1718, "2.57972", "2.86");
+    Check(await Came() is { Outcome: HotkeySells.Outcome.Sent } bandedAgain && bandedAgain.Ticket.LimitPrice == 2.59, "nor does it go below Limit Down");
+    SellStatus(trader.OpenOrders().Single(o => o.Symbol == "ALGS").Id, "Cancelled", 0, 1718);
+    await WaitFor(() => trader.OpenOrders().All(o => o.Symbol != "ALGS"));
+    var early = sells.Press(lowest => DecideSell(z, "ALGS", 2.60, lowest, premarket), came.Enqueue);
+    Refuse(early.Id, 1718, "2.57972", "2.86");
+    Check(await Came() is { Outcome: HotkeySells.Outcome.Sent } earlyAgain && earlyAgain.Ticket is { LimitPrice: 2.58, Tif: "DAY" }, "before 9:30 it's DAY, as the key is");
+    SellStatus(trader.OpenOrders().Single(o => o.Symbol == "ALGS").Id, "Cancelled", 0, 1718);
+    await WaitFor(() => trader.OpenOrders().All(o => o.Symbol != "ALGS"));
+
+    // What isn't sent again.
+    var plain = sells.Press(lowest => DecideSell(z, "ALGS", 2.60, lowest), came.Enqueue);
+    SellStatus(plain.Id, "Cancelled", 0, 1718);
+    gateway.Send("4", "2", Num(plain.Id), "202", "Order Canceled - reason:", "");
+    gateway.Send("4", "2", Num(plain.Id), "202", Refusal("2.57972", "2.86"), "");
+    await WaitFor(() => trader.Order(plain.Id) is { IsDone: true });
+    var partly = sells.Press(lowest => DecideSell(z, "ALGS", 2.60, lowest), came.Enqueue);
+    SellStatus(partly.Id, "Cancelled", 300, 1718);
+    gateway.Send("4", "2", Num(partly.Id), "202", Refusal("2.57972", "2.86"), "");
+    await WaitFor(() => trader.Order(partly.Id) is { IsDone: true });
+    var other = sells.Press(lowest => DecideSell(z, "ALGS", 2.60, lowest), came.Enqueue);
+    SellStatus(other.Id, "Cancelled", 0, 1718);
+    gateway.Send("4", "2", Num(other.Id), "202", "Order Canceled - reason:Your account has been restricted.", "");
+    await WaitFor(() => trader.Order(other.Id) is { IsDone: true });
+    var (fromEntry, _) = trader.Place(new IbkrOrderTicket("ALGS", false, 100, "LMT", 2.50, double.NaN, "DAY"));
+    Refuse(fromEntry, 100, "2.57972", "2.86");
+    await WaitFor(() => taken.ContainsKey(fromEntry));
+    placed = await Gone(fromEntry);
+    await Task.Delay(200);
+    Check(!taken[plain.Id] && !taken[partly.Id] && !taken[other.Id] && !taken[fromEntry] && came.IsEmpty && gateway.Count("3") == placed,
+        "a plain cancel, a part filled order, another reason, and an order that wasn't a sell key's: nothing is sent for any of them");
+
+    var small = sells.Press(lowest => DecideSell(z, "ALGS", 2.60, lowest), came.Enqueue);
+    SellStatus(small.Id, "Filled", 1718, 1718);
+    await Holding("ALGS", 0);
+    gateway.Send("4", "2", Num(small.Id), "202", Refusal("2.57972", "2.86"), "");
+    await WaitFor(() => taken.ContainsKey(small.Id));
+    Check(!taken[small.Id] && came.IsEmpty, "nor for one that filled");
+
+    await Holding("ALGS", 1718);
+    var beaten = sells.Press(lowest => DecideSell(z, "ALGS", 2.60, lowest), came.Enqueue);
+    SellStatus(beaten.Id, "Cancelled", 0, 1718);
+    await WaitFor(() => trader.Order(beaten.Id).IsDone);
+    var quicker = sells.Press(lowest => DecideSell(z, "ALGS", 2.60, lowest), came.Enqueue);
+    placed = await Gone(quicker.Id);
+    gateway.Send("4", "2", Num(beaten.Id), "202", Refusal("2.57972", "2.86"), "");
+    Check(quicker.Problem == null && await Came() is { Outcome: HotkeySells.Outcome.NothingLeft } && gateway.Count("3") == placed, "another press has all the shares by then: nothing is sent, so they can't be sold twice");
+    SellStatus(quicker.Id, "Filled", 1718, 1718);
+    await Holding("ALGS", 0);
+    await Holding("ALGS", 1718);
+
+    // NXAT is held too, with nothing working in it.
+    Check(trader.Order(again.Value.Id).IsDone && trader.Positions().Any(p => p is { Symbol: "NXAT", Quantity: 4000 }), "another stock is held, free to sell");
+    var moved = sells.Press(lowest => DecideSell(z, "ALGS", 2.60, lowest), came.Enqueue);
+    Refuse(moved.Id, 1718, "0.5", "0.6");
+    await WaitFor(() => taken.ContainsKey(moved.Id));
+    await WaitFor(() => trader.Order(moved.Id) is { IsDone: true });
+    Check(!taken[moved.Id], "a refusal for a price under the order's own isn't about its price");
+    var switched = sells.Press(lowest => lowest > 0 ? DecideSell(z, "NXAT", 2.60, lowest) : DecideSell(z, "ALGS", 2.60, lowest), came.Enqueue);
+    placed = await Gone(switched.Id);
+    Refuse(switched.Id, 1718, "2.57972", "2.86");
+    Check(await Came() is { Outcome: HotkeySells.Outcome.NotSent, Symbol: "ALGS" } toOther && toOther.Problem == "it's not for ALGS any more" && gateway.Count("3") == placed, "the depth on another stock by then, one that's held too: nothing is sent");
+    var halted = sells.Press(lowest => lowest > 0 ? (null, 2.60, "ALGS is halted") : DecideSell(z, "ALGS", 2.60, lowest), came.Enqueue);
+    Refuse(halted.Id, 1718, "2.57972", "2.86");
+    Check(await Came() is { Outcome: HotkeySells.Outcome.NotSent, Problem: "ALGS is halted" }, "and why it can't be decided is why it isn't sent");
+    var thrown = sells.Press(lowest => lowest > 0 ? throw new InvalidOperationException("the depth closed") : DecideSell(z, "ALGS", 2.60, lowest), came.Enqueue);
+    Refuse(thrown.Id, 1718, "2.57972", "2.86");
+    Check(await Came() is { Outcome: HotkeySells.Outcome.NotSent } threw && threw.Problem.Contains("the depth closed"), "a failure deciding it is said, not thrown");
+
+    // Its shares and its size.
+    var order = sells.Press(lowest => DecideSell(z, "ALGS", 2.60, lowest), came.Enqueue);
+    SellStatus(order.Id, "PendingCancel", 0, 1718);
+    gateway.Send("4", "2", Num(order.Id), "202", Refusal("2.57972", "2.86"), "");
+    await Task.Delay(150);
+    Check(came.IsEmpty && trader.OpenOrders().Count(o => o.Symbol == "ALGS") == 1, "with the refused order not done yet, it waits");
+    SellStatus(order.Id, "Cancelled", 0, 1718);
+    Check(await Came() is { Outcome: HotkeySells.Outcome.Sent, Id: > 0 } late1 && late1.Ticket.Quantity == 1718, "and goes once it is");
+    SellStatus(trader.OpenOrders().Single(o => o.Symbol == "ALGS").Id, "Cancelled", 0, 1718);
+    await WaitFor(() => trader.OpenOrders().All(o => o.Symbol != "ALGS"));
+    var never = sells.Press(lowest => DecideSell(z, "ALGS", 2.60, lowest), came.Enqueue);
+    placed = await Gone(never.Id);
+    gateway.Send("4", "2", Num(never.Id), "202", Refusal("2.57972", "2.86"), "");
+    Check(await Came() is { Outcome: HotkeySells.Outcome.NotSent } notDone && notDone.Problem == $"order {never.Id} isn't done yet" && gateway.Count("3") == placed, "never done: nothing is sent");
+    SellStatus(never.Id, "Cancelled", 0, 1718);
+    await WaitFor(() => trader.OpenOrders().All(o => o.Symbol != "ALGS"));
+
+    var grown = sells.Press(lowest => DecideSell(z, "ALGS", 2.60, lowest), came.Enqueue);
+    SellStatus(grown.Id, "Cancelled", 0, 1718);
+    await Holding("ALGS", 5000);
+    gateway.Send("4", "2", Num(grown.Id), "202", Refusal("2.57972", "2.86"), "");
+    Check(await Came() is { Outcome: HotkeySells.Outcome.Sent } capped && capped.Ticket.Quantity == 1718, "shares bought since the press aren't sold with it");
+    SellStatus(trader.OpenOrders().Single(o => o.Symbol == "ALGS").Id, "Cancelled", 0, 1718);
+    await WaitFor(() => trader.OpenOrders().All(o => o.Symbol != "ALGS"));
+    await Holding("ALGS", 1718);
+    var halfSell = sells.Press(lowest => DecideSell(OrderHotkey.SellHalf, "ALGS", 2.60, lowest), came.Enqueue);
+    Refuse(halfSell.Id, 859, "2.57972", "2.86");
+    Check(halfSell.Ticket.Quantity == 859 && await Came() is { Outcome: HotkeySells.Outcome.Sent } halfAgain && halfAgain.Ticket.Quantity == 859, "Shift+X's half is half again");
+    SellStatus(trader.OpenOrders().Single(o => o.Symbol == "ALGS").Id, "Cancelled", 0, 859);
+    await WaitFor(() => trader.OpenOrders().All(o => o.Symbol != "ALGS"));
+
+    var quickSells = new HotkeySells(trader, TimeSpan.FromMilliseconds(150));
+    sink.Told = (oid, code, text) => taken[oid] = quickSells.OnRefused(oid, text);
+    var stale = quickSells.Press(lowest => DecideSell(z, "ALGS", 2.60, lowest), came.Enqueue);
+    placed = await Gone(stale.Id);
+    await Task.Delay(250);
+    Refuse(stale.Id, 1718, "2.57972", "2.86");
+    await WaitFor(() => taken.ContainsKey(stale.Id));
+    await Task.Delay(100);
+    Check(!taken[stale.Id] && came.IsEmpty && gateway.Count("3") == placed, "a refusal that comes too long after the press: nothing is sent");
+
+    // Presses at once, every one refused: never more shares working than are held.
+    sink.Told = (oid, code, text) =>
+    {
+        if (code == 202)
+            taken[oid] = sells.OnRefused(oid, text);
+    };
+    double most = 0;
+    using (var refusing = new CancellationTokenSource())
+    {
+        var seenSells = new HashSet<string>(gateway.All("3").Select(f => f[1]));
+        var refuser = Task.Run(async () =>
+        {
+            while (!refusing.IsCancellationRequested)
+            {
+                most = Math.Max(most, trader.OpenOrders().Where(o => o.Symbol == "ALGS").Sum(o => o.Quantity - o.Filled));
+                foreach (var f in gateway.All("3").Where(f => seenSells.Add(f[1])).ToList())
+                {
+                    if (f[19] != "2.58")
+                        Refuse(int.Parse(f[1]), int.Parse(f[17]), "2.57972", "2.86");
+                }
+
+                await Task.Delay(2);
+            }
+        });
+        var presses = await Task.WhenAll(Enumerable.Range(0, 8).Select(i => Task.Run(async () =>
+        {
+            await Task.Delay(i * 15);
+            return sells.Press(lowest => DecideSell(z, "ALGS", 2.60, lowest), came.Enqueue);
+        })));
+        await Task.Delay(800);
+        refusing.Cancel();
+        await refuser;
+        int wentAgain = came.Count(c => c.Outcome == HotkeySells.Outcome.Sent);
+        Check(most == 1718 && wentAgain == 1 && trader.OpenOrders().Where(o => o.Symbol == "ALGS").Sum(o => o.Quantity) == 1718,
+            $"eight quick presses with refusals coming between them: one order left working, for the 1,718 held and no more (most at once {most:#,0}, sent again {wentAgain}, {presses.Count(p => p.Problem == null)} went)");
+    }
+
+    sink.Told = null;
     await trader.StopAsync();
 
     // A live account: nothing but startApi, and every order refused.
@@ -2887,6 +3123,18 @@ async Task RunHotkey()
     Check(OrderHotkeys.Decide(shiftZ, [held with { Bid = -1 }]).Problem?.Contains("no IBKR bid") == true && OrderHotkeys.Decide(shiftZ, [held with { Halted = true }]).Ticket == null,
         "no bid, or halted: nothing");
     Check(OrderHotkeys.Decide(shiftZ, [held with { Bid = 0.08 }]).Ticket?.LimitPrice == 0.078, "a bid of 8 cents sells at 0.078: a share off never takes a limit to 0, as 10 cents off did");
+
+    // IBKR's refusals, as it words them, and the first price it takes.
+    const string Real = "Order Canceled - reason:We cannot accept an order at a limit price at or more aggressive than 2.6653198. Please submit your order <br>using a limit price that is closer to the current market price of 2.9549.";
+    Check(HotkeySells.Past(Real) == 2.6653198 && HotkeySells.Past("Order Canceled - reason:We cannot accept an order at a limit price at or more aggressive than 0.553828. Please submit your order using<br> a limit price that is closer to the current market price of 0.614.") == 0.553828,
+        "the price IBKR won't go to is read from its refusal");
+    Check(HotkeySells.Past("We cannot accept an order at a limit<br>price at or<br/> more aggressive <BR>than 12.739848. Please") == 12.739848 && HotkeySells.Past("limit price at or more aggressive than 1,234.5. Please") == 1234.5 && HotkeySells.Past("limit price at or more aggressive than 3. Please") == 3,
+        "with line breaks in it, thousands, or a whole number");
+    Check(new[] { null, "", "Order Canceled - reason:", "Order rejected - reason:no shares to short", "at or more aggressive than soon" }.All(t => double.IsNaN(HotkeySells.Past(t))), "and from nothing else");
+    Check(new (double Past, double First)[] { (0.5549104, 0.5550), (0.553828, 0.5539), (2.6653198, 2.67), (2.57972, 2.58), (2.5605074, 2.57), (12.739848, 12.74), (2.66, 2.67), (0.55, 0.5501), (0.99995, 1.0), (1.0, 1.01), (6.1619228, 6.17) }
+        .All(t => HotkeySells.JustInside(t.Past) == t.First), "the first price it takes is the next tick over it: 0.0001 under a dollar, 0.01 from one");
+    Check(OrderHotkeys.Decide(shiftZ, [held], rth, lowest: 0.87).Ticket?.LimitPrice == 0.87 && OrderHotkeys.Decide(shiftZ, [held], rth, lowest: 0.85).Ticket?.LimitPrice == 0.8583 && OrderHotkeys.Decide(shiftZ, [held with { LimitDown = 0.88 }], rth, lowest: 0.87).Ticket?.LimitPrice == 0.88
+        && OrderHotkeys.Decide(alt1, [svre], rth, lowest: 5).Ticket?.LimitPrice == 0.9024, "a sell is at the highest of 2.5% under the bid, Limit Down and IBKR's lowest; a buy isn't touched");
 
     // Never below Limit Down: BNAI's order 535 (2026-11-23), at 6.05 for a bid of 6.20 over a Limit Down of 6.13.
     var bnai = new HotkeyQuote("BNAI", 6.20, 6.21, false, Position: 1000, LimitDown: 6.13);
@@ -5543,7 +5791,14 @@ internal sealed class TraderTestSink : ITraderSink
 
     public void OnTraderFill(IbkrFill fill) => this.Fills.Enqueue(fill);
 
-    public void OnTraderOrderMessage(int orderId, int code, string text, bool endedOrder) => this.Messages.Enqueue((orderId, code, text, endedOrder));
+    /// <summary>Told of each order message as it comes, on IBKR's thread.</summary>
+    public Action<int, int, string> Told;
+
+    public void OnTraderOrderMessage(int orderId, int code, string text, bool endedOrder)
+    {
+        this.Messages.Enqueue((orderId, code, text, endedOrder));
+        this.Told?.Invoke(orderId, code, text);
+    }
 }
 
 internal sealed class PositionPrinter(ConcurrentQueue<IbkrPosition> reported) : ITraderSink

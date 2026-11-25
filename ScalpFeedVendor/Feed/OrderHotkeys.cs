@@ -82,7 +82,8 @@ internal readonly record struct HotkeyQuote(string Symbol, double Bid, double As
 ///
 /// The stock is the one with a market depth open, since your DOM follows the stock you've picked; with none or
 /// several it sends nothing and says why. The price is IBKR's NBBO, at the moment of the key, rounded to IBKR's
-/// tick for the price: a cent from a dollar, a hundredth of a cent below. A sell never goes below Limit Down (SellFloor).
+/// tick for the price: a cent from a dollar, a hundredth of a cent below. A sell never goes below Limit Down (SellFloor),
+/// and one IBKR refuses as too far under its market price is sent again just inside what it takes (HotkeySells).
 /// The order is a limit with the key's time in
 /// force, which IbkrTrader sends with outsideRth for premarket and after hours. The sell keys are IOC (what doesn't
 /// fill at once is cancelled) from 9:30 to 16:00 ET on weekdays, and DAY outside it (your choice, 2026-11-18); the buy
@@ -117,9 +118,10 @@ internal static class OrderHotkeys
 
     /// <summary>
     /// The order for this key on these depth symbols at this moment (now when not given), or why there's none.
-    /// <paramref name="restriction"/> gives IBKR's reason a stock can't be opened (IbkrRestrictions), or null.
+    /// <paramref name="restriction"/> gives IBKR's reason a stock can't be opened (IbkrRestrictions), or null. A sell's
+    /// limit is never under <paramref name="lowest"/>, the lowest price IBKR takes one at (HotkeySells); 0 for any.
     /// </summary>
-    public static (IbkrOrderTicket Ticket, double Quote, string Problem) Decide(OrderHotkey hotkey, IReadOnlyList<HotkeyQuote> depth, DateTime? utc = null, Func<string, string> restriction = null)
+    public static (IbkrOrderTicket Ticket, double Quote, string Problem) Decide(OrderHotkey hotkey, IReadOnlyList<HotkeyQuote> depth, DateTime? utc = null, Func<string, string> restriction = null, double lowest = 0)
     {
         if (depth.Count == 0)
             return (null, double.NaN, "no market depth is open, so there's no stock to send it for");
@@ -158,7 +160,7 @@ internal static class OrderHotkeys
 
         double limit = LimitPrice(quote, hotkey.Buy ? hotkey.Offset : -hotkey.Offset);
         if (!hotkey.Buy)
-            limit = Math.Max(limit, SellFloor(target));
+            limit = Math.Max(Math.Max(limit, SellFloor(target)), lowest);
         if (!(limit > 0))
             return (null, quote, $"{target.Symbol}'s limit would be {limit}");
 

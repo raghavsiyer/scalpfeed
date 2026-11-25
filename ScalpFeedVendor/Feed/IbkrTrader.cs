@@ -314,6 +314,9 @@ internal sealed class IbkrTrader
                $"{(done ? "done in" : "IBKR hadn't confirmed after")} {clock.ElapsedMilliseconds} ms{refused}";
     }
 
+    /// <summary>Waits, up to the timeout, for IBKR to say an order is done. False while it may still fill.</summary>
+    public bool WaitDone(int id, TimeSpan timeout) => this.WaitUntil(() => this.Order(id)?.IsDone != false, timeout);
+
     /// <summary>Whether IBKR's position in the symbol has come in since its last fill as it happened, so it counts that fill.</summary>
     public bool PositionCountsFills(string symbol)
     {

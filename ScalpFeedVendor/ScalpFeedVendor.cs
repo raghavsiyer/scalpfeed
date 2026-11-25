@@ -104,9 +104,9 @@ public sealed class ScalpFeedVendor : MultiVendor
             }
         }
 
-        (IbkrOrderTicket Ticket, double Quote, string Problem) Decide() => depth == null
+        (IbkrOrderTicket Ticket, double Quote, string Problem) Decide(double lowest = 0) => depth == null
             ? (null, double.NaN, "market data isn't connected")
-            : OrderHotkeys.Decide(hotkey, depth, restriction: IbkrRestrictions.Shared.Reason);
+            : OrderHotkeys.Decide(hotkey, depth, restriction: IbkrRestrictions.Shared.Reason, lowest: lowest);
 
         int id = 0;
         IbkrOrderTicket ticket;
@@ -126,6 +126,20 @@ public sealed class ScalpFeedVendor : MultiVendor
             (id, ticket, quote, problem) = (bought.Id, bought.Ticket, bought.Quote, bought.Problem);
             if (bought.Cleared != null)
                 Log.Info($"[hotkey] {hotkey.Keys}: {bought.Cleared}");
+        }
+        else if (!hotkey.Buy && paper != null)
+        {
+            // One IBKR refuses for its price is decided again, a moment later, on the quote and position then.
+            string pressedOn = depth is [var selling] ? selling.Symbol : null;
+            (id, ticket, quote, problem) = paper.SellFromHotkey(
+                lowest =>
+                {
+                    if (!(lowest > 0))
+                        return Decide();
+                    depth = Depth();
+                    return depth is [var now] && now.Symbol == pressedOn ? Decide(lowest) : (null, double.NaN, $"the depth isn't on {pressedOn} any more");
+                },
+                resent => this.OnSellResent(hotkey, resent));
         }
         else
         {
@@ -148,6 +162,41 @@ public sealed class ScalpFeedVendor : MultiVendor
             Log.Info($"[hotkey] {hotkey.Keys}: nothing sent, {problem}");
             FeedAlarm.PlayWarning();
             this.PushMessage(MessageDealTicket.CreateRefuseDealTicket(HotkeyHeader, $"{hotkey.Keys}: nothing sent, {problem}."));
+        }
+    }
+
+    /// <summary>
+    /// What came of a sell key's order IBKR refused for its price. One sent again is in the log only, as any order is; a
+    /// pop-up says when IBKR's lowest price is over the bid, or why else it wasn't, in place of IBKR's own refusal.
+    /// </summary>
+    private void OnSellResent(OrderHotkey hotkey, HotkeySells.Resent came)
+    {
+        try
+        {
+            string refused = $"[hotkey] {hotkey.Keys}: order {came.Refused} refused, IBKR takes none at or under {came.Past}";
+            switch (came.Outcome)
+            {
+                case HotkeySells.Outcome.Sent:
+                    Log.Info($"{refused}; sent again as order {came.Id}, sell {came.Ticket.Quantity:#,0} {came.Symbol} {came.Ticket.Tif} limit {came.Ticket.LimitPrice} (bid {came.Quote})");
+                    return;
+                case HotkeySells.Outcome.NothingLeft:
+                    Log.Info($"{refused}; not sent again, {came.Problem}");
+                    return;
+                case HotkeySells.Outcome.AboveBid:
+                    string over = came.Ticket.LimitPrice > came.Lowest ? "Limit Down" : "IBKR's lowest price for a sell";
+                    Log.Info($"{refused}; not sent again, as {over} is {came.Ticket.LimitPrice}, over the bid of {came.Quote}");
+                    this.PushMessage(MessageDealTicket.CreateRefuseDealTicket(HotkeyHeader, $"{hotkey.Keys}: {came.Symbol} wasn't sent. {over} is {came.Ticket.LimitPrice} right now, and the bid is {came.Quote}."));
+                    return;
+                default:
+                    Log.Info($"{refused}; not sent again, {came.Problem}");
+                    this.PushMessage(MessageDealTicket.CreateRefuseDealTicket(HotkeyHeader, $"{hotkey.Keys}: IBKR takes no sell of {came.Symbol} under {came.Lowest} right now. Nothing was sent again: {came.Problem}."));
+                    return;
+            }
+        }
+        catch (Exception ex)
+        {
+            // It's on a thread of its own, where nothing would catch it.
+            Log.Info($"[hotkey] {hotkey.Keys}: order {came.Refused} refused, {came.Outcome}: {ex.GetType().Name} {ex.Message}");
         }
     }
 
