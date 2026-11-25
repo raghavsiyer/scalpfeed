@@ -136,7 +136,9 @@ public sealed class ScalpFeedVendor : MultiVendor
 
         if (problem == null)
         {
-            string what = $"{(ticket.Buy ? "buy" : "sell")} {ticket.Quantity:#,0} {ticket.Symbol} {ticket.Tif}{(workFor > TimeSpan.Zero ? $" for {workFor.TotalSeconds:0.##} s" : "")} limit {ticket.LimitPrice} ({(ticket.Buy ? "ask" : "bid")} {quote} {(ticket.Buy ? "+" : "-")} {hotkey.Offset:0.##%}, at most {OrderHotkey.MaxOffset:0.00})";
+            double asked = OrderHotkeys.LimitPrice(quote, hotkey.Buy ? hotkey.Offset : -hotkey.Offset);
+            string raised = !ticket.Buy && ticket.LimitPrice > asked ? $", raised from {asked} to Limit Down" : "";
+            string what = $"{(ticket.Buy ? "buy" : "sell")} {ticket.Quantity:#,0} {ticket.Symbol} {ticket.Tif}{(workFor > TimeSpan.Zero ? $" for {workFor.TotalSeconds:0.##} s" : "")} limit {ticket.LimitPrice} ({(ticket.Buy ? "ask" : "bid")} {quote} {(ticket.Buy ? "+" : "-")} {hotkey.Offset:0.##%}, at most {OrderHotkey.MaxOffset:0.00}{raised})";
             // Logged only: a pop-up for every order sent was noise (your request, 2026-11-19). One that sent
             // nothing still pops up, silently since 2026-11-23 (FeedAlarm.Muted).
             Log.Info($"[hotkey] {hotkey.Keys}: order {id}, {what}");

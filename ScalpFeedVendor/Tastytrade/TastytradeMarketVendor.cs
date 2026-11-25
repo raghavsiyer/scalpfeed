@@ -507,12 +507,18 @@ internal sealed class TastytradeMarketVendor : Vendor, IFeedSink
 
     /// <summary>
     /// The symbols with a market depth open, for the order hotkeys (OrderHotkeys), with IBKR's NBBO only: a symbol
-    /// IBKR isn't quoting has no bid or ask here, never tastytrade's, which isn't the NBBO.
+    /// IBKR isn't quoting has no bid or ask here, never tastytrade's, which isn't the NBBO. With the Limit Down its
+    /// depth shows.
     /// </summary>
     public IReadOnlyList<HotkeyQuote> DepthQuotes() =>
         this.statesByStreamer.Values
             .Where(s => s.DepthOn)
-            .Select(s => new HotkeyQuote(IbkrClient.ToIbkrSymbol(s.Streamer), s.IbkrQuotes ? s.IbkrBid : double.NaN, s.IbkrQuotes ? s.IbkrAsk : double.NaN, s.IbkrHalted > 0))
+            .Select(s =>
+            {
+                bool banded = s.Luld.TryGetBands(FeedClock.UtcNowTicks, s.PrevClose, s.IsTier1, out var band);
+                return new HotkeyQuote(IbkrClient.ToIbkrSymbol(s.Streamer), s.IbkrQuotes ? s.IbkrBid : double.NaN, s.IbkrQuotes ? s.IbkrAsk : double.NaN, s.IbkrHalted > 0,
+                    LimitDown: banded ? band.Lower : double.NaN, LimitDownRough: banded && !band.Exact);
+            })
             .ToList();
 
     /// <summary>

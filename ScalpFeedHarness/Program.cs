@@ -2888,6 +2888,21 @@ async Task RunHotkey()
         "no bid, or halted: nothing");
     Check(OrderHotkeys.Decide(shiftZ, [held with { Bid = 0.08 }]).Ticket?.LimitPrice == 0.078, "a bid of 8 cents sells at 0.078: a share off never takes a limit to 0, as 10 cents off did");
 
+    // Never below Limit Down: BNAI's order 535 (2026-11-23), at 6.05 for a bid of 6.20 over a Limit Down of 6.13.
+    var bnai = new HotkeyQuote("BNAI", 6.20, 6.21, false, Position: 1000, LimitDown: 6.13);
+    Check(OrderHotkeys.Decide(shiftZ, [bnai with { LimitDown = double.NaN }], rth).Ticket?.LimitPrice == 6.05, "with no Limit Down, a sell goes the whole 15 cents under the bid");
+    Check(OrderHotkeys.Decide(shiftZ, [bnai], rth).Ticket?.LimitPrice == 6.13 && OrderHotkeys.Decide(shiftX, [bnai], rth).Ticket is { LimitPrice: 6.13, Quantity: 500 }, "with one at 6.13, Shift+Z and Shift+X go to 6.13");
+    Check(OrderHotkeys.Decide(shiftZ, [bnai with { LimitDown = 6.05 }], rth).Ticket?.LimitPrice == 6.05 && OrderHotkeys.Decide(shiftZ, [bnai with { LimitDown = 5.90 }], rth).Ticket?.LimitPrice == 6.05,
+        "one at or under where it goes anyway changes nothing");
+    Check(OrderHotkeys.Decide(shiftZ, [bnai with { Bid = 6.13 }], rth).Ticket?.LimitPrice == 6.13 && OrderHotkeys.Decide(shiftZ, [bnai with { Bid = 6.10 }], rth).Ticket?.LimitPrice == 6.13,
+        "with the bid at Limit Down, or under it, it's at Limit Down");
+    var roughDown = bnai with { LimitDownRough = true };
+    Check(OrderHotkeys.Decide(shiftZ, [roughDown], rth).Ticket?.LimitPrice == 6.13 && OrderHotkeys.Decide(shiftZ, [roughDown with { Bid = 6.10 }], rth).Ticket?.LimitPrice == 6.10,
+        "a rough one counts the same until the bid is under it, which shows it's off, and then the bid does");
+    Check(OrderHotkeys.Decide(shiftZ, [new HotkeyQuote("LOW", 0.2510, 0.2512, false, Position: 100, LimitDown: 0.25)], rth).Ticket?.LimitPrice == 0.25, "under a dollar too");
+    Check(OrderHotkeys.Decide(alt1, [bnai with { LimitDown = 7 }], rth).Ticket?.LimitPrice == 6.36, "a buy has nothing to do with it");
+    Check(OrderHotkeys.Decide(shiftZ, [bnai with { LimitDown = 0 }], rth).Ticket?.LimitPrice == 6.05, "and a Limit Down of 0 is none");
+
     var half = OrderHotkeys.Decide(shiftX, [held], rth);
     Check(OrderHotkeys.Decide(shiftX, [held], Utc(18, 22, 0)).Ticket?.Tif == "DAY", "Shift+X after hours sends DAY too");
     Check(half.Problem == null && half.Ticket == new IbkrOrderTicket("SVRE", false, 750, "LMT", 0.8583, double.NaN, "IOC"),

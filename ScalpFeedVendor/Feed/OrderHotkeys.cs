@@ -71,7 +71,9 @@ internal sealed record OrderHotkey(string Keys, bool Buy, double Shares, double 
 /// A depth symbol as a hotkey order sees it: IBKR's symbol, its NBBO bid and ask, whether it's halted, the paper
 /// account's position in it (negative when short), and the shares still to fill in its working buy and sell orders.
 /// </summary>
-internal readonly record struct HotkeyQuote(string Symbol, double Bid, double Ask, bool Halted, double Position = 0, double WorkingBuys = 0, double WorkingSells = 0);
+/// <param name="LimitDown">The Limit Down its depth shows (LuldBand), or NaN with none.</param>
+/// <param name="LimitDownRough">That one was picked up mid-session, so it can be off by up to 1%.</param>
+internal readonly record struct HotkeyQuote(string Symbol, double Bid, double Ask, bool Halted, double Position = 0, double WorkingBuys = 0, double WorkingSells = 0, double LimitDown = double.NaN, bool LimitDownRough = false);
 
 /// <summary>
 /// Order hotkeys (your requests, 2026-11-18). Quantower Free has no order placing strategies, and its own hotkeys place
@@ -80,7 +82,8 @@ internal readonly record struct HotkeyQuote(string Symbol, double Bid, double As
 ///
 /// The stock is the one with a market depth open, since your DOM follows the stock you've picked; with none or
 /// several it sends nothing and says why. The price is IBKR's NBBO, at the moment of the key, rounded to IBKR's
-/// tick for the price: a cent from a dollar, a hundredth of a cent below. The order is a limit with the key's time in
+/// tick for the price: a cent from a dollar, a hundredth of a cent below. A sell never goes below Limit Down (SellFloor).
+/// The order is a limit with the key's time in
 /// force, which IbkrTrader sends with outsideRth for premarket and after hours. The sell keys are IOC (what doesn't
 /// fill at once is cancelled) from 9:30 to 16:00 ET on weekdays, and DAY outside it (your choice, 2026-11-18); the buy
 /// keys were too, and since 2026-11-24 work for a second in regular hours instead (HotkeyBuys). IBKR
@@ -154,6 +157,8 @@ internal static class OrderHotkeys
             return (null, quote, $"{target.Symbol} has no IBKR {(hotkey.Buy ? "ask" : "bid")}");
 
         double limit = LimitPrice(quote, hotkey.Buy ? hotkey.Offset : -hotkey.Offset);
+        if (!hotkey.Buy)
+            limit = Math.Max(limit, SellFloor(target));
         if (!(limit > 0))
             return (null, quote, $"{target.Symbol}'s limit would be {limit}");
 
@@ -171,6 +176,14 @@ internal static class OrderHotkeys
         double price = quote + (offset < 0 ? -through : through);
         return Math.Round(price, price >= 1.0 ? 2 : 4, MidpointRounding.AwayFromZero);
     }
+
+    /// <summary>
+    /// The lowest a sell key's limit goes, where its 2.5% would take it lower: Limit Down as the depth shows it (your
+    /// request, 2026-11-25), since nothing can trade under it; 0 with none, as before 9:30 and after 16:00 ET. A bid
+    /// already under one that was picked up mid-session shows that one's off, so then it's the bid.
+    /// </summary>
+    public static double SellFloor(HotkeyQuote stock) =>
+        !(stock.LimitDown > 0) ? 0 : stock.LimitDownRough && stock.Bid > 0 ? Math.Min(stock.LimitDown, stock.Bid) : stock.LimitDown;
 
     /// <summary>"Alt+1", "Shift+Z", "Ctrl+Shift+F2" and the like: the modifiers that must be held, and the virtual key.</summary>
     public static bool TryParseKeys(string keys, out uint modifiers, out uint virtualKey)
